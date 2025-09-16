@@ -175,6 +175,43 @@ python ../../scripts/cnp_result_validationplot.py .
 - **PFT Variables**: tlai performance across 16 PFTs
 - **Soil Variables**: cwdc_vr, cwdn_vr, cwdp_vr performance across soil layers
 
+### Step 4.5: Generate Comprehensive Prediction Quality Report
+
+```bash
+python ../../scripts/generate_prediction_quality_report.py
+```
+
+**Prediction Quality Analysis**:
+- **Quality Categorization**: Classifies each prediction as "good", "ok", or "bad" based on statistical thresholds
+- **Comprehensive Metrics**: Uses R², relative RMSE, and relative MAE for evaluation
+- **Variable-Level Analysis**: Provides detailed quality breakdown for each variable
+- **Visualization**: Generates multiple charts including stacked bar charts, pie charts, and scatter plots
+- **HTML Report**: Creates an interactive HTML report for easy viewing
+
+**Quality Classification Criteria**:
+- **Good**: R² ≥ 0.9, Relative RMSE ≤ 0.1, Relative MAE ≤ 0.1
+- **OK**: R² ≥ 0.7, Relative RMSE ≤ 0.25, Relative MAE ≤ 0.25
+- **Bad**: Below OK thresholds
+
+**Output Files**:
+- `analysis/detailed_quality_assessment.csv`: Full dataset with quality categorization
+- `analysis/variable_quality_summary.csv`: Summary statistics for each variable
+- `analysis/quality_summary_report.txt`: Text report with overall statistics
+- `analysis/prediction_quality_report.html`: Interactive HTML report
+- `analysis/prediction_quality_by_variable.png`: Bar chart showing quality distribution
+- `analysis/overall_prediction_quality.png`: Pie chart of overall quality
+- `analysis/r2_vs_rmse.png`: Scatter plot of R² vs Relative RMSE
+
+**Customizable Parameters**:
+```bash
+python ../../scripts/generate_prediction_quality_report.py \
+  --r2-good 0.85 \
+  --rmse-good 0.15 \
+  --output-dir custom_analysis
+```
+
+**Detailed Documentation**: See `docs/README_prediction_quality.md` for comprehensive usage instructions and advanced features.
+
 ### Step 5: Run Inference on Entire Dataset
 
 ```bash

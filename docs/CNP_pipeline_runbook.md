@@ -29,6 +29,26 @@ Generates scatter plots and statistics using individually normalized results.
 python ../../scripts/cnp_result_validationplot.py > cnp_results_validation.log 2>&1 &
 ```
 
+### 4.5) Generate comprehensive prediction quality report
+Creates detailed quality analysis categorizing predictions as "good", "ok", or "bad" based on statistical thresholds.
+
+```bash
+python ../../scripts/generate_prediction_quality_report.py > prediction_quality_report.log 2>&1 &
+```
+
+**Output**: Creates `analysis/` directory with:
+- Quality assessment CSV files
+- Interactive HTML report
+- Visualization charts (bar charts, pie charts, scatter plots)
+- Text summary report
+
+**Quality Classification**:
+- **Good**: R² ≥ 0.9, Relative RMSE ≤ 0.1, Relative MAE ≤ 0.1
+- **OK**: R² ≥ 0.7, Relative RMSE ≤ 0.25, Relative MAE ≤ 0.25
+- **Bad**: Below OK thresholds
+
+**Detailed Documentation**: See `docs/README_prediction_quality.md` for comprehensive usage instructions and advanced features.
+
 ### 5) Run inference on the entire dataset
 Creates a folder `cnp_inference_entire_dataset` with AI predictions for the entire dataset.
 
@@ -55,7 +75,7 @@ python ../../scripts/ai_model_comparison_plot.py  > ai_model_comparison.log 2>&1
 ### 8) Create a new ELM restart file using AI predictions
 
 ```bash
-python ../../scripts/ai_predictions_to_restart.py > ai_predictions_to_restart.py 2>&1 &
+python ../../scripts/ai_predictions_to_restart.py > ai_predictions_to_restart.log 2>&1 &
 ```
 
 Outputs a new restart file derived from
