@@ -139,7 +139,8 @@ def run_inference_all(
     strict_loading: bool = True,
     debug_vars: bool = False,
     loader: str = 'auto',
-    mask_pft_with_gt: bool = False
+    mask_pft_with_gt: bool = False,
+    batch_size: int = 128
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
@@ -219,7 +220,7 @@ def run_inference_all(
         logging.info("Using default configuration - no variable override applied")
     
     # Update data config with provided paths and pattern
-    config.data_config.data_paths = [data_paths]
+    config.data_config.data_paths = data_paths
     config.data_config.file_pattern = file_pattern
     
     # CRITICAL FIX: Use the EXACT same data processing as training
@@ -852,10 +853,20 @@ def run_inference_all(
     # Verify data normalization completed successfully
     logging.info("Data normalization completed successfully")
     
+    num_samples_list = []
     for test_key, model_key in key_mapping.items():
         if test_key in test_data:
             model_inputs[model_key] = test_data[test_key]
             logging.info(f"Model input {model_key}: {model_inputs[model_key].shape}")
+            num_samples_list.append(model_inputs[model_key].shape[0])
+    
+    if len(set(num_samples_list)) > 1:
+        logging.error(f"Number of samples are inconsistent: {num_samples_list}")
+        raise ValueError(f"Number of samples must be consistent. Found: {num_samples_list}")
+    else:
+        num_samples = num_samples_list[0]
+        batch_size  = max(1, min(num_samples, batch_size))
+        logging.info(f"Running batched inference: num_samples={num_samples}, batch_size={batch_size}, total_batches={num_samples // batch_size}")
     
     # CRITICAL DEBUG: Detailed tensor comparison for specific location
     if debug_vars:
@@ -974,59 +985,93 @@ def run_inference_all(
     for module in model.modules():
         if hasattr(module, 'training'):
             module.training = False
-    
+
     # Move inputs to device
-    for k in list(model_inputs.keys()):
-        if isinstance(model_inputs[k], torch.Tensor):
-            model_inputs[k] = model_inputs[k].to(device)
+    # for k in list(model_inputs.keys()):
+    #     if isinstance(model_inputs[k], torch.Tensor):
+    #         model_inputs[k] = model_inputs[k].to(device)
     
+    pred_list = None
     with torch.no_grad():
         # CRITICAL FIX: Use AMP if CUDA is available to match training evaluation
         use_amp = torch.cuda.is_available()
         
-        if use_amp:
-            with torch.amp.autocast('cuda'):
+        start_idx = 0
+        while start_idx < num_samples:
+            end_idx = min(start_idx + batch_size, num_samples)
+            batch_inputs = {k: v[start_idx:end_idx].to(device) for k, v in model_inputs.items() if isinstance(v, torch.Tensor)}
+            if use_amp:
+                with torch.amp.autocast('cuda'):
+                    # Support optional water if present
+                    if 'water' in model_inputs:
+                        batch_pred = model(
+                            batch_inputs.get('time_series'),
+                            batch_inputs.get('static'),
+                            batch_inputs.get('pft_param'),
+                            batch_inputs.get('scalar'),
+                            batch_inputs.get('variables_1d_pft'),
+                            batch_inputs.get('variables_2d_soil'),
+                            batch_inputs.get('water')
+                        )
+                    else:
+                        batch_pred = model(
+                            batch_inputs.get('time_series'),
+                            batch_inputs.get('static'),
+                            batch_inputs.get('pft_param'),
+                            batch_inputs.get('scalar'),
+                            batch_inputs.get('variables_1d_pft'),
+                            batch_inputs.get('variables_2d_soil')
+                        )
+            else:
                 # Support optional water if present
                 if 'water' in model_inputs:
-                    predictions = model(
-                        model_inputs.get('time_series'),
-                        model_inputs.get('static'),
-                        model_inputs.get('pft_param'),
-                        model_inputs.get('scalar'),
-                        model_inputs.get('variables_1d_pft'),
-                        model_inputs.get('variables_2d_soil'),
-                        model_inputs.get('water')
+                    batch_pred = model(
+                        batch_inputs.get('time_series'),
+                        batch_inputs.get('static'),
+                        batch_inputs.get('pft_param'),
+                        batch_inputs.get('scalar'),
+                        batch_inputs.get('variables_1d_pft'),
+                        batch_inputs.get('variables_2d_soil'),
+                        batch_inputs.get('water')
                     )
                 else:
-                    predictions = model(
-                        model_inputs.get('time_series'),
-                        model_inputs.get('static'),
-                        model_inputs.get('pft_param'),
-                        model_inputs.get('scalar'),
-                        model_inputs.get('variables_1d_pft'),
-                        model_inputs.get('variables_2d_soil')
+                    batch_pred = model(
+                        batch_inputs.get('time_series'),
+                        batch_inputs.get('static'),
+                        batch_inputs.get('pft_param'),
+                        batch_inputs.get('scalar'),
+                        batch_inputs.get('variables_1d_pft'),
+                        batch_inputs.get('variables_2d_soil')
                     )
-        else:
-            # Support optional water if present
-            if 'water' in model_inputs:
-                predictions = model(
-                    model_inputs.get('time_series'),
-                    model_inputs.get('static'),
-                    model_inputs.get('pft_param'),
-                    model_inputs.get('scalar'),
-                    model_inputs.get('variables_1d_pft'),
-                    model_inputs.get('variables_2d_soil'),
-                    model_inputs.get('water')
-                )
+            
+            if pred_list is None:
+                if isinstance(batch_pred, dict):
+                    pred_list = {k: [] for k in batch_pred.keys()}
+                else:
+                    # pred_lists = {'output': []}
+                    raise ValueError("Batch predictions are not a dictionary")
+            
+            if isinstance(batch_pred, dict):
+                for _pk, _pv in batch_pred.items():
+                    if isinstance(_pv, torch.Tensor):
+                        pred_list[_pk].append(_pv.detach().cpu())
             else:
-                predictions = model(
-                    model_inputs.get('time_series'),
-                    model_inputs.get('static'),
-                    model_inputs.get('pft_param'),
-                    model_inputs.get('scalar'),
-                    model_inputs.get('variables_1d_pft'),
-                    model_inputs.get('variables_2d_soil')
-                )
+                # pred_lists['output'].append(batch_pred.detach().cpu())
+                raise ValueError("Batch predictions are not a dictionary")
+            
+            logging.info(f"Processed batch {start_idx // batch_size + 1}/{num_samples // batch_size + 1}: [{start_idx}:{end_idx})")
+            start_idx = end_idx
+    
+    if pred_list is None:
+        raise ValueError("No predictions were made")
+    predictions = {}
+    for _k, _lst in pred_list.items():
+        if len(_lst) > 0 and isinstance(_lst[0], torch.Tensor):
+            predictions[_k] = torch.cat(_lst, dim=0)
+        else:
+            # predictions[_k] = _lst[0]
+            raise ValueError(f"Prediction list for {_k} is not a list of tensors")
+    
     
     logging.info("Inference completed successfully")
     
@@ -1442,8 +1487,8 @@ def run_inference_all(
 def main():
     parser = argparse.ArgumentParser(description="Run CNP model inference over entire dataset")
     parser.add_argument("--model", default='./cnp_predictions/model.pth', help="Path to trained model (.pth)")
-    parser.add_argument("--data-paths", default='/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP', help="Data directories containing PKL batches for inference")
-    parser.add_argument("--file-pattern", default='enhanced_*1_training_data_batch_*.pkl', help="Glob pattern for PKL files")
+    parser.add_argument("--data-paths", default=['/projects/standard/zrliu/shared/AI4BGC/13_split_dataset/test_1_degree_excluding_forcing', '/projects/standard/zrliu/shared/AI4BGC/13_split_dataset/test_1_degree_forcing'], help="List of data directories containing PKL batches for inference, because 1 degree grid data is split into 2 directories")
+    parser.add_argument("--file-pattern", default=['enhanced_*1_training_data_batch_*.pkl', 'raw_last20yr_training_data_batch_*.pkl'], help="List of glob patterns for PKL files")
     parser.add_argument("--output-dir", default='cnp_inference_entire_dataset', help="Output directory for results")
     parser.add_argument("--variable-list", help="Path to variable list file (optional, will auto-detect from config)")
     parser.add_argument("--scalers-dir", help="Path to scalers directory (optional, will auto-detect from model directory)")
@@ -1453,6 +1498,7 @@ def main():
     parser.add_argument("--loader", choices=['auto','pandas','individual'], default='auto', help="Data loader to use (default: auto)")
     parser.add_argument("--mask-pft-with-gt", action='store_true', default=False, help="Mask PFT1D predictions by GT non-zero mask when available")
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
+    parser.add_argument("--batch-size", type=int, default=128, help="Batch size for inference (default: 128)")
     args = parser.parse_args()
     
     # Setup logging
@@ -1471,6 +1517,7 @@ def main():
             , debug_vars=args.debug_vars
             , loader=args.loader
             , mask_pft_with_gt=args.mask_pft_with_gt
+            , batch_size=args.batch_size
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         
