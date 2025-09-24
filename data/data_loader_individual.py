@@ -96,21 +96,39 @@ class DataLoaderIndividual:
         """Load data from configured paths and patterns."""
         df_list = []
         logger.info("Loading data from multiple paths...")
-        for path in self.data_config.data_paths:
+        
+        # Handle both single pattern and multiple patterns
+        data_paths = self.data_config.data_paths
+        file_patterns = self.data_config.file_pattern
+        
+        # If file_pattern is a string, convert to list with same length as data_paths
+        if isinstance(file_patterns, str):
+            file_patterns = [file_patterns] * len(data_paths)
+        
+        # Ensure we have the same number of paths and patterns
+        if len(data_paths) != len(file_patterns):
+            raise ValueError(f"Number of data paths ({len(data_paths)}) must match number of file patterns ({len(file_patterns)})")
+        
+        # Process each path with its corresponding pattern
+        for i, (path, pattern) in enumerate(zip(data_paths, file_patterns)):
+            logger.info(f"Processing path {i+1}/{len(data_paths)}: {path} with pattern: {pattern}")
+            
             # Resolve files matching pattern
-            files = list(Path(path).glob(self.data_config.file_pattern))
+            files = list(Path(path).glob(pattern))
             # Deterministic ordering for test runs
             if getattr(self.data_config, 'sort_file_list', True):
                 files = sorted(files, key=lambda p: p.name)
+            
             # Optional cap on number of files
             num_files = len(files)
             logger.info(f"Found {num_files} files in {path}")
             
-            # Apply max_files limit if specified
+            # Apply max_files limit if specified (per path)
             if hasattr(self.data_config, 'max_files') and self.data_config.max_files is not None:
                 files = files[:self.data_config.max_files]
                 logger.info(f"Limited to {len(files)} files due to max_files={self.data_config.max_files}")
             
+            df_single_list = []
             # Load each file
             for file_path in files:
                 try:
@@ -127,19 +145,31 @@ class DataLoaderIndividual:
                             df_chunk = pd.read_parquet(file_path)
                     
                     # Load all files - zeros are valid data in soil science
-                    df_list.append(df_chunk)
+                    df_single_list.append(df_chunk)
                     logger.debug(f"Loaded {len(df_chunk)} samples from {file_path}")
                         
                 except Exception as e:
                     logger.error(f"Failed to load {file_path}: {e}")
                     continue
         
-        if not df_list:
-            raise ValueError("No data files could be loaded")
+            if not df_single_list:
+                raise ValueError("No data files could be loaded")
+            # Combine all dataframes
+            df_list.append(pd.concat(df_single_list, ignore_index=True))
+
         
-        # Combine all dataframes
-        self.df = pd.concat(df_list, ignore_index=True)
-        logger.info(f"Successfully loaded {len(self.df)} samples")
+        self.df = pd.concat(df_list, axis=1)
+        # def drop_duplicate_columns(df):
+        #     keep_cols = []
+        #     for col in df.columns:
+        #         if not any(df[col].equals(df[c]) for c in keep_cols):
+        #             keep_cols.append(col)
+        #     return df[keep_cols]
+
+        # self.df = drop_duplicate_columns(df)
+        self.df = self.df.loc[:, ~self.df.columns.duplicated(keep='first')]
+
+        logger.info(f"Successfully loaded {len(self.df)} samples from {len(data_paths)} paths")
         
         return self.df
     
@@ -162,7 +192,7 @@ class DataLoaderIndividual:
             if col in self.df.columns:
                 # Ensure time series data is properly formatted
                 self.df[col] = self.df[col].apply(
-                    lambda x: np.array(x, dtype=np.float32) if isinstance(x, (list, np.ndarray)) else np.zeros(self.data_config.time_series_length, dtype=np.float32)
+                    lambda x: np.array(x, dtype=np.float32) if isinstance(x, (list, np.ndarray, np.ma.MaskedArray)) else np.zeros(self.data_config.time_series_length, dtype=np.float32)
                 )
         
         # Process list columns

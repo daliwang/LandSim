@@ -462,10 +462,13 @@ def get_cnp_combined_config(
     data_paths = []
     file_patterns = []
     if use_trendy1:
-        data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP")
+        # DING: 1 degree dataset is split into 2 directories
+        data_paths.append("/projects/standard/zrliu/shared/AI4BGC/13_split_dataset/test_1_degree_excluding_forcing")
         file_patterns.append("enhanced_1_training_data_batch_*.pkl")
+        data_paths.append("/projects/standard/zrliu/shared/AI4BGC/13_split_dataset/test_1_degree_forcing")
+        file_patterns.append("raw_last20yr_training_data_batch_*.pkl")
     if use_trendy05:
-        data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
+        data_paths.append("/projects/standard/zrliu/shared/AI4BGC/13_split_dataset/test_05_degree")
         file_patterns.append("1_training_data_batch_*.pkl")
     file_pattern = file_patterns[0] if len(file_patterns) == 1 else file_patterns
 
@@ -475,8 +478,8 @@ def get_cnp_combined_config(
         max_files=max_files,
         train_split=0.8,
         filter_column=None,
-        time_series_length=240,
-        max_time_series_length=240,
+        time_series_length=29200, # DING: 20 years * 365 days * 4 time steps per day = 29200
+        max_time_series_length=29200,
         max_1d_length=16,
         max_2d_rows=2, # Updated: soil2D now has 2 columns instead of 18
         max_2d_cols=15, # Updated: soil2D now has 15 layers instead of 10

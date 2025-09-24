@@ -84,9 +84,25 @@ class DataLoader:
         """Load data from configured paths and patterns."""
         df_list = []
         logger.info("Loading data from multiple paths...")
-        for path in self.data_config.data_paths:
+        
+        # Handle both single pattern and multiple patterns
+        data_paths = self.data_config.data_paths
+        file_patterns = self.data_config.file_pattern
+        
+        # If file_pattern is a string, convert to list with same length as data_paths
+        if isinstance(file_patterns, str):
+            file_patterns = [file_patterns] * len(data_paths)
+        
+        # Ensure we have the same number of paths and patterns
+        if len(data_paths) != len(file_patterns):
+            raise ValueError(f"Number of data paths ({len(data_paths)}) must match number of file patterns ({len(file_patterns)})")
+        
+        # Process each path with its corresponding pattern
+        for i, (path, pattern) in enumerate(zip(data_paths, file_patterns)):
+            logger.info(f"Processing path {i+1}/{len(data_paths)}: {path} with pattern: {pattern}")
+            
             # Resolve files matching pattern
-            files = list(Path(path).glob(self.data_config.file_pattern))
+            files = list(Path(path).glob(pattern))
             # Deterministic ordering for test runs
             if getattr(self.data_config, 'sort_file_list', True):
                 files = sorted(files, key=lambda p: p.name)
