@@ -101,6 +101,7 @@ class DataLoaderIndividual:
         df_list = []
         logger.info("Loading data from multiple paths...")
         for path in self.data_config.data_paths:
+            logger.info("Loading data path: %s", path)
             # Resolve files matching pattern
             files = list(Path(path).glob(self.data_config.file_pattern))
             # Deterministic ordering for test runs
