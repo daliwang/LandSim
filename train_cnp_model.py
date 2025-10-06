@@ -132,7 +132,8 @@ def main():
         help='Output directory for results'
     )
     parser.add_argument(
-        '--epochs',
+        '--epochs', '--epoch',
+        dest='epochs',
         type=int,
         default=150,
         help='Number of training epochs'
@@ -198,6 +199,18 @@ def main():
         help='Path to model config text file (e.g., CNP_model_config.txt) to override encoders/transformer/MLPs'
     )
     parser.add_argument(
+        '--data-paths',
+        type=str,
+        default=None,
+        help='Comma-separated list of directories containing training .pkl batches (overrides variable list)'
+    )
+    parser.add_argument(
+        '--file-pattern',
+        type=str,
+        default=None,
+        help='Glob pattern for training files (e.g., enhanced_1_training_data_batch_*.pkl)'
+    )
+    parser.add_argument(
         '--max-files',
         type=int,
         default=None,
@@ -214,6 +227,11 @@ def main():
         type=float,
         default=None,
         help='Extra loss weight applied to xsmrpool (non-positive pool)'
+    )
+    parser.add_argument(
+        '--config-only',
+        action='store_true',
+        help='Exit after building configuration; do not load data or train (for CI)'
     )
     parser.add_argument(
         '--litter-c-loss-weight',
@@ -287,16 +305,34 @@ def main():
             variable_list_path=args.variable_list,
             model_config_path=args.model_config
         )
+        # Optional overrides via CLI/env to avoid fixed variable list files
+        env_data_paths = os.environ.get('DATA_PATHS') or os.environ.get('CNP_DATA_PATHS')
+        env_file_pattern = os.environ.get('FILE_PATTERN') or os.environ.get('CNP_FILE_PATTERN')
+        final_data_paths = args.data_paths if args.data_paths else env_data_paths
+        final_file_pattern = args.file_pattern if args.file_pattern else env_file_pattern
+        if final_data_paths or final_file_pattern:
+            update_kwargs = {}
+            if final_data_paths:
+                # Support comma-separated paths
+                update_kwargs['data_paths'] = [p.strip() for p in str(final_data_paths).split(',') if p.strip()]
+            if final_file_pattern:
+                update_kwargs['file_pattern'] = str(final_file_pattern).strip()
+            try:
+                config.update_data_config(**update_kwargs)
+                logger.info(f"Applied data overrides: {update_kwargs}")
+            except Exception as e:
+                logger.warning(f"Failed to apply data overrides: {e}")
         if args.variable_list is not None:
             logger.info(f"Using CNP configuration from variable list file: {args.variable_list}")
         else:
             logger.info(f"Using default CNP variable configuration{' with water' if include_water else ' without water'}")
         if args.model_config is not None:
             logger.info(f"Applied model architecture overrides from: {args.model_config}")
-        # Set train/validation split to 50/50
+        # Set train/validation split
         config.update_data_config(train_split=0.8)
-        # Ensure GPU and all files
-        config.update_training_config(device='cuda')
+        # Prefer GPU when available, otherwise CPU
+        device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        config.update_training_config(device=device_str)
         config.update_data_config(max_files=args.max_files)
         # Turn off GPU monitoring and debug logging
         config.update_training_config(log_gpu_memory=False, log_gpu_utilization=False)
@@ -358,6 +394,21 @@ def main():
         else:
             # Keep fixed seeds for fair comparisons
             logger.info("Fixed shuffling (seeded) enabled for fair comparison")
+
+        # If only validating configuration, exit early before heavy work (used in CI)
+        if args.config_only:
+            # Validate 2D output alignment invariant
+            assert config.data_config.y_list_columns_2d == ['Y_' + v for v in config.data_config.x_list_columns_2d], \
+                f"2D columns not aligned!\nX: {config.data_config.x_list_columns_2d}\nY: {config.data_config.y_list_columns_2d}"
+            # Log a brief summary and exit
+            logger.info("Configuration-only mode: built training/model/data configs successfully.")
+            logger.info(f"Data paths: {config.data_config.data_paths}")
+            logger.info(f"File pattern: {config.data_config.file_pattern}")
+            logger.info(f"Epochs: {config.training_config.num_epochs}, Batch size: {config.training_config.batch_size}")
+            return {
+                'status': 'ok',
+                'config_only': True
+            }
 
         # Optional strict determinism (opt-in via CLI)
         if args.strict_determinism:
