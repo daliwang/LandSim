@@ -5,12 +5,12 @@
 
 [ENCODERS]
 # LSTM encoder
-lstm_hidden_size = 128
+lstm_hidden_size = 256
 
 # Surface/static encoder (half used as output size)
-static_fc_size = 98
+static_fc_size = 256
 
-# PFT parameters encoder (FC in the 27M run)
+# PFT parameters encoder (use CNN in this config)
 pft_param_cnn_channels = [32, 64, 128]
 pft_param_cnn_kernel_size = 3
 pft_param_cnn_padding = 1
@@ -25,7 +25,7 @@ water_fc_size = 0
 scalar_fc_size = 64
 
 # 1D PFT encoder
-pft_1d_fc_size = 64
+pft_1d_fc_size = 256
 
 [SOIL2D_CNN]
 # Soil 2D encoder channels
@@ -35,13 +35,13 @@ conv_padding = 1
 
 [TRANSFORMER]
 # Feature fusion transformer
-num_tokens = 2
-token_dim = 512
+num_tokens = 7
+token_dim = 256
 transformer_layers = 8
-transformer_heads = 32
+transformer_heads = 16
 
 # Global dropout probability
-dropout_p = 0.2
+dropout_p = 0.1
 
 [OUTPUTS]
 # Output geometry (do not set scalar/vector/matrix sizes here)
