@@ -415,8 +415,8 @@ class CNPCombinedModel(nn.Module):
         # 1D PFT output head (14 variables x 16 PFTs)
         self.pft_1d_head = nn.Sequential(
             nn.Linear(self.token_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
+            nn.GELU(),  # Allows negative values while providing non-linearity
+            nn.Dropout(0.0),
             nn.Linear(128, self.pft_1d_input_size * self.model_config.vector_length)  # 14 x 16
         )
     
@@ -596,8 +596,38 @@ class CNPCombinedModel(nn.Module):
         scalar_pred = self.scalar_head(fused_features)
         # Apply non-negativity constraint to all outputs (all are pools)
         outputs['scalar'] = torch.relu(scalar_pred)
-        outputs['pft_1d'] = torch.relu(self.pft_1d_head(fused_features))
-        outputs['soil_2d'] = torch.relu(self.matrix_head(fused_features))
+
+        # Process PFT 1D outputs to apply specific constraints per variable
+        pft_1d_raw_output = self.pft_1d_head(fused_features)
+        pft_1d_varnames = self.data_info.get('variables_1d_pft', [])
+        n_vars = len(pft_1d_varnames)
+        n_pfts = getattr(self, 'vector_length', 16) # Use getattr for safety
+
+        if pft_1d_raw_output.dim() == 2 and pft_1d_raw_output.shape[1] == n_vars * n_pfts:
+            pft_1d_reshaped = pft_1d_raw_output.view(-1, n_vars, n_pfts)
+            processed_slices = []
+            
+            for i, var_name in enumerate(pft_1d_varnames):
+                if var_name == 'xsmrpool':
+                    # During training allow free values; enforce non-positivity only in eval
+                    if self.training:
+                        processed_slices.append(pft_1d_reshaped[:, i, :].unsqueeze(1))
+                    else:
+                        processed_slices.append(torch.clamp(pft_1d_reshaped[:, i, :], max=0.0).unsqueeze(1))
+                else:
+                    # Apply ReLU for other variables (non-negative)
+                    processed_slices.append(torch.relu(pft_1d_reshaped[:, i, :]).unsqueeze(1))
+            
+            # Concatenate all processed slices back along the variable dimension
+            pft_1d_pred_final = torch.cat(processed_slices, dim=1)
+            # Reshape back to the original flat output shape
+            outputs['pft_1d'] = pft_1d_pred_final.view(-1, n_vars * n_pfts)
+        else:
+            # Fallback if the shape is not as expected, apply ReLU to all as a general constraint
+            outputs['pft_1d'] = torch.relu(pft_1d_raw_output)
+            
+        # Use Softplus to avoid dead ReLU on small positive targets
+        outputs['soil_2d'] = torch.nn.functional.softplus(self.matrix_head(fused_features))
         return outputs
     
     def get_loss_weights(self) -> Dict[str, float]:

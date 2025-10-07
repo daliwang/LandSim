@@ -167,21 +167,38 @@ class IndividualScalerManager:
         
         normalized_data = np.zeros_like(data)
         
-        for pft_idx, pft_name in enumerate(pft_names):
-            for var_idx, var_name in enumerate(variable_names):
+        for var_idx, var_name in enumerate(variable_names):
+            # Special case: use GROUP StandardScaler across all PFTs for xsmrpool to avoid degenerate per-PFT scaling
+            if 'xsmrpool' in var_name:
+                from sklearn.preprocessing import StandardScaler
+                group_scaler = StandardScaler()
+                all_pfts_flat = data[:, :, var_idx:var_idx+1].reshape(-1, 1)
+                _ = group_scaler.fit(all_pfts_flat)
+                # Apply shared scaler to each PFT and store same scaler under each key
+                for pft_idx, pft_name in enumerate(pft_names):
+                    var_data = data[:, pft_idx, var_idx:var_idx+1]
+                    normalized_data[:, pft_idx, var_idx:var_idx+1] = group_scaler.transform(var_data)
+                    scaler_key = f'pft1d_{pft_name}_{var_name}'
+                    self.scalers[scaler_key] = group_scaler
+                    self.scaler_info[scaler_key] = {
+                        'type': 'standard',
+                        'pft_name': pft_name,
+                        'variable_name': var_name,
+                        'data_type': 'pft1d',
+                        'shape': var_data.shape,
+                        'fitted': True,
+                        'shared_group': True
+                    }
+                logger.info(f"Created shared GROUP StandardScaler for PFT1D variable: {var_name} across all PFTs")
+                continue
+
+            # Default per-PFT individual scaling for other variables
+            for pft_idx, pft_name in enumerate(pft_names):
                 scaler = self._create_scaler()
-                
-                # Extract data for this PFT-variable combination
                 var_data = data[:, pft_idx, var_idx:var_idx+1]
-                
-                # Fit and transform
                 normalized_data[:, pft_idx, var_idx:var_idx+1] = scaler.fit_transform(var_data)
-                
-                # Store scaler with descriptive key
                 scaler_key = f'pft1d_{pft_name}_{var_name}'
                 self.scalers[scaler_key] = scaler
-                
-                # Store metadata
                 self.scaler_info[scaler_key] = {
                     'type': self.normalization_type,
                     'pft_name': pft_name,
@@ -190,7 +207,6 @@ class IndividualScalerManager:
                     'shape': var_data.shape,
                     'fitted': True
                 }
-                
                 logger.info(f"Created individual scaler for PFT1D: {pft_name}_{var_name}")
         
         return normalized_data
@@ -256,8 +272,33 @@ class IndividualScalerManager:
                 scaler = self.scalers[scaler_key]
                 var_data = data[:, pft_idx, var_idx:var_idx+1]
                 
-                # Inverse transform
-                denormalized_data[:, pft_idx, var_idx:var_idx+1] = scaler.inverse_transform(var_data)
+                # Inverse transform with zero-range guard
+                try:
+                    # Handle MinMaxScaler with zero or near-zero range
+                    if hasattr(scaler, 'data_range_'):
+                        # data_range_ can be array; use first element
+                        rng = float(np.max(scaler.data_range_)) if np.ndim(scaler.data_range_) else float(scaler.data_range_)
+                        if rng <= 1e-12:
+                            # Fallback to data_min_ (constant) to avoid producing NaNs/garbage
+                            const_val = float(np.max(scaler.data_min_)) if hasattr(scaler, 'data_min_') else 0.0
+                            out = np.full_like(var_data, const_val, dtype=var_data.dtype)
+                            logger.warning(f"Zero-range MinMax scaler for {scaler_key}; using constant {const_val:.6g}")
+                            denormalized_data[:, pft_idx, var_idx:var_idx+1] = out
+                            continue
+                    # Handle StandardScaler/RobustScaler with near-zero scale
+                    if hasattr(scaler, 'scale_'):
+                        sc = float(np.max(np.abs(scaler.scale_)))
+                        if sc <= 1e-12:
+                            const_val = float(np.max(scaler.mean_)) if hasattr(scaler, 'mean_') else 0.0
+                            out = np.full_like(var_data, const_val, dtype=var_data.dtype)
+                            logger.warning(f"Zero-scale standard/robust scaler for {scaler_key}; using mean {const_val:.6g}")
+                            denormalized_data[:, pft_idx, var_idx:var_idx+1] = out
+                            continue
+                    # Normal path
+                    denormalized_data[:, pft_idx, var_idx:var_idx+1] = scaler.inverse_transform(var_data)
+                except Exception as e:
+                    logger.warning(f"inverse_transform failed for {scaler_key}: {e}; passing through normalized values")
+                    denormalized_data[:, pft_idx, var_idx:var_idx+1] = var_data
         
         return denormalized_data
     
@@ -404,8 +445,29 @@ class IndividualScalerManager:
                 # Reshape for scaler (samples, features)
                 layer_data_reshaped = layer_data.reshape(layer_data.shape[0], -1)
                 
-                # Inverse transform
-                denormalized_layer = scaler.inverse_transform(layer_data_reshaped)
+                # Inverse transform with zero-range guard
+                try:
+                    if hasattr(scaler, 'data_range_'):
+                        rng = float(np.max(scaler.data_range_)) if np.ndim(scaler.data_range_) else float(scaler.data_range_)
+                        if rng <= 1e-12:
+                            const_val = float(np.max(scaler.data_min_)) if hasattr(scaler, 'data_min_') else 0.0
+                            denormalized_layer = np.full_like(layer_data_reshaped, const_val)
+                            logger.warning(f"Zero-range MinMax scaler for {scaler_key}; using constant {const_val:.6g}")
+                        else:
+                            denormalized_layer = scaler.inverse_transform(layer_data_reshaped)
+                    elif hasattr(scaler, 'scale_'):
+                        sc = float(np.max(np.abs(scaler.scale_)))
+                        if sc <= 1e-12:
+                            const_val = float(np.max(scaler.mean_)) if hasattr(scaler, 'mean_') else 0.0
+                            denormalized_layer = np.full_like(layer_data_reshaped, const_val)
+                            logger.warning(f"Zero-scale standard/robust scaler for {scaler_key}; using mean {const_val:.6g}")
+                        else:
+                            denormalized_layer = scaler.inverse_transform(layer_data_reshaped)
+                    else:
+                        denormalized_layer = scaler.inverse_transform(layer_data_reshaped)
+                except Exception as e:
+                    logger.warning(f"inverse_transform failed for {scaler_key}: {e}; passing through normalized values")
+                    denormalized_layer = layer_data_reshaped
                 # Safety: clean NaN/Inf
                 denormalized_layer = np.nan_to_num(denormalized_layer, nan=0.0, posinf=0.0, neginf=0.0)
                 

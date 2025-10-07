@@ -8,7 +8,7 @@ import argparse
 
 def main():
     parser = argparse.ArgumentParser(description='Generate prediction quality report from validation statistics')
-    parser.add_argument('--input', default="cnp_results/run_20250911_080250/validation_stats.csv",
+    parser.add_argument('--input', default="./validation_stats.csv",
                         help='Path to validation statistics CSV file')
     parser.add_argument('--output-dir', default=None,
                         help='Directory to save output files (default: same directory as input + /analysis)')
@@ -27,20 +27,18 @@ def main():
     args = parser.parse_args()
     
     # Set up input and output paths
+    # Resolve relative input against the current working directory
     input_path = Path(args.input)
     if not input_path.is_absolute():
-        # If relative path, make it relative to the script's directory
-        script_dir = Path(__file__).parent.parent
-        input_path = script_dir / args.input
+        input_path = input_path.resolve()
     
     if args.output_dir is None:
         output_dir = input_path.parent / "analysis"
     else:
         output_dir = Path(args.output_dir)
         if not output_dir.is_absolute():
-            # If relative path, make it relative to the script's directory
-            script_dir = Path(__file__).parent.parent
-            output_dir = script_dir / args.output_dir
+            # Resolve relative output against the current working directory
+            output_dir = output_dir.resolve()
     
     output_dir.mkdir(parents=True, exist_ok=True)
     

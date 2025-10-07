@@ -34,6 +34,34 @@ python train_cnp_model.py \
 - Uses production datasets (not included here) and full variable lists.
 - See `python train_cnp_model.py --help` for all options.
 
+### 4) Dynamic model configuration (architecture overrides)
+
+Use `--model-config` to override model architecture dynamically via a simple text file. Two example configs are provided:
+
+- `CNP_model_config_v01.txt`: compact architecture tuned for quick runs
+- `CNP_model_config_27M.txt`: larger architecture approximating 27M parameters
+
+Examples:
+
+```bash
+# Compact config
+python train_cnp_model.py \
+  --variable-list CNP_IO_LiterP.txt \
+  --model-config CNP_model_config_v01.txt \
+  --epochs 5 --batch-size 128 --learning-rate 1e-4
+
+# Larger 27M-like config
+python train_cnp_model.py \
+  --variable-list CNP_IO_list1.txt \
+  --model-config CNP_model_config_27M.txt \
+  --epochs 300 --batch-size 128 --learning-rate 1e-4
+```
+
+Notes:
+- The config parser supports `key = value`, lists (comma-separated or Python lists), and booleans.
+- Unknown keys are ignored safely; only recognized `ModelConfig` fields are applied.
+- For PFT-parameter encoder consistency, prefer `use_cnn_for_pft_param = true` when supplying 3D PFT parameter tensors.
+
 ---
 
 ## 🧠 Training defaults and controls
@@ -54,7 +82,7 @@ Follow this streamlined workflow using a user-defined `CNP_IO` list (see `docs/C
 
 2) Train the AI model:
 ```bash
-python train_cnp_model.py --variable-list CNP_IO_demo.txt --epochs 100 2>&1 &
+python train_cnp_model.py --variable-list CNP_IO_demo.txt --epochs 150 2>&1 &
 ```
 
 3) Navigate to the run directory:
@@ -66,10 +94,19 @@ cd cnp_results/run_YYYYMMDD_HHMMSS
 ```bash
 python ../../scripts/cnp_result_validationplot.py > cnp_results_validation.log 2>&1 &
 ```
+(extra note: use check_pft1d_predictions.py and check_soil2d_predictions.py to find prediction abnormality)
+```bash
+python ../../scripts/check_pft1d_predictions.py > check_pft1d_predictions.log 2>&1 &
+python ../../scripts/check_soil2d_predictions.py > check_soil2d_predictions.log 2>&1 &
+```
 
 5) Run inference on the entire dataset:
 ```bash
 python ../../scripts/run_inference_all.py > run_inference_all.log 2>&1 &
+```
+(extra note:   There are  NaNs in the inference predictions and need to be fixed with fix_pft1d_nans.py)
+```bash
+python ../../scripts/fix_pft1d_nans.py > fix_pft1d_nans.log 2>&1 &
 ```
 
 6) Export AI predictions to NetCDF for plotting/comparison:
@@ -82,7 +119,7 @@ python ../../scripts/ai_predictions_to_netcdf.py  > ai_prediction_to_netcdf.log 
 python ../../scripts/ai_model_comparison_plot.py  > ai_model_comparison.log 2>&1 &
 ```
 
-8) Create a new ELM restart file using AI predictions:
+8) Create a new ELM restart file using AI predictions (from netcdf):
 ```bash
 python ../../scripts/ai_predictions_to_restart.py > ai_prediction_to_restart.log 2>&1 &
 ```

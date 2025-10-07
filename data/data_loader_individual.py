@@ -48,13 +48,17 @@ class DataLoaderIndividual:
         self.scalers = {}
         
         # Initialize individual scaler managers
+        scalar_norm = self.preprocessing_config.scalar_normalization if hasattr(self.preprocessing_config, 'scalar_normalization') else self.preprocessing_config.static_normalization
+        list_1d_norm = self.preprocessing_config.list_1d_normalization
+        list_2d_norm = self.preprocessing_config.list_2d_normalization
+        
         self.individual_scalers = {
-            'scalar': IndividualScalerManager(normalization_type='minmax'),
-            'y_scalar': IndividualScalerManager(normalization_type='minmax'),
-            'pft_1d': IndividualScalerManager(normalization_type='minmax'),
-            'y_pft_1d': IndividualScalerManager(normalization_type='minmax'),
-            'soil_2d': IndividualScalerManager(normalization_type='minmax'),
-            'y_soil_2d': IndividualScalerManager(normalization_type='minmax'),
+            'scalar': IndividualScalerManager(normalization_type=scalar_norm),
+            'y_scalar': IndividualScalerManager(normalization_type=scalar_norm),
+            'pft_1d': IndividualScalerManager(normalization_type=list_1d_norm),
+            'y_pft_1d': IndividualScalerManager(normalization_type=list_1d_norm),
+            'soil_2d': IndividualScalerManager(normalization_type=list_2d_norm),
+            'y_soil_2d': IndividualScalerManager(normalization_type=list_2d_norm),
         }
         
         # Validate configurations
@@ -398,6 +402,17 @@ class DataLoaderIndividual:
             'y_water': y_water_tensor,
             'scalers': self.scalers
         }
+        # Add per-sample PFT mask derived from raw PCT_NAT_PFT_1..16 (1 where >0, else 0)
+        try:
+            pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
+            if all(c in self.df.columns for c in pct_cols):
+                pct = self.df[pct_cols].values.astype(np.float32)
+                mask = (pct > 0.0).astype(np.float32)  # shape [N,16]
+                ret['pft_presence_mask'] = torch.tensor(mask, dtype=self.preprocessing_config.data_type)
+            else:
+                logger.warning("Some PCT_NAT_PFT_1..16 columns are missing; pft_presence_mask not created")
+        except Exception as _e:
+            logger.warning(f"Failed to create pft_presence_mask: {_e}")
         # Optional dump after normalization (group)
         if os.getenv('DUMP_ALL_PFT_SOIL', '0') == '1':
             try:
@@ -498,6 +513,17 @@ class DataLoaderIndividual:
             'y_water': y_water_tensor,
             'scalers': self.scalers
         }
+        # Add per-sample PFT mask derived from raw PCT_NAT_PFT_1..16 (1 where >0, else 0)
+        try:
+            pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
+            if all(c in self.df.columns for c in pct_cols):
+                pct = self.df[pct_cols].values.astype(np.float32)
+                mask = (pct > 0.0).astype(np.float32)  # shape [N,16]
+                ret['pft_presence_mask'] = torch.tensor(mask, dtype=self.preprocessing_config.data_type)
+            else:
+                logger.warning("Some PCT_NAT_PFT_1..16 columns are missing; pft_presence_mask not created")
+        except Exception as _e:
+            logger.warning(f"Failed to create pft_presence_mask: {_e}")
         # Optional dump after normalization (individual)
         if os.getenv('DUMP_ALL_PFT_SOIL', '0') == '1':
             try:
@@ -563,7 +589,7 @@ class DataLoaderIndividual:
         except Exception as e:
             logger.warning(f"[{stage}] Failed dump x_soil_2d: {e}")
 
-    def normalize_data_hybrid(self, use_individual_for: List[str] = None) -> Dict[str, Any]:
+    def normalize_data_hybrid(self, use_individual_for: List[str] = None, group_soil_vars: List[str] = None) -> Dict[str, Any]:
         """
         Normalize data using a hybrid approach - individual normalization for specified types,
         group normalization for others.
@@ -572,6 +598,9 @@ class DataLoaderIndividual:
             use_individual_for: List of data types to use individual normalization for.
                               Options: ['scalar', 'y_scalar', 'pft_1d', 'y_pft_1d', 'soil_2d', 'y_soil_2d']
                               If None, uses group normalization for all.
+            group_soil_vars: List of specific soil variables to use group normalization for,
+                             even if soil_2d is in use_individual_for.
+                             Example: ['sminn_vr', 'smin_no3_vr', 'smin_nh4_vr']
         
         Returns:
             Dictionary containing normalized data and appropriate scalers
@@ -611,15 +640,40 @@ class DataLoaderIndividual:
         else:
             y_pft_1d_data, y_pft_1d_scaler = self._normalize_list_1d(self.data_config.y_list_columns_1d)
 
-        # 2D Soil - Choose normalization method
+        # 2D Soil - Choose normalization method with optional selective group normalization
         if 'soil_2d' in use_individual_for:
-            variables_2d_soil, variables_2d_soil_scaler = self._normalize_list_2d_individual(self.data_config.x_list_columns_2d, transform_only=False)
+            if group_soil_vars:
+                # Apply hybrid approach for soil variables
+                variables_2d_soil, variables_2d_soil_scaler = self._normalize_list_2d_selective(
+                    self.data_config.x_list_columns_2d, 
+                    group_vars=group_soil_vars, 
+                    transform_only=False
+                )
+            else:
+                # Standard individual normalization for all soil variables
+                variables_2d_soil, variables_2d_soil_scaler = self._normalize_list_2d_individual(
+                    self.data_config.x_list_columns_2d, 
+                    transform_only=False
+                )
         else:
             variables_2d_soil, variables_2d_soil_scaler = self._normalize_list_2d(self.data_config.x_list_columns_2d)
 
-        # Y Soil2D - Choose normalization method
+        # Y Soil2D - Choose normalization method with optional selective group normalization
         if 'y_soil_2d' in use_individual_for:
-            y_soil_2d, y_soil_2d_scaler = self._normalize_list_2d_individual(self.data_config.y_list_columns_2d, transform_only=False)
+            if group_soil_vars:
+                # Apply hybrid approach for soil variables
+                y_group_vars = [f'Y_{var}' for var in group_soil_vars]
+                y_soil_2d, y_soil_2d_scaler = self._normalize_list_2d_selective(
+                    self.data_config.y_list_columns_2d, 
+                    group_vars=y_group_vars, 
+                    transform_only=False
+                )
+            else:
+                # Standard individual normalization for all soil variables
+                y_soil_2d, y_soil_2d_scaler = self._normalize_list_2d_individual(
+                    self.data_config.y_list_columns_2d, 
+                    transform_only=False
+                )
         else:
             y_soil_2d, y_soil_2d_scaler = self._normalize_list_2d(self.data_config.y_list_columns_2d)
 
@@ -918,6 +972,114 @@ class DataLoaderIndividual:
             data_normalized = scaler.fit_transform(data_reshaped)
             data_normalized = data_normalized.reshape(n_samples, n_features, n_length)
             return torch.tensor(data_normalized, dtype=self.preprocessing_config.data_type), scaler
+
+    def _normalize_list_2d_selective(self, columns: List[str], group_vars: List[str], transform_only: bool = False) -> Tuple[torch.Tensor, Dict[str, Any]]:
+        """
+        Normalize 2D list columns using a selective approach: group normalization for specified variables,
+        individual normalization for the rest.
+        
+        Args:
+            columns: List of columns to normalize
+            group_vars: List of variable names to use group normalization for
+            transform_only: If True, use existing scalers without fitting (for inference)
+            
+        Returns:
+            Tuple of normalized tensor and dictionary of scalers
+        """
+        logger.info(f"Using selective normalization for 2D list columns. Group normalization for: {group_vars}")
+        
+        # Separate columns into group and individual normalization
+        group_columns = [col for col in columns if col in group_vars]
+        individual_columns = [col for col in columns if col not in group_vars]
+        
+        # Create empty tensor to hold all normalized data
+        sample_size = len(self.df)
+        num_columns = len(columns)
+        tensor_shape = (sample_size, num_columns, 1, 10)  # Always (samples, variables, 1, 10) for soil2D
+        normalized_tensor = torch.zeros(tensor_shape, dtype=torch.float32)
+        
+        # Dictionary to store all scalers
+        all_scalers = {}
+        
+        # Process group normalization columns if any
+        if group_columns:
+            # Get column indices in the original list
+            group_indices = [columns.index(col) for col in group_columns]
+            
+            # Extract data for group columns
+            group_data = []
+            for col in group_columns:
+                if col in self.df.columns:
+                    values = self.df[col].values
+                    standardized_samples = []
+                    
+                    for val in values:
+                        if isinstance(val, (list, np.ndarray)):
+                            val_array = np.array(val)
+                            if val_array.shape[1] == 15:  # Has 15 layers
+                                # Extract first column and top 10 layers immediately
+                                extracted = val_array[0:1, 0:10]  # Shape: (1, 10)
+                                standardized_samples.append(extracted)
+                            else:
+                                # Handle other shapes by padding/truncating
+                                padded = np.zeros((1, 10), dtype=np.float32)
+                                if val_array.ndim == 2:
+                                    h, w = val_array.shape
+                                    # Take first column (or only column if h=1)
+                                    col_data = val_array[0:1, :] if h > 1 else val_array
+                                    # Take first 10 elements (or pad if fewer)
+                                    w_take = min(w, 10)
+                                    padded[0, :w_take] = col_data[0, :w_take]
+                                standardized_samples.append(padded)
+                        else:
+                            # Handle non-array values with zeros
+                            standardized_samples.append(np.zeros((1, 10), dtype=np.float32))
+                    
+                    # Stack all samples for this column
+                    stacked = np.stack(standardized_samples, axis=0)  # Shape: (samples, 1, 10)
+                    group_data.append(stacked)
+            
+            # Combine all group data
+            if group_data:
+                combined_group_data = np.concatenate(group_data, axis=1)  # Shape: (samples, n_group_vars, 10)
+                combined_group_data = combined_group_data.reshape(combined_group_data.shape[0], len(group_columns), 1, 10)
+                
+                # Reshape for normalization
+                original_shape = combined_group_data.shape
+                flattened = combined_group_data.reshape(-1, 1)
+                
+                # Create and fit scaler
+                scaler = MinMaxScaler() if self.preprocessing_config.list_2d_normalization == 'minmax' else StandardScaler()
+                if transform_only and hasattr(self, 'scalers') and 'group_soil_2d' in self.scalers:
+                    normalized_flat = self.scalers['group_soil_2d'].transform(flattened)
+                else:
+                    normalized_flat = scaler.fit_transform(flattened)
+                    all_scalers['group_soil_2d'] = scaler
+                
+                # Reshape back to original shape
+                normalized_group = normalized_flat.reshape(original_shape)
+                
+                # Place in the final tensor
+                for i, idx in enumerate(group_indices):
+                    normalized_tensor[:, idx, :, :] = torch.tensor(normalized_group[:, i, :, :], dtype=torch.float32)
+        
+        # Process individual normalization columns
+        if individual_columns:
+            # Get individual normalization for these columns
+            individual_data, individual_scalers = self._normalize_list_2d_individual(individual_columns, transform_only)
+            
+            # Place in the final tensor
+            for i, col in enumerate(individual_columns):
+                idx = columns.index(col)
+                normalized_tensor[:, idx, :, :] = individual_data[:, i, :, :]
+            
+            # Merge scalers
+            all_scalers.update(individual_scalers)
+        elif not group_columns:
+            # If no individual columns and no group columns, something is wrong
+            logger.warning("No columns to normalize in _normalize_list_2d_selective!")
+        
+        return normalized_tensor, all_scalers
 
     def _normalize_list_2d_individual(self, columns: List[str], transform_only: bool = False) -> Tuple[torch.Tensor, Any]:
         """Normalize 2D list data individually using IndividualScalerManager."""
@@ -1338,6 +1500,15 @@ class DataLoaderIndividual:
         if 'y_water' in normalized_data and normalized_data['y_water'] is not None:
             train_data['y_water'] = normalized_data['y_water'][:train_size]
             test_data['y_water'] = normalized_data['y_water'][train_size:]
+
+        # Split PFT presence mask if present
+        if 'pft_presence_mask' in normalized_data:
+            ppm = normalized_data['pft_presence_mask']
+            try:
+                train_data['pft_presence_mask'] = ppm[:train_size]
+                test_data['pft_presence_mask'] = ppm[train_size:]
+            except Exception:
+                logger.warning("pft_presence_mask present but could not be split; skipping")
         
         logger.info(f"Split completed:")
         logger.info(f"  - Train time_series shape: {train_time_series.shape}")
@@ -1357,6 +1528,9 @@ class DataLoaderIndividual:
             final_keys.append('water')
             final_keys.append('y_water')
 
+        # Optionally include presence mask
+        if 'pft_presence_mask' in train_data:
+            final_keys.append('pft_presence_mask')
         train_data = {k: v for k, v in train_data.items() if k in final_keys}
         test_data = {k: v for k, v in test_data.items() if k in final_keys}
         

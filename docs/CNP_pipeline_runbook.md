@@ -29,6 +29,9 @@ Generates scatter plots and statistics using individually normalized results.
 python ../../scripts/cnp_result_validationplot.py > cnp_results_validation.log 2>&1 &
 ```
 
+(optional)
+For a quick result, (--stats-only) option can be used to the following quality report
+
 ### 4.5) Generate comprehensive prediction quality report
 Creates detailed quality analysis categorizing predictions as "good", "ok", or "bad" based on statistical thresholds.
 

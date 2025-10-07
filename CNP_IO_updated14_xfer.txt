@@ -1,7 +1,7 @@
 TIME SERIES VARIABLES (Climate Forcing) - 6 variables:
 • FLDS, PSRF, FSDS, QBOT, PRECTmms, TBOT 
 
-SURFACE PROPERTIES - 49 variables:
+SURFACE PROPERTIES - 42 variables:
 • Latitude, Longitude, AREA, landfrac, LANDFRAC_PFT, PCT_NATVEG
 
 • OCCLUDED_P, SECONDARY_P, LABILE_P, APATITE_P
@@ -25,7 +25,7 @@ PFT PARAMETERS (Plant Functional Type Characteristics) - 44 variables:
 SCALAR VARIABLES (1D - 4 variables):
 • GPP, NPP, AR, HR
 
-1D PFT VARIABLES (42 variables):
+1D PFT VARIABLES (61 variables):
 
 • deadcrootc, deadcrootc_storage, deadcrootn, deadcrootn_storage, deadcrootp, deadcrootp_storage 
 • deadstemc, deadstemc_storage, deadstemn, deadstemn_storage, deadstemp, deadstemp_storage
@@ -35,6 +35,10 @@ SCALAR VARIABLES (1D - 4 variables):
 
 • livestemc, livestemc_storage, livestemn, livestemn_storage, livestemp, livestemp_storage, 
 • livecrootc, livecrootc_storage, livecrootn, livecrootn_storage, livecrootp, livecrootp_storage
+
+• leafc_xfer, frootc_xfer, livestemc_xfer, deadstemc_xfer, livecrootc_xfer, deadcrootc_xfer
+• gresp_xfer, leafn_xfer, frootn_xfer, livestemn_xfer, deadstemn_xfer, livecrootn_xfer
+• deadcrootn_xfer, leafp_xfer, frootp_xfer, livestemp_xfer, deadstemp_xfer, livecrootp_xfer, deadcrootp_xfer
 
 • cpool, npool, ppool
 

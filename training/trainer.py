@@ -27,6 +27,7 @@ import json
 # from config.training_config import TrainingConfig  # Uncomment if TrainingConfig is defined
 from models.combined_model import CombinedModel, FlexibleCombinedModel
 from models.cnp_combined_model import CNPCombinedModel
+from config.variable_weights import get_pft1d_variable_weights, get_soil2d_variable_weights, get_scalar_variable_weights
 
 # Import GPU monitoring
 from utils.gpu_monitor import GPUMonitor, log_memory_usage
@@ -176,6 +177,10 @@ class ModelTrainer:
         
         # Setup loss function
         self.criterion = nn.MSELoss()
+        # Loss weights from config (defaults)
+        self.scalar_loss_weight = getattr(self.config, 'scalar_loss_weight', 1.0)
+        self.vector_loss_weight = getattr(self.config, 'vector_loss_weight', 1.0)
+        self.matrix_loss_weight = getattr(self.config, 'matrix_loss_weight', 1.0)
         
         # Training state
         self.train_losses = []
@@ -189,8 +194,42 @@ class ModelTrainer:
         # Log initial GPU stats
         if self.config.log_gpu_memory:
             self.gpu_monitor.log_gpu_stats("Initial ")
+            
+        # Initialize variable-specific weights
+        self.use_variable_weights = getattr(self.config, 'use_variable_weights', True)
+        self._initialize_variable_weights()
         
         logger.info(f"Trainer initialized on device: {self.device}")
+    
+    def _initialize_variable_weights(self):
+        """Initialize variable-specific weights for loss calculation."""
+        self.pft1d_var_weights = None
+        self.soil2d_var_weights = None
+        self.scalar_var_weights = None
+        
+        if not self.use_variable_weights:
+            logger.info("Variable-specific weights disabled")
+            return
+            
+        # Get variable names from data_info if available
+        if hasattr(self, 'data_info'):
+            # PFT1D variables
+            if 'variables_1d_pft' in self.data_info:
+                pft1d_vars = self.data_info.get('variables_1d_pft', [])
+                self.pft1d_var_weights = get_pft1d_variable_weights(pft1d_vars)
+                logger.info(f"Initialized PFT1D variable weights: {self.pft1d_var_weights}")
+                
+            # Soil2D variables
+            if 'x_list_columns_2d' in self.data_info:
+                soil2d_vars = [var.replace('Y_', '') for var in self.data_info.get('y_list_columns_2d', [])]                
+                self.soil2d_var_weights = get_soil2d_variable_weights(soil2d_vars)
+                logger.info(f"Initialized Soil2D variable weights: {self.soil2d_var_weights}")
+                
+            # Scalar variables
+            if 'x_list_scalar_columns' in self.data_info:
+                scalar_vars = self.data_info.get('x_list_scalar_columns', [])
+                self.scalar_var_weights = get_scalar_variable_weights(scalar_vars)
+                logger.info(f"Initialized scalar variable weights: {self.scalar_var_weights}")
     
         # Use learnable loss weights if specified in config
         self.use_learnable_loss_weights = getattr(self.config, 'use_learnable_loss_weights', False)
@@ -294,7 +333,8 @@ class ModelTrainer:
                 self.train_data['y_scalar'],
                 self.train_data['y_soil_2d'],
                 self.train_data['water'],
-                self.train_data['y_water']
+                self.train_data['y_water'],
+                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
             )
         else:
             train_dataset = TensorDataset(
@@ -306,7 +346,9 @@ class ModelTrainer:
                 self.train_data['variables_2d_soil'],
                 self.train_data['y_scalar'],
                 self.train_data['y_pft_1d'],
-                self.train_data['y_soil_2d']
+                self.train_data['y_soil_2d'],
+                # Optional mask as final feature; if absent, a placeholder will be injected in-loop
+                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
             )
         
         train_loader = DataLoader(
@@ -326,9 +368,15 @@ class ModelTrainer:
 
         for batch_idx, batch in enumerate(progress_bar):
             if 'water' in self.train_data and 'y_water' in self.train_data:
-                (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
+                if 'pft_presence_mask' in self.train_data:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water, pft_presence_mask) = batch
+                else:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
             else:
-                (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
+                if 'pft_presence_mask' in self.train_data:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
+                else:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
             # --- DEBUG: Print tensor shapes and device before model call ---
             # print(f"[DEBUG] Batch {batch_idx} tensor shapes and device:")
             # print(f"  time_series: {time_series.shape}, device: {time_series.device}")
@@ -356,6 +404,9 @@ class ModelTrainer:
             if 'water' in self.train_data and 'y_water' in self.train_data:
                 water = water.to(self.device, non_blocking=True).contiguous()
                 y_water = y_water.to(self.device, non_blocking=True).contiguous()
+            # Presence mask to device if provided
+            if 'pft_presence_mask' in self.train_data:
+                pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True).contiguous()
 
             # print(f"[DEBUG] variables_1d_pft shape before model: {variables_1d_pft.shape}")
             # if variables_1d_pft.dim() == 2 and variables_1d_pft.shape[1] == 224:
@@ -377,12 +428,125 @@ class ModelTrainer:
                 else:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
 
-            # Compute loss
-            loss = self._compute_loss(outputs['scalar'], y_scalar)
-            # Vector (PFT1D): base MSE
-            vector_pred = outputs['pft_1d']
-            vector_targ = y_pft_1d
-            loss += self._compute_loss(vector_pred.view(vector_pred.size(0), -1), vector_targ.view(vector_targ.size(0), -1))
+            # Optionally apply PFT presence mask to predictions before loss
+            if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.train_data:
+                try:
+                    vec = outputs['pft_1d']
+                    varnames = list(self.model.data_info.get('variables_1d_pft', [])) if hasattr(self.model, 'data_info') else None
+                    n_vars = len(varnames) if varnames is not None and len(varnames) > 0 else self.train_data['y_pft_1d'].size(1)
+                    n_pfts = 16
+                    if vec.dim() == 2 and vec.size(1) == n_vars * n_pfts:
+                        vec = vec.view(vec.size(0), n_vars, n_pfts)
+                    if pft_presence_mask.dim() == 2 and pft_presence_mask.size(1) == n_pfts:
+                        mask = pft_presence_mask.view(pft_presence_mask.size(0), 1, n_pfts)
+                        vec = vec * mask
+                        outputs['pft_1d'] = vec.view(vec.size(0), -1)
+                except Exception:
+                    pass
+
+            # Compute loss with variable-specific weights for scalar variables
+            if self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
+                # Apply variable-specific weights to scalar variables
+                scalar_loss = 0.0
+                scalar_pred = outputs['scalar']
+                
+                # Get variable names
+                scalar_vars = self.data_info.get('x_list_scalar_columns', [])
+                
+                for i, var_name in enumerate(scalar_vars):
+                    if i < scalar_pred.size(1):  # Ensure index is within bounds
+                        var_weight = self.scalar_var_weights.get(var_name, 1.0)
+                        var_loss = self._compute_loss(scalar_pred[:, i:i+1], y_scalar[:, i:i+1])
+                        scalar_loss += var_weight * var_loss
+                        
+                # Normalize by number of variables to maintain scale
+                scalar_loss = scalar_loss / max(1, len(scalar_vars))
+                loss = self.scalar_loss_weight * scalar_loss
+            else:
+                # Use standard loss calculation
+                loss = self.scalar_loss_weight * self._compute_loss(outputs['scalar'], y_scalar)
+
+            # Vector (PFT1D): Apply differential weighting specifically to xsmrpool
+            vector_pred = outputs['pft_1d']  # shape: [batch, n_vars*n_pfts] or [batch, n_vars, n_pfts]
+            vector_targ = y_pft_1d         # expected shape: [batch, n_vars, n_pfts]
+
+            xsmrpool_weight = getattr(self.config, 'xsmrpool_loss_weight', 1.0)
+
+            try:
+                # Determine variable list and reshape predictions if needed
+                varnames = None
+                if hasattr(self.model, 'data_info') and 'variables_1d_pft' in self.model.data_info:
+                    varnames = list(self.model.data_info['variables_1d_pft'])
+                n_vars = len(varnames) if varnames is not None else vector_targ.size(1)
+                n_pfts = vector_targ.size(2)
+
+                if vector_pred.dim() == 2:
+                    # reshape flat predictions to [batch, n_vars, n_pfts]
+                    vector_pred_reshaped = vector_pred.view(vector_pred.size(0), n_vars, n_pfts)
+                else:
+                    vector_pred_reshaped = vector_pred
+
+                # Identify xsmrpool index reliably
+                if varnames is not None and 'xsmrpool' in varnames:
+                    x_idx = varnames.index('xsmrpool')
+                else:
+                    # fallback to conventional index (cpool,npool,ppool,xsmrpool,tlai)
+                    x_idx = 3
+
+                # Split xsmrpool vs others
+                x_pred = vector_pred_reshaped[:, x_idx, :]
+                x_targ = vector_targ[:, x_idx, :]
+                other_pred = torch.cat([vector_pred_reshaped[:, :x_idx, :], vector_pred_reshaped[:, x_idx+1:, :]], dim=1)
+                other_targ = torch.cat([vector_targ[:, :x_idx, :], vector_targ[:, x_idx+1:, :]], dim=1)
+
+                # Apply variable-specific weights for PFT1D variables
+                if self.use_variable_weights and hasattr(self, 'pft1d_var_weights') and self.pft1d_var_weights:
+                    # Get variable names
+                    pft1d_vars = list(self.data_info.get('variables_1d_pft', []))
+                    pft1d_loss = 0.0
+                    
+                    # Process each variable separately (excluding xsmrpool which is handled specially)
+                    for i in range(other_pred.size(1)):
+                        # Map the index back to the original variable name
+                        var_idx = i if i < x_idx else i + 1  # Account for removed xsmrpool
+                        if var_idx < len(pft1d_vars):
+                            var_name = pft1d_vars[var_idx]
+                            var_weight = self.pft1d_var_weights.get(var_name, 1.0)
+                            
+                            # Extract this variable across all PFTs
+                            var_pred = other_pred[:, i:i+1, :].reshape(other_pred.size(0), -1)
+                            var_targ = other_targ[:, i:i+1, :].reshape(other_targ.size(0), -1)
+                            
+                            # Apply weighted loss
+                            var_loss = self._compute_loss(var_pred, var_targ)
+                            pft1d_loss += var_weight * var_loss
+                    
+                    # Add normalized loss
+                    loss += self.vector_loss_weight * pft1d_loss / max(1, other_pred.size(1))
+                else:
+                    # Apply standard loss for other variables
+                    loss += self.vector_loss_weight * self._compute_loss(
+                        other_pred.view(other_pred.size(0), -1),
+                        other_targ.view(other_targ.size(0), -1)
+                    )
+
+                # Weighted MSE for xsmrpool
+                x_pred_flat = x_pred.view(x_pred.size(0), -1)
+                x_targ_flat = x_targ.view(x_targ.size(0), -1)
+                with torch.no_grad():
+                    nz_mask = (x_targ_flat < 0).float()
+                base_w = 1.0
+                extra = max(1.0, xsmrpool_weight) - 1.0
+                weights = base_w + extra * nz_mask
+                se = (x_pred_flat - x_targ_flat) ** 2
+                weighted_mse = (se * weights).mean()
+                loss += self.vector_loss_weight * weighted_mse
+            except Exception:
+                # Fallback: original aggregate loss
+                loss += self.vector_loss_weight * self._compute_loss(
+                    vector_pred.view(vector_pred.size(0), -1),
+                    vector_targ.view(vector_targ.size(0), -1)
+                )
             # Optional sparsity regularization: penalize non-zero predictions where target is zero
             if getattr(self.config, 'pft_zero_sparsity_weight', 0.0) > 0.0:
                 with torch.no_grad():
@@ -395,8 +559,62 @@ class ModelTrainer:
                     loss = loss + self.config.pft_zero_sparsity_weight * sparsity_penalty
                 except Exception:
                     pass
-            # Matrix (Soil2D)
-            loss += self._compute_loss(outputs['soil_2d'].view(y_soil_2d.size(0), -1), y_soil_2d.view(y_soil_2d.size(0), -1))
+            # Matrix (Soil2D) with variable-specific weights
+            if self.use_variable_weights and hasattr(self, 'soil2d_var_weights') and self.soil2d_var_weights:
+                # Apply variable-specific weights to soil2D variables
+                soil2d_loss = 0.0
+                soil2d_pred = outputs['soil_2d']
+                
+                # Get variable names (remove 'Y_' prefix)
+                soil2d_vars = [var.replace('Y_', '') for var in self.data_info.get('y_list_columns_2d', [])]
+                
+                # Reshape predictions and targets for per-variable processing
+                n_vars = len(soil2d_vars)
+                batch_size = soil2d_pred.size(0)
+                
+                # Reshape to [batch, n_vars, ...] if needed
+                if soil2d_pred.dim() == 4:  # [batch, n_vars, rows, cols]
+                    soil2d_pred_reshaped = soil2d_pred
+                    soil2d_targ_reshaped = y_soil_2d
+                else:  # Need to reshape
+                    rows = y_soil_2d.size(2) if y_soil_2d.dim() >= 3 else 1
+                    cols = y_soil_2d.size(3) if y_soil_2d.dim() >= 4 else 1
+                    soil2d_pred_reshaped = soil2d_pred.view(batch_size, n_vars, rows, cols)
+                    soil2d_targ_reshaped = y_soil_2d
+                
+                # Calculate weighted loss for each variable, applying litter overrides if provided
+                litter_c_names = {'litr1c_vr', 'litr2c_vr', 'litr3c_vr'}
+                litter_n_names = {'litr1n_vr', 'litr2n_vr', 'litr3n_vr'}
+                litter_p_names = {'litr1p_vr', 'litr2p_vr', 'litr3p_vr'}
+                litter_c_w = getattr(self.config, 'litter_c_loss_weight', 1.0)
+                litter_n_w = getattr(self.config, 'litter_n_loss_weight', 1.0)
+                litter_p_w = getattr(self.config, 'litter_p_loss_weight', 1.0)
+
+                for i, var_name in enumerate(soil2d_vars):
+                    if i < soil2d_pred_reshaped.size(1):  # Ensure index is within bounds
+                        base_weight = self.soil2d_var_weights.get(var_name, 1.0)
+                        # Apply litter overrides to base weight (multiplicative)
+                        if var_name in litter_c_names:
+                            var_weight = base_weight * litter_c_w
+                        elif var_name in litter_n_names:
+                            var_weight = base_weight * litter_n_w
+                        elif var_name in litter_p_names:
+                            var_weight = base_weight * litter_p_w
+                        else:
+                            var_weight = base_weight
+                        var_pred = soil2d_pred_reshaped[:, i:i+1].reshape(batch_size, -1)
+                        var_targ = soil2d_targ_reshaped[:, i:i+1].reshape(batch_size, -1)
+                        var_loss = self._compute_loss(var_pred, var_targ)
+                        soil2d_loss += var_weight * var_loss
+                
+                # Normalize by number of variables
+                loss += self.matrix_loss_weight * soil2d_loss / max(1, n_vars)
+            else:
+                # Use standard loss calculation
+                loss += self.matrix_loss_weight * self._compute_loss(
+                    outputs['soil_2d'].view(y_soil_2d.size(0), -1),
+                    y_soil_2d.view(y_soil_2d.size(0), -1)
+                )
             if 'water' in self.train_data and 'y_water' in self.train_data and 'water' in outputs:
                 loss += self._compute_loss(outputs['water'], y_water)
 
@@ -490,7 +708,8 @@ class ModelTrainer:
                 self.test_data['y_pft_1d'],
                 self.test_data['y_soil_2d'],
                 self.test_data['water'],
-                self.test_data['y_water']
+                self.test_data['y_water'],
+                *( (self.test_data['pft_presence_mask'],) if 'pft_presence_mask' in self.test_data else () )
             )
         else:
             val_dataset = TensorDataset(
@@ -502,7 +721,8 @@ class ModelTrainer:
                 self.test_data['variables_2d_soil'],
                 self.test_data['y_scalar'],
                 self.test_data['y_pft_1d'],
-                self.test_data['y_soil_2d']
+                self.test_data['y_soil_2d'],
+                *( (self.test_data['pft_presence_mask'],) if 'pft_presence_mask' in self.test_data else () )
         )
         
         val_loader = DataLoader(
@@ -522,9 +742,15 @@ class ModelTrainer:
                 return loss.item() if hasattr(loss, 'item') else loss
             for batch_idx, batch in enumerate(progress_bar):
                 if 'water' in self.test_data and 'y_water' in self.test_data:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
+                    if 'pft_presence_mask' in self.test_data:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water, pft_presence_mask) = batch
+                    else:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
                 else:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
+                    if 'pft_presence_mask' in self.test_data:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
+                    else:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
                 # Move data to device and ensure contiguous
                 time_series = time_series.to(self.device, non_blocking=True).contiguous()
                 static = static.to(self.device, non_blocking=True).contiguous()
@@ -538,6 +764,8 @@ class ModelTrainer:
                 if 'water' in self.test_data and 'y_water' in self.test_data:
                     water = water.to(self.device, non_blocking=True).contiguous()
                     y_water = y_water.to(self.device, non_blocking=True).contiguous()
+                if 'pft_presence_mask' in self.test_data:
+                    pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True).contiguous()
 
                 # print(f"[DEBUG] variables_1d_pft shape before model (val): {variables_1d_pft.shape}")
                 # if variables_1d_pft.dim() == 2 and variables_1d_pft.shape[1] == 224:
@@ -556,6 +784,22 @@ class ModelTrainer:
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, water)
                     else:
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+
+                # Apply mask in validation as well for consistency
+                if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.test_data:
+                    try:
+                        vec = outputs['pft_1d']
+                        varnames = list(self.model.data_info.get('variables_1d_pft', [])) if hasattr(self.model, 'data_info') else None
+                        n_vars = len(varnames) if varnames is not None and len(varnames) > 0 else y_pft_1d.size(1)
+                        n_pfts = 16
+                        if vec.dim() == 2 and vec.size(1) == n_vars * n_pfts:
+                            vec = vec.view(vec.size(0), n_vars, n_pfts)
+                        if pft_presence_mask.dim() == 2 and pft_presence_mask.size(1) == n_pfts:
+                            mask = pft_presence_mask.view(pft_presence_mask.size(0), 1, n_pfts)
+                            vec = vec * mask
+                            outputs['pft_1d'] = vec.view(vec.size(0), -1)
+                    except Exception:
+                        pass
 
                 # Compute loss
                 loss = self._compute_loss(outputs['scalar'], y_scalar)
@@ -858,18 +1102,32 @@ class ModelTrainer:
             }
             return empty_predictions, default_metrics
         
-        # Create evaluation data loader
-        eval_dataset = TensorDataset(
-            self.test_data['time_series'],
-            self.test_data['static'],
-            self.test_data['pft_param'],
-            self.test_data['scalar'],
-            self.test_data['variables_1d_pft'],
-            self.test_data['variables_2d_soil'],
-            self.test_data['y_scalar'],
-            self.test_data['y_pft_1d'],
-            self.test_data['y_soil_2d']
-        )
+        # Create evaluation data loader (optionally include presence mask)
+        if 'pft_presence_mask' in self.test_data:
+            eval_dataset = TensorDataset(
+                self.test_data['time_series'],
+                self.test_data['static'],
+                self.test_data['pft_param'],
+                self.test_data['scalar'],
+                self.test_data['variables_1d_pft'],
+                self.test_data['variables_2d_soil'],
+                self.test_data['y_scalar'],
+                self.test_data['y_pft_1d'],
+                self.test_data['y_soil_2d'],
+                self.test_data['pft_presence_mask']
+            )
+        else:
+            eval_dataset = TensorDataset(
+                self.test_data['time_series'],
+                self.test_data['static'],
+                self.test_data['pft_param'],
+                self.test_data['scalar'],
+                self.test_data['variables_1d_pft'],
+                self.test_data['variables_2d_soil'],
+                self.test_data['y_scalar'],
+                self.test_data['y_pft_1d'],
+                self.test_data['y_soil_2d']
+            )
         eval_loader = DataLoader(
             eval_dataset,
             batch_size=self.config.batch_size,
@@ -889,7 +1147,11 @@ class ModelTrainer:
             'y_soil_2d': []
         }
         with torch.no_grad():
-            for time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d in eval_loader:
+            for batch in eval_loader:
+                if 'pft_presence_mask' in self.test_data:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
+                else:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
                 # Move to device
                 time_series = time_series.to(self.device, non_blocking=True)
                 static = static.to(self.device, non_blocking=True)
@@ -900,12 +1162,30 @@ class ModelTrainer:
                 y_scalar = y_scalar.to(self.device, non_blocking=True)
                 y_pft_1d = y_pft_1d.to(self.device, non_blocking=True)
                 y_soil_2d = y_soil_2d.to(self.device, non_blocking=True)
+                if 'pft_presence_mask' in self.test_data:
+                    pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True)
                 # Forward pass
                 if self.use_amp and self.scaler is not None:
                     with torch.amp.autocast('cuda'):
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
                 else:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+                # Apply presence mask to predictions if enabled
+                if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.test_data:
+                    try:
+                        vec = outputs['pft_1d']
+                        # Determine n_vars and reshape
+                        varnames = list(self.model.data_info.get('variables_1d_pft', [])) if hasattr(self.model, 'data_info') else None
+                        n_vars = len(varnames) if varnames is not None and len(varnames) > 0 else y_pft_1d.size(1)
+                        n_pfts = 16
+                        if vec.dim() == 2 and vec.size(1) == n_vars * n_pfts:
+                            vec = vec.view(vec.size(0), n_vars, n_pfts)
+                        if pft_presence_mask.dim() == 2 and pft_presence_mask.size(1) == n_pfts:
+                            mask = pft_presence_mask.view(pft_presence_mask.size(0), 1, n_pfts)
+                            vec = vec * mask
+                            outputs['pft_1d'] = vec.view(vec.size(0), -1)
+                    except Exception:
+                        pass
                 all_predictions['scalar'].append(outputs['scalar'].cpu())
                 all_predictions['pft_1d'].append(outputs['pft_1d'].cpu())
                 all_predictions['soil_2d'].append(outputs['soil_2d'].cpu())
@@ -915,6 +1195,15 @@ class ModelTrainer:
         # Concatenate all batches
         predictions = {k: torch.cat(v, dim=0) for k, v in all_predictions.items()}
         targets = {k: torch.cat(v, dim=0) for k, v in all_targets.items()}
+        
+        # Debug: Print shapes to identify the issue
+        print(f"[DEBUG] Evaluation - predictions shapes:")
+        for k, v in predictions.items():
+            print(f"  {k}: {v.shape}")
+        print(f"[DEBUG] Evaluation - targets shapes:")
+        for k, v in targets.items():
+            print(f"  {k}: {v.shape}")
+        
         # Calculate metrics
         metrics = self._calculate_metrics(predictions, targets)
         return predictions, metrics
@@ -927,7 +1216,21 @@ class ModelTrainer:
         target_scalar_full = targets['y_scalar'].cpu().numpy()
         # Overall scalar metrics
         mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
-        mse_scalar_all = mean_squared_error(target_scalar_full[mask_all], pred_scalar_full[mask_all])
+        # Ensure arrays have the same shape before flattening
+        if pred_scalar_full.shape != target_scalar_full.shape:
+            print(f"Warning: Shape mismatch - pred: {pred_scalar_full.shape}, target: {target_scalar_full.shape}")
+            # Use the minimum shape to avoid indexing errors
+            min_shape = (min(pred_scalar_full.shape[0], target_scalar_full.shape[0]), 
+                        min(pred_scalar_full.shape[1], target_scalar_full.shape[1]))
+            pred_scalar_full = pred_scalar_full[:min_shape[0], :min_shape[1]]
+            target_scalar_full = target_scalar_full[:min_shape[0], :min_shape[1]]
+            mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
+        
+        # Flatten arrays and mask for overall metrics
+        pred_flat = pred_scalar_full.flatten()
+        target_flat = target_scalar_full.flatten()
+        mask_flat = mask_all.flatten()
+        mse_scalar_all = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
         metrics['scalar_rmse'] = np.sqrt(mse_scalar_all)
         metrics['scalar_mse'] = mse_scalar_all
         # Per-scalar metrics with names
@@ -965,7 +1268,20 @@ class ModelTrainer:
             var_names = [f'pft_1d_var_{i}' for i in range(num_variables)]
         # Overall metrics for pft_1d
         mask = ~np.isnan(pred_pft_1d) & ~np.isnan(target_pft_1d)
-        mse_pft_1d = mean_squared_error(target_pft_1d[mask], pred_pft_1d[mask])
+        # Ensure arrays have the same shape before flattening
+        if pred_pft_1d.shape != target_pft_1d.shape:
+            print(f"Warning: PFT 1D shape mismatch - pred: {pred_pft_1d.shape}, target: {target_pft_1d.shape}")
+            # Use the minimum shape to avoid indexing errors
+            min_shape = tuple(min(pred_pft_1d.shape[i], target_pft_1d.shape[i]) for i in range(len(pred_pft_1d.shape)))
+            pred_pft_1d = pred_pft_1d[:min_shape[0], :min_shape[1], :min_shape[2]]
+            target_pft_1d = target_pft_1d[:min_shape[0], :min_shape[1], :min_shape[2]]
+            mask = ~np.isnan(pred_pft_1d) & ~np.isnan(target_pft_1d)
+        
+        # Flatten arrays and mask for overall metrics
+        pred_flat = pred_pft_1d.flatten()
+        target_flat = target_pft_1d.flatten()
+        mask_flat = mask.flatten()
+        mse_pft_1d = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
         metrics['pft_1d_rmse'] = np.sqrt(mse_pft_1d)
         metrics['pft_1d_mse'] = mse_pft_1d
         # Detailed metrics per variable and PFT
@@ -1004,7 +1320,22 @@ class ModelTrainer:
         pred_soil_2d_flat = pred_soil_2d.reshape(n_samples, -1)
         target_soil_2d_flat = target_soil_2d.reshape(n_samples, -1)
         mask = ~np.isnan(pred_soil_2d_flat) & ~np.isnan(target_soil_2d_flat)
-        mse_soil_2d = mean_squared_error(target_soil_2d_flat[mask], pred_soil_2d_flat[mask])
+        
+        # Ensure arrays have the same shape before flattening
+        if pred_soil_2d_flat.shape != target_soil_2d_flat.shape:
+            print(f"Warning: Soil 2D shape mismatch - pred: {pred_soil_2d_flat.shape}, target: {target_soil_2d_flat.shape}")
+            # Use the minimum shape to avoid indexing errors
+            min_shape = (min(pred_soil_2d_flat.shape[0], target_soil_2d_flat.shape[0]), 
+                        min(pred_soil_2d_flat.shape[1], target_soil_2d_flat.shape[1]))
+            pred_soil_2d_flat = pred_soil_2d_flat[:min_shape[0], :min_shape[1]]
+            target_soil_2d_flat = target_soil_2d_flat[:min_shape[0], :min_shape[1]]
+            mask = ~np.isnan(pred_soil_2d_flat) & ~np.isnan(target_soil_2d_flat)
+        
+        # Flatten arrays and mask for overall metrics
+        pred_flat = pred_soil_2d_flat.flatten()
+        target_flat = target_soil_2d_flat.flatten()
+        mask_flat = mask.flatten()
+        mse_soil_2d = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
         metrics['soil_2d_rmse'] = np.sqrt(mse_soil_2d)
         metrics['soil_2d_mse'] = mse_soil_2d
         # Per-variable per-layer metrics (aggregated across columns)
@@ -1118,7 +1449,14 @@ class ModelTrainer:
 
         # Save scalar predictions with inverse transformation
         predictions_scalar_np = predictions['scalar'].cpu().numpy()
-        scalar_cols = self.data_info['y_list_scalar_columns'][:predictions_scalar_np.shape[1]]
+        
+        # Handle shape mismatch - only use the first scalar output if model outputs more than expected
+        num_expected_scalars = len(self.data_info['y_list_scalar_columns'])
+        if predictions_scalar_np.shape[1] > num_expected_scalars:
+            print(f"Warning: Model outputs {predictions_scalar_np.shape[1]} scalars but only {num_expected_scalars} expected. Using first {num_expected_scalars}.")
+            predictions_scalar_np = predictions_scalar_np[:, :num_expected_scalars]
+        
+        scalar_cols = self.data_info['y_list_scalar_columns']
         
         # Apply inverse transformation to convert from normalized to original units
         try:
@@ -1141,6 +1479,11 @@ class ModelTrainer:
         # Save ground truth scalar with inverse transformation if available
         if 'y_scalar' in self.test_data:
             ground_truth_scalar_np = self.test_data['y_scalar'].cpu().numpy()
+            
+            # Handle shape mismatch - ensure ground truth matches expected scalar count
+            if ground_truth_scalar_np.shape[1] > num_expected_scalars:
+                print(f"Warning: Ground truth has {ground_truth_scalar_np.shape[1]} scalars but only {num_expected_scalars} expected. Using first {num_expected_scalars}.")
+                ground_truth_scalar_np = ground_truth_scalar_np[:, :num_expected_scalars]
             
             # Apply inverse transformation to ground truth as well
             try:
@@ -1192,6 +1535,17 @@ class ModelTrainer:
                         )
                         var_predictions_original = var_predictions_denorm[:, :, 0]
                         logger.info(f"Applied inverse transformation to PFT 1D predictions for {var_name}")
+                        # Debug dump of normalized vs denorm xsmrpool
+                        try:
+                            if var_name.endswith('xsmrpool') and os.getenv('DUMP_XSMRPOOL_DEBUG', '0') == '1':
+                                import numpy as _np
+                                debug_dir = os.path.join(pft_1d_dir, 'debug')
+                                os.makedirs(debug_dir, exist_ok=True)
+                                _np.savetxt(os.path.join(debug_dir, 'xsmrpool_norm.csv'), var_predictions, delimiter=',')
+                                _np.savetxt(os.path.join(debug_dir, 'xsmrpool_denorm.csv'), var_predictions_original, delimiter=',')
+                                logger.info("Dumped xsmrpool normalized and denormalized predictions for debugging")
+                        except Exception as _e:
+                            logger.warning(f"Failed xsmrpool debug dump: {_e}")
                     else:
                         var_predictions_original = var_predictions
                         logger.warning(f"No PFT 1D scaler found for {var_name}, saving normalized values")
@@ -1311,6 +1665,15 @@ class ModelTrainer:
                         per_var_denorm = scaler_mgr.inverse_transform_soil_2d(per_var_tensor, [var_name], num_layers)
                         var_predictions_original = per_var_denorm[:, 0, :, :]
                         logger.info(f"Applied inverse transformation to soil 2D predictions for {var_name}")
+                        # Optional debug: dump a layer vector for minerals and primp
+                        try:
+                            if (var_name in ['Y_sminn_vr','Y_smin_no3_vr','Y_smin_nh4_vr','Y_primp_vr']) and os.getenv('DUMP_SOIL_DEBUG','0')=='1':
+                                import numpy as _np
+                                dbg_dir = os.path.join(soil_2d_dir, 'debug')
+                                os.makedirs(dbg_dir, exist_ok=True)
+                                _np.savetxt(os.path.join(dbg_dir, f'{var_name}_row0_layers.csv'), var_predictions_original[0,0,:], delimiter=',')
+                        except Exception as _e:
+                            logger.warning(f"Failed soil debug dump for {var_name}: {_e}")
                     else:
                         var_predictions_original = var_predictions
                         logger.warning(f"No soil 2D scaler found for {var_name}, saving normalized values")

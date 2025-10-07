@@ -279,7 +279,7 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 'pred_sum': pred_stats['sum']
             })
 
-def analyze_1d(gt_path, pred_path, label, out_dir, results_dir):
+def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True):
     """Legacy function for old single-file 1D format - kept for compatibility"""
     gt = pd.read_csv(gt_path)
     pred = pd.read_csv(pred_path)
@@ -330,7 +330,23 @@ def analyze_1d(gt_path, pred_path, label, out_dir, results_dir):
             print(f"  GT - min: {gt_stats['min']:.6g}, max: {gt_stats['max']:.6g}, sum: {gt_stats['sum']:.6g}")
             print(f"  Pred - min: {pred_stats['min']:.6g}, max: {pred_stats['max']:.6g}, sum: {pred_stats['sum']:.6g}")
             # Plot using column name
-            plot_gt_vs_pred(gt_col, pred_col, f"{label} {col_name} GT vs Pred", os.path.join(out_dir, f"{label}_{col_name}_gt_vs_pred.png"))
+            if plot_scatter:
+                plot_gt_vs_pred(gt_col, pred_col, f"{label} {col_name} GT vs Pred", os.path.join(out_dir, f"{label}_{col_name}_gt_vs_pred.png"))
+            # Collect stats
+            stats_data.append({
+                'type': '1D',
+                'variable': var,
+                'pft': col_name,
+                'rmse': rmse,
+                'mae': mae,
+                'r2': r2,
+                'gt_min': gt_stats['min'],
+                'gt_max': gt_stats['max'],
+                'gt_sum': gt_stats['sum'],
+                'pred_min': pred_stats['min'],
+                'pred_max': pred_stats['max'],
+                'pred_sum': pred_stats['sum']
+            })
 
 def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True):
     """Analyze 2D data using the new directory structure with individual variable files"""
@@ -471,7 +487,7 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
         except Exception as e:
             print(f"  Skipped overall plot for {var_name}: {e}")
 
-def analyze_2d(gt_path, pred_path, label, out_dir, results_dir):
+def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True):
     """Legacy function for old single-file 2D format - kept for compatibility"""
     gt = pd.read_csv(gt_path)
     pred = pd.read_csv(pred_path)
@@ -517,7 +533,23 @@ def analyze_2d(gt_path, pred_path, label, out_dir, results_dir):
             print(f"  GT - min: {gt_stats['min']:.6g}, max: {gt_stats['max']:.6g}, sum: {gt_stats['sum']:.6g}")
             print(f"  Pred - min: {pred_stats['min']:.6g}, max: {pred_stats['max']:.6g}, sum: {pred_stats['sum']:.6g}")
             
-            plot_gt_vs_pred(gt_col, pred_col, f"{label} {var} Layer{j+1} GT vs Pred", os.path.join(out_dir, f"{label}_{var}_Layer{j+1}_gt_vs_pred.png"))
+            if plot_scatter:
+                plot_gt_vs_pred(gt_col, pred_col, f"{label} {var} Layer{j+1} GT vs Pred", os.path.join(out_dir, f"{label}_{var}_Layer{j+1}_gt_vs_pred.png"))
+            # Collect stats
+            stats_data.append({
+                'type': '2D',
+                'variable': var,
+                'layer': j+1,
+                'rmse': rmse,
+                'mae': mae,
+                'r2': r2,
+                'gt_min': gt_stats['min'],
+                'gt_max': gt_stats['max'],
+                'gt_sum': gt_stats['sum'],
+                'pred_min': pred_stats['min'],
+                'pred_max': pred_stats['max'],
+                'pred_sum': pred_stats['sum']
+            })
 
 def plot_train_val_accuracy(loss_csv, out_dir):
     df = pd.read_csv(loss_csv)
@@ -547,9 +579,16 @@ if __name__ == '__main__':
     # NEW: Separate flags for scatter plots and loss plot
     parser.add_argument('--no-scatter', action='store_false', dest='plot_scatter', help='Do not generate scatter plots')
     parser.add_argument('--no-plot-loss', action='store_false', dest='plot_loss', help='Do not plot train/val loss curve')
+    # NEW: Stats-only mode disables all plots but still computes and saves statistics
+    parser.add_argument('--stats-only', action='store_true', help='Only compute and save statistics CSV; do not generate any plots')
     
     parser.set_defaults(plot_scatter=True, plot_loss=True)
     args = parser.parse_args()
+    
+    # If stats-only requested, force-disable all plotting
+    if getattr(args, 'stats_only', False):
+        args.plot_scatter = False
+        args.plot_loss = False
     
     if len(sys.argv) < 2:
         print("Using current directory as results directory")

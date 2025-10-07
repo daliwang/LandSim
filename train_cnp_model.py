@@ -16,7 +16,20 @@ CNP_IO_list1.txt structure with the following architecture:
 - Multi-task perceptrons for separate predictions
 
 Usage:
-    python train_cnp_model.py [--with-water]
+    python train_cnp_model.py [--with-water] [--variable-list CNP_IO_*.txt] [--model-config CNP_model_config_*.txt]
+
+Examples:
+    # Default variables with compact architecture overrides
+    python train_cnp_model.py \
+        --variable-list CNP_IO_LiterP.txt \
+        --model-config CNP_model_config_v01.txt \
+        --epochs 5 --batch-size 128 --learning-rate 1e-4
+
+    # Full variable list with larger 27M-like architecture
+    python train_cnp_model.py \
+        --variable-list CNP_IO_list1.txt \
+        --model-config CNP_model_config_27M.txt \
+        --epochs 300 --batch-size 128 --learning-rate 1e-4
 """
 
 import sys
@@ -121,7 +134,7 @@ def main():
     parser.add_argument(
         '--epochs',
         type=int,
-        default=50,
+        default=150,
         help='Number of training epochs'
     )
     parser.add_argument(
@@ -166,6 +179,12 @@ def main():
         help='Path to variable list file (e.g., CNP_IO_list_default.txt) for dynamic configuration'
     )
     parser.add_argument(
+        '--model-config',
+        type=str,
+        default=None,
+        help='Path to model config text file (e.g., CNP_model_config.txt) to override encoders/transformer/MLPs'
+    )
+    parser.add_argument(
         '--max-files',
         type=int,
         default=None,
@@ -176,6 +195,35 @@ def main():
         choices=['group', 'individual', 'hybrid'],
         default='individual',
         help='Normalization method: group, individual (per-variable, default), or hybrid (selective)'
+    )
+    parser.add_argument(
+        '--xsmrpool-loss-weight',
+        type=float,
+        default=None,
+        help='Extra loss weight applied to xsmrpool (non-positive pool)'
+    )
+    parser.add_argument(
+        '--litter-c-loss-weight',
+        type=float,
+        default=None,
+        help='Extra loss weight multiplier for litter carbon vars (litr1/2/3c_vr)'
+    )
+    parser.add_argument(
+        '--litter-n-loss-weight',
+        type=float,
+        default=None,
+        help='Extra loss weight multiplier for litter nitrogen vars (litr1/2/3n_vr)'
+    )
+    parser.add_argument(
+        '--litter-p-loss-weight',
+        type=float,
+        default=None,
+        help='Extra loss weight multiplier for litter phosphorus vars (litr1/2/3p_vr)'
+    )
+    parser.add_argument(
+        '--mask-absent-pfts',
+        action='store_true',
+        help='Zero predictions where PCT_NAT_PFT_k == 0 and exclude from loss'
     )
     
     args = parser.parse_args()
@@ -208,25 +256,22 @@ def main():
         # include_water = args.with_water
         logger.info(f"Water variables included: {include_water}")
         
-        # Get configuration
+        # Get configuration (support variable list and optional model-config overrides)
+        from config.training_config import get_cnp_combined_config
+        config = get_cnp_combined_config(
+            use_trendy1=args.use_trendy1,
+            use_trendy05=args.use_trendy05,
+            max_files=args.max_files,
+            include_water=include_water,
+            variable_list_path=args.variable_list,
+            model_config_path=args.model_config
+        )
         if args.variable_list is not None:
-            from config.training_config import get_cnp_combined_config
-            config = get_cnp_combined_config(
-                use_trendy1=args.use_trendy1,
-                use_trendy05=args.use_trendy05,
-                max_files=args.max_files,  # You can add a CLI arg for this if needed
-                include_water=include_water,
-                variable_list_path=args.variable_list
-            )
             logger.info(f"Using CNP configuration from variable list file: {args.variable_list}")
         else:
-            from config.training_config import get_cnp_model_config
-            config = get_cnp_model_config(
-                include_water=include_water,
-                use_trendy1=args.use_trendy1,
-                use_trendy05=args.use_trendy05
-            )
-            logger.info(f"Using default CNP configuration{' with water' if include_water else ' without water'}")
+            logger.info(f"Using default CNP variable configuration{' with water' if include_water else ' without water'}")
+        if args.model_config is not None:
+            logger.info(f"Applied model architecture overrides from: {args.model_config}")
         # Set train/validation split to 50/50
         config.update_data_config(train_split=0.8)
         # Ensure GPU and all files
@@ -245,6 +290,32 @@ def main():
             predictions_dir=str(output_dir / "cnp_predictions"),
             use_early_stopping=False
         )
+        if args.mask_absent_pfts:
+            try:
+                config.update_training_config(mask_absent_pfts=True)
+                logger.info("Masking absent PFTs enabled (using PCT_NAT_PFT_1..16)")
+            except Exception as e:
+                logger.warning(f"Failed to enable mask_absent_pfts: {e}")
+        # apply xsmrpool loss weight from CLI if provided
+        if args.xsmrpool_loss_weight is not None:
+            try:
+                config.update_training_config(xsmrpool_loss_weight=float(args.xsmrpool_loss_weight))
+                logger.info(f"Using xsmrpool loss weight: {config.training_config.xsmrpool_loss_weight}")
+            except Exception as e:
+                logger.warning(f"Failed to set xsmrpool loss weight: {e}")
+        # apply litter weights if provided
+        try:
+            if args.litter_c_loss_weight is not None:
+                config.update_training_config(litter_c_loss_weight=float(args.litter_c_loss_weight))
+                logger.info(f"Using litter C loss weight: {config.training_config.litter_c_loss_weight}")
+            if args.litter_n_loss_weight is not None:
+                config.update_training_config(litter_n_loss_weight=float(args.litter_n_loss_weight))
+                logger.info(f"Using litter N loss weight: {config.training_config.litter_n_loss_weight}")
+            if args.litter_p_loss_weight is not None:
+                config.update_training_config(litter_p_loss_weight=float(args.litter_p_loss_weight))
+                logger.info(f"Using litter P loss weight: {config.training_config.litter_p_loss_weight}")
+        except Exception as e:
+            logger.warning(f"Failed to set litter loss weights: {e}")
         logger.info(f"Effective learning rate for this run: {effective_lr}")
 
         # Optional strict determinism (opt-in via CLI)
@@ -356,10 +427,16 @@ def main():
                         logger.info(f"  After Individual Normalization {key}: type={type(value)}")
         else:  # hybrid
             normalized_data = data_loader.normalize_data_hybrid(
-                individual_data_types=['scalar', 'pft_1d'],
-                group_data_types=['soil_2d']
+                use_individual_for=['scalar', 'pft_1d', 'soil_2d', 'y_scalar', 'y_pft_1d', 'y_soil_2d'],
+                group_soil_vars=['sminn_vr', 'smin_no3_vr', 'smin_nh4_vr']
             )
-            logger.info("Applied hybrid normalization: individual for scalar and pft_1d, group for soil_2d")
+            logger.info("Applied hybrid normalization: individual for most variables, group for soil minerals variables")
+
+            # Add xsmrpool-specific loss weighting
+            if 'xsmrpool_loss_weight' not in config.__dict__:
+                config.xsmrpool_loss_weight = 2.0  # Increase weight for xsmrpool
+            if 'soil_mineral_loss_weight' not in config.__dict__:
+                config.soil_mineral_loss_weight = 1.5  # Increase weight for soil minerals
         logger.info("Data normalized successfully.")
         # Log details of normalized data for soil2D variables
         logger.info("Checking normalized data for soil2D variables...")

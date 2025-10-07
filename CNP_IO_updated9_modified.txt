@@ -25,7 +25,7 @@ PFT PARAMETERS (Plant Functional Type Characteristics) - 44 variables:
 SCALAR VARIABLES (1D - 4 variables):
 • GPP, NPP, AR, HR
 
-1D PFT VARIABLES (42 variables):
+1D PFT VARIABLES (39 variables):
 
 • deadcrootc, deadcrootc_storage, deadcrootn, deadcrootn_storage, deadcrootp, deadcrootp_storage 
 • deadstemc, deadstemc_storage, deadstemn, deadstemn_storage, deadstemp, deadstemp_storage
@@ -38,17 +38,15 @@ SCALAR VARIABLES (1D - 4 variables):
 
 • cpool, npool, ppool
 
-• xsmrpool, tlai, totvegc
+• tlai, totvegc
 
-2D VARIABLES (layered - 31 variables):
+2D VARIABLES (layered - 28 variables):
 
 • cwdc_vr, cwdn_vr, cwdp_vr
 
 • litr1c_vr, litr2c_vr, litr3c_vr
 • litr1n_vr, litr2n_vr, litr3n_vr
 • litr1p_vr, litr2p_vr, litr3p_vr
-
-• sminn_vr, smin_no3_vr, smin_nh4_vr
 
 • soil1c_vr, soil1n_vr, soil1p_vr
 • soil2c_vr, soil2n_vr, soil2p_vr

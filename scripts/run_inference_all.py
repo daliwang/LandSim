@@ -45,7 +45,7 @@ except Exception:
     DataLoaderIndividual = None
 
 from data.data_loader_pandas import PandasDataLoader
-from config.training_config import get_cnp_model_config, parse_cnp_io_list
+from config.training_config import get_cnp_model_config, parse_cnp_io_list, get_cnp_combined_config
 
 def _load_training_variables_from_config(model_path: Path) -> dict:
     """Load variable lists from cnp_config.json in the training run directory."""
@@ -134,6 +134,7 @@ def run_inference_all(
     file_pattern: str,
     output_dir: str,
     variable_list: str = None,
+    model_config: str = None,
     scalers_dir: str = None,
     use_training_config: bool = True,
     strict_loading: bool = True,
@@ -178,8 +179,16 @@ def run_inference_all(
         else:
             raise ValueError("--variable-list not provided and could not auto-detect from training config")
     
-    # Get configuration using the same method as train_cnp_model.py
-    config = get_cnp_model_config(include_water=False, use_trendy1=True, use_trendy05=False)
+    # Get configuration using the same method as train_cnp_model.py, with optional overrides
+    config = get_cnp_combined_config(
+        use_trendy1=True,
+        use_trendy05=False,
+        include_water=False,
+        variable_list_path=variable_list,
+        model_config_path=model_config
+    )
+    if model_config is not None and use_training_config:
+        logging.warning("--model-config provided along with --use-training-config; training config will still govern variables and scalers. Model overrides only affect architecture sizing.")
     
     # CRITICAL FIX: Apply the loaded variable configuration to ensure model compatibility
     if variables is not None:
@@ -1447,6 +1456,7 @@ def main():
     parser.add_argument("--output-dir", default='cnp_inference_entire_dataset', help="Output directory for results")
     parser.add_argument("--variable-list", help="Path to variable list file (optional, will auto-detect from config)")
     parser.add_argument("--scalers-dir", help="Path to scalers directory (optional, will auto-detect from model directory)")
+    parser.add_argument("--model-config", help="Path to model config text file to override architecture (use with caution)")
     parser.add_argument("--use-training-config", action='store_true', default=True, help="Use exact training configuration to avoid model size mismatches (default: True)")
     parser.add_argument("--strict-loading", action='store_true', default=True, help="Use strict model loading to catch size mismatches early (default: True)")
     parser.add_argument("--debug-vars", action='store_true', help="Print detailed variable names and sample values during preprocessing/inference")
@@ -1465,6 +1475,7 @@ def main():
             file_pattern=args.file_pattern,
             output_dir=args.output_dir,
             variable_list=args.variable_list,
+            model_config=args.model_config,
             scalers_dir=args.scalers_dir,
             use_training_config=args.use_training_config,
             strict_loading=args.strict_loading

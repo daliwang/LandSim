@@ -1,0 +1,56 @@
+# CNP Model configuration approximating the 27.4M-parameter run (2025-09-20)
+# Mirrors the architecture used in cnp_results/run_20250920_230935.
+# Format: key = value. Lists can be comma-separated or Python lists.
+# Section headers (in brackets) are optional and ignored by the parser.
+
+[ENCODERS]
+# LSTM encoder
+lstm_hidden_size = 256
+
+# Surface/static encoder (half used as output size)
+static_fc_size = 256
+
+# PFT parameters encoder (use CNN in this config)
+pft_param_cnn_channels = [32, 64, 128]
+pft_param_cnn_kernel_size = 3
+pft_param_cnn_padding = 1
+use_cnn_for_pft_param = true
+pft_param_size = 44
+num_pfts = 17
+
+# Water encoder (disabled)
+water_fc_size = 0
+
+# Scalar encoder
+scalar_fc_size = 64
+
+# 1D PFT encoder
+pft_1d_fc_size = 256
+
+[SOIL2D_CNN]
+# Soil 2D encoder channels
+conv_channels = [32, 64, 128, 256]
+conv_kernel_size = 3
+conv_padding = 1
+
+[TRANSFORMER]
+# Feature fusion transformer
+num_tokens = 7
+token_dim = 256
+transformer_layers = 8
+transformer_heads = 16
+
+# Global dropout probability
+dropout_p = 0.1
+
+[OUTPUTS]
+# Output geometry (do not set scalar/vector/matrix sizes here)
+vector_length = 16
+matrix_rows = 1
+matrix_cols = 10
+
+# Usage:
+#   python train_cnp_model.py --model-config CNP_model_config_27M.txt
+#   python scripts/run_inference_all.py --model-config CNP_model_config_27M.txt
+
+
