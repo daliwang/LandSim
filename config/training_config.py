@@ -574,7 +574,7 @@ def get_cnp_combined_config(
         file_patterns.append("enhanced_1_training_data_batch_*.pkl")
     if use_trendy05:
         data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
-        file_patterns.append("1_training_data_batch_*.pkl")
+        file_patterns.append("enhanced_1_training_data_batch_*.pkl")
     file_pattern = file_patterns[0] if len(file_patterns) == 1 else file_patterns
 
     config.update_data_config(

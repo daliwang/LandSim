@@ -162,6 +162,19 @@ def main():
         help='Override global dropout probability in the model (e.g., 0.0 to disable)'
     )
 
+    # Shuffling controls
+    parser.add_argument(
+        '--random-shuffle',
+        action='store_true',
+        help='Enable random shuffling for dataset rows and DataLoader (default: fixed seed shuffling)'
+    )
+    parser.add_argument(
+        '--shuffle-seed',
+        type=int,
+        default=None,
+        help='Optional seed to use when --random-shuffle is enabled (default: no fixed seed)'
+    )
+
     parser.add_argument(
         '--use-trendy1',
         action='store_true',
@@ -317,6 +330,26 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to set litter loss weights: {e}")
         logger.info(f"Effective learning rate for this run: {effective_lr}")
+
+        # Shuffling policy: fixed vs random
+        if args.random_shuffle:
+            # Use provided shuffle seed or system randomness
+            if args.shuffle_seed is not None:
+                config.update_data_config(random_state=int(args.shuffle_seed))
+                config.update_training_config(random_seed=int(args.shuffle_seed))
+                logger.info(f"Random shuffling enabled with shuffle_seed={args.shuffle_seed}")
+            else:
+                # Remove fixed seeds to allow non-deterministic shuffling
+                # Keep a log message for provenance
+                logger.info("Random shuffling enabled with no fixed seed (non-deterministic shuffles)")
+                # Use a time-based seed for DataLoader generator consistency per run
+                import time
+                dyn_seed = int(time.time()) % (2**31 - 1)
+                config.update_data_config(random_state=dyn_seed)
+                config.update_training_config(random_seed=dyn_seed)
+        else:
+            # Keep fixed seeds for fair comparisons
+            logger.info("Fixed shuffling (seeded) enabled for fair comparison")
 
         # Optional strict determinism (opt-in via CLI)
         if args.strict_determinism:
