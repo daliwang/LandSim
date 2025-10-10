@@ -1,0 +1,5 @@
+# Ignore result and cache folders
+cnp_results/
+__pycache__/
+*.pyc
+logs/
