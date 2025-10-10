@@ -165,9 +165,26 @@ class DataLoaderIndividual:
         for col in self.data_config.time_series_columns:
             if col in self.df.columns:
                 # Ensure time series data is properly formatted
-                self.df[col] = self.df[col].apply(
-                    lambda x: np.array(x, dtype=np.float32) if isinstance(x, (list, np.ndarray)) else np.zeros(self.data_config.time_series_length, dtype=np.float32)
-                )
+                def _to_ts_and_truncate(x):
+                    # Convert to numpy array (float32) and truncate/pad to configured time_series_length
+                    target_len = int(getattr(self.data_config, 'time_series_length', 240))
+                    if isinstance(x, (list, np.ndarray)):
+                        arr = np.array(x, dtype=np.float32).flatten()
+                        # Prefer earliest 20-year window as per repeated forcing spec
+                        if arr.size >= target_len:
+                            arr = arr[:target_len]
+                        else:
+                            # pad to target_len with zeros at the end
+                            pad = target_len - arr.size
+                            if pad > 0:
+                                arr = np.pad(arr, (0, pad), mode='constant')
+                        # ensure no NaN/Inf
+                        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                        return arr
+                    # Fallback to zeros of target length
+                    return np.zeros(target_len, dtype=np.float32)
+
+                self.df[col] = self.df[col].apply(_to_ts_and_truncate)
         
         # Process list columns
         logger.info("Processing list columns...")
@@ -851,6 +868,8 @@ class DataLoaderIndividual:
         for i, col in enumerate(static_columns):
             assert col in self.df.columns, f"Static column '{col}' missing in DataFrame!"
         static_data = self.df[static_columns].values
+        # Clean NaN/Inf
+        static_data = np.nan_to_num(static_data, nan=0.0, posinf=0.0, neginf=0.0)
         scaler = self._get_scaler(self.preprocessing_config.static_normalization)
         static_normalized = scaler.fit_transform(static_data)
         return torch.tensor(static_normalized, dtype=self.preprocessing_config.data_type), scaler
@@ -864,6 +883,8 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"Scalar column '{col}' missing in DataFrame!"
         
         scalar_data = self.df[scalar_columns].values
+        # Clean NaN/Inf
+        scalar_data = np.nan_to_num(scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use group normalization
         scaler = self._get_scaler(self.preprocessing_config.target_normalization)
@@ -880,6 +901,8 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"y_scalar column '{col}' missing in DataFrame!"
         
         y_scalar_data = self.df[y_scalar_columns].values
+        # Clean NaN/Inf
+        y_scalar_data = np.nan_to_num(y_scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use group normalization
         scaler = self._get_scaler(self.preprocessing_config.target_normalization)
@@ -896,6 +919,7 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"Scalar column '{col}' missing in DataFrame!"
         
         scalar_data = self.df[scalar_columns].values
+        scalar_data = np.nan_to_num(scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use individual normalization (fit+transform or transform-only)
         if transform_only:
@@ -914,6 +938,7 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"y_scalar column '{col}' missing in DataFrame!"
         
         y_scalar_data = self.df[y_scalar_columns].values
+        y_scalar_data = np.nan_to_num(y_scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use individual normalization (fit+transform or transform-only)
         if transform_only:
@@ -931,6 +956,8 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"1D column '{col}' missing in DataFrame!"
         
         col_data = [np.vstack(self.df[col].values) for col in columns]
+        # Clean NaN/Inf in stacked data
+        col_data = [np.nan_to_num(cd, nan=0.0, posinf=0.0, neginf=0.0) for cd in col_data]
         data = np.stack(col_data, axis=1)  # shape: (samples, features, length)
         
         # Handle PFT0 dropping for compatibility with model expectations
@@ -1097,6 +1124,7 @@ class DataLoaderIndividual:
             for val in values:
                 if isinstance(val, (list, np.ndarray)):
                     val_array = np.array(val)
+                    val_array = np.nan_to_num(val_array, nan=0.0, posinf=0.0, neginf=0.0)
                     if val_array.shape[1] == 15:  # Has 15 layers
                         # Extract first column and top 10 layers immediately
                         extracted = val_array[0:1, 0:10]  # Shape: (1, 10)
@@ -1219,7 +1247,9 @@ class DataLoaderIndividual:
             for col in pft_param_columns:
                 val = row[col]
                 if isinstance(val, (list, np.ndarray)) and len(val) == num_pfts:
-                    row_vectors.append(np.array(val, dtype=np.float32))
+                    arr = np.array(val, dtype=np.float32)
+                    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                    row_vectors.append(arr)
                 else:
                     row_vectors.append(np.zeros(num_pfts, dtype=np.float32))
             row_matrix = np.stack(row_vectors, axis=0)  # [44, 17]
