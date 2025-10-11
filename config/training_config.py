@@ -101,6 +101,9 @@ class DataConfig:
     # New parameter for filtering NaN in time series
     filter_time_series_nan: bool = False
     filter_column: Optional[str] = None # Added for CNP model
+    
+    # Longitude filtering - list of longitude values to drop from dataset
+    longitudes_to_drop: List[float] = field(default_factory=list)
 
 
 
@@ -411,9 +414,11 @@ def parse_cnp_io_list(filename):
         filename (str): Path to the variable list file (e.g., CNP_IO_list_general.txt)
     Returns:
         dict: Mapping of variable group keys to lists of variable names.
+              Also includes 'longitudes_to_drop' key if specified in the file.
     """
     # Map section titles to config keys
     section_map = {
+        'LONGITUDE FILTERING': 'longitudes_to_drop',
         'TIME SERIES VARIABLES': 'time_series_variables',
         'SURFACE PROPERTIES': 'surface_properties',
         'PFT PARAMETERS': 'pft_parameters',
@@ -430,6 +435,7 @@ def parse_cnp_io_list(filename):
     with open(filename) as f:
         for line in f:
             line = line.strip()
+            
             # Section header detection
             for section_title, key in section_map.items():
                 if line.startswith(section_title):
@@ -440,7 +446,17 @@ def parse_cnp_io_list(filename):
                 if current_section and line.startswith('•'):
                     # Remove bullet and split by comma, filter out empty strings
                     vars_ = [v.strip() for v in line[1:].split(',') if v.strip()]
-                    result[current_section].extend(vars_)
+                    
+                    # Special handling for longitude filtering - convert to floats
+                    if current_section == 'longitudes_to_drop':
+                        try:
+                            longitudes = [float(x) for x in vars_]
+                            result[current_section].extend(longitudes)
+                            logging.info(f"Parsed longitudes to drop: {longitudes}")
+                        except Exception as e:
+                            logging.warning(f"Failed to parse longitudes to drop: {e}")
+                    else:
+                        result[current_section].extend(vars_)
                 # Some variables are listed as comma-separated after a bullet
                 elif current_section and ',' in line and not line.startswith('['):
                     vars_ = [v.strip('• ').strip() for v in line.split(',') if v.strip('• ').strip()]
@@ -570,7 +586,7 @@ def get_cnp_combined_config(
     data_paths = []
     file_patterns = []
     if use_trendy1:
-        data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP")
+        data_paths.append("/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree")
         file_patterns.append("enhanced_1_training_data_batch_*.pkl")
     if use_trendy05:
         data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
@@ -629,6 +645,7 @@ def get_cnp_combined_config(
     ]
 
     # If a variable list file is provided, parse it
+    longitudes_to_drop = []
     if variable_list_path is not None:
         parsed = parse_cnp_io_list(variable_list_path)
         time_series_columns = parsed.get('time_series_variables', default_time_series)
@@ -638,6 +655,7 @@ def get_cnp_combined_config(
         scalar_variables = parsed.get('scalar_variables', default_scalar)
         pft_1d_variables = parsed.get('pft_1d_variables', default_pft_1d)
         variables_2d_soil = parsed.get('variables_2d_soil', default_2d_soil)
+        longitudes_to_drop = parsed.get('longitudes_to_drop', [])
     else:
         time_series_columns = default_time_series
         surface_properties = default_surface
@@ -653,7 +671,8 @@ def get_cnp_combined_config(
         pft_param_columns=pft_parameters,
         x_list_scalar_columns=scalar_variables,
         x_list_columns_1d=pft_1d_variables,
-        x_list_columns_2d=variables_2d_soil
+        x_list_columns_2d=variables_2d_soil,
+        longitudes_to_drop=longitudes_to_drop
     )
     if include_water:
         data_config_kwargs['x_list_water_columns'] = water_variables

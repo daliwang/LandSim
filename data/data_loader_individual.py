@@ -151,6 +151,27 @@ class DataLoaderIndividual:
         """Preprocess the loaded data."""
         logger.info("Starting data preprocessing...")
         
+        # Filter samples by longitude if specified
+        if hasattr(self.data_config, 'longitudes_to_drop') and self.data_config.longitudes_to_drop:
+            if 'Longitude' in self.df.columns:
+                original_size = len(self.df)
+                longitudes_to_drop = self.data_config.longitudes_to_drop
+                logger.info(f"Filtering samples with longitudes: {longitudes_to_drop}")
+                
+                # Create a mask for samples to keep (those NOT in the drop list)
+                # Use a tolerance for floating point comparison
+                tolerance = 0.01
+                mask = ~self.df['Longitude'].apply(
+                    lambda lon: any(abs(lon - drop_lon) < tolerance for drop_lon in longitudes_to_drop)
+                )
+                
+                self.df = self.df[mask].reset_index(drop=True)
+                filtered_size = len(self.df)
+                dropped_count = original_size - filtered_size
+                logger.info(f"Longitude filtering: {original_size} samples -> {filtered_size} samples (dropped {dropped_count} samples)")
+            else:
+                logger.warning("'Longitude' column not found in dataset. Cannot apply longitude filtering.")
+        
         # Drop specified columns
         if hasattr(self.data_config, 'filter_columns') and self.data_config.filter_columns:
             for col in self.data_config.filter_columns:
