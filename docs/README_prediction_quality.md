@@ -49,6 +49,18 @@ The `generate_prediction_quality_report.py` script accepts the following command
 
 --mae-ok FLOAT        Relative MAE threshold for ok predictions
                       Default: 0.25
+
+--force-xlim-01       Force R² x-axis limits to [0, 1] in the scatter plot
+                      Default: enabled (use --no-force-xlim-01 to disable)
+
+--print-scatter-stats Print min/max and counts for R² and relative RMSE used
+                      in the scatter plot
+                      Default: enabled (use --no-print-scatter-stats to disable)
+
+--bad-html-limit N    Max number of bad rows shown in HTML (default 100)
+--bad-text-limit N    Max number of bad rows printed in text report (default 200)
+--export-bad          Export bad predictions to CSV (default enabled)
+--no-export-bad       Do not export bad predictions CSV
 ```
 
 ## Example Usage
@@ -80,6 +92,9 @@ The analysis generates the following output files:
 5. **prediction_quality_by_variable.png**: Bar chart showing quality distribution by variable
 6. **overall_prediction_quality.png**: Pie chart showing overall quality distribution
 7. **r2_vs_rmse.png**: Scatter plot of R² vs Relative RMSE
+8. **bad_predictions_detailed.csv**: Full list of predictions classified as "bad" (export can be disabled)
+
+In addition, the text report now includes a "Bad Predictions Summary" and a limited detailed list (controlled by `--bad-text-limit`), and the HTML report includes a table of the first N bad predictions (controlled by `--bad-html-limit`).
 
 ## Classification Criteria
 
