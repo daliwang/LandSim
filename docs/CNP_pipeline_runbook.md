@@ -22,28 +22,25 @@ Notes:
 cd cnp_results/run_YYYYMMDD_HHMMSS  # e.g., cnp_results/run_20250815_205419
 ```
 
-### 4) Validate predictions vs ground truth (test split) using the current run directory as default
-Generates scatter plots and statistics using individually normalized results.
+### 4) Validate predictions vs ground truth (test split)
+Generates quick statistics and a prediction quality report. The report now also creates filtered plots for the “top variables by bad-count”.
 
 ```bash
-python ../../scripts/cnp_result_validationplot.py > cnp_results_validation.log 2>&1 &
+python ../../scripts/cnp_result_validationplot.py --stats-only
+python ../../scripts/generate_prediction_quality_report.py
 ```
 
-(optional)
-For a quick result, (--stats-only) option can be used to the following quality report
+Options and behavior:
+- The quality report saves outputs under `analysis/`:
+  - `detailed_quality_assessment.csv`, `variable_quality_summary.csv`, `overall_prediction_quality.png`, `prediction_quality_by_variable.png`, `r2_vs_rmse.png`, `prediction_quality_report.html`, `quality_summary_report.txt`.
+  - `bad_predictions_detailed.csv` (full list of rows classified as bad; can be disabled).
+  - `top_bad_plots/` folder with filtered scatter plots for variables listed as “top variables by bad-count”.
+- Useful flags:
+  - `--no-top-bad-plots`: skip generating `analysis/top_bad_plots/`.
+  - `--bad-html-limit N`, `--bad-text-limit N`, `--no-export-bad`.
+  - `--force-xlim-01/--no-force-xlim-01`, `--print-scatter-stats/--no-print-scatter-stats`.
 
-### 4.5) Generate comprehensive prediction quality report
-Creates detailed quality analysis categorizing predictions as "good", "ok", or "bad" based on statistical thresholds.
-
-```bash
-python ../../scripts/generate_prediction_quality_report.py > prediction_quality_report.log 2>&1 &
-```
-
-**Output**: Creates `analysis/` directory with:
-- Quality assessment CSV files
-- Interactive HTML report
-- Visualization charts (bar charts, pie charts, scatter plots)
-- Text summary report
+**Output**: `analysis/` contains CSV/PNG/HTML reports plus `top_bad_plots/`.
 
 **Quality Classification**:
 - **Good**: R² ≥ 0.9, Relative RMSE ≤ 0.1, Relative MAE ≤ 0.1

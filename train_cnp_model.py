@@ -235,9 +235,17 @@ def main():
     )
     parser.add_argument(
         '--mask-absent-pfts',
+        dest='mask_absent_pfts',
         action='store_true',
         help='Zero predictions where PCT_NAT_PFT_k == 0 and exclude from loss'
     )
+    parser.add_argument(
+        '--no-mask-absent-pfts',
+        dest='mask_absent_pfts',
+        action='store_false',
+        help='Disable masking of absent PFTs'
+    )
+    parser.set_defaults(mask_absent_pfts=True)
     
     args = parser.parse_args()
     
