@@ -1,3 +1,8 @@
+TRENDY1_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData//Trendy_1_data_CNP
+TRENDY05_PATH = /mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP
+DATA_PATHS: /path/extra1, /path/extra2
+FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
+
 LONGITUDE FILTERING - 2 longitudes:
 • 0, 358.75
 

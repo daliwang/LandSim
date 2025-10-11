@@ -426,10 +426,17 @@ def parse_cnp_io_list(filename):
         'TEMPERATURE VARIABLES': 'temperature_variables',
         'SCALAR VARIABLES': 'scalar_variables',
         '1D PFT VARIABLES': 'pft_1d_variables',
-        '2D VARIABLES': 'variables_2d_soil'
+        '2D VARIABLES': 'variables_2d_soil',
+        'DATA PATHS': 'data_paths'
     }
     # Prepare result dict
     result = {v: [] for v in section_map.values()}
+    # Additional single-value keys for dataset configuration
+    result.update({
+        'trendy1_path': None,
+        'trendy05_path': None,
+        'file_pattern': None
+    })
     current_section = None
 
     with open(filename) as f:
@@ -466,6 +473,26 @@ def parse_cnp_io_list(filename):
                     # Only add if it's not a description or exclusion
                     if re.match(r'^[A-Za-z0-9_]+$', line):
                         result[current_section].append(line)
+                # Outside of a section or in any section, allow key=value dataset config
+                # e.g., TRENDY1_PATH: /path/to/trendy1
+                #       TRENDY05_PATH = /path/to/trendy05
+                #       FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
+                #       DATA_PATHS: /p1,/p2
+                if line and not line.startswith('#'):
+                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|file_pattern|data_paths)\s*[:=]\s*(.+)$', line)
+                    if kv_match:
+                        key = kv_match.group(1).lower()
+                        val = kv_match.group(2).strip()
+                        if key == 'data_paths':
+                            # Support comma-separated list
+                            paths = [p.strip() for p in val.split(',') if p.strip()]
+                            result['data_paths'].extend(paths)
+                        elif key == 'file_pattern':
+                            result['file_pattern'] = val
+                        elif key == 'trendy1_path':
+                            result['trendy1_path'] = val
+                        elif key == 'trendy05_path':
+                            result['trendy05_path'] = val
     return result
 
 def parse_cnp_model_config(filename: str) -> Dict[str, Any]:
@@ -584,14 +611,32 @@ def get_cnp_combined_config(
     """
     config = TrainingConfigManager()
     data_paths = []
-    file_patterns = []
-    if use_trendy1:
-        data_paths.append("/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree")
-        file_patterns.append("enhanced_1_training_data_batch_*.pkl")
-    if use_trendy05:
-        data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
-        file_patterns.append("enhanced_1_training_data_batch_*.pkl")
-    file_pattern = file_patterns[0] if len(file_patterns) == 1 else file_patterns
+    file_pattern = None
+    # If a variable list is provided, prefer dataset paths from it
+    parsed = None
+    if variable_list_path is not None:
+        try:
+            parsed = parse_cnp_io_list(variable_list_path)
+        except Exception as e:
+            logging.warning(f"Failed to parse variable list for data paths: {e}")
+    if parsed is not None:
+        # Collect from any or all of: data_paths, trendy1_path, trendy05_path
+        if parsed.get('data_paths'):
+            data_paths.extend([p for p in parsed['data_paths'] if p])
+        if parsed.get('trendy1_path') and use_trendy1:
+            data_paths.append(parsed['trendy1_path'])
+        if parsed.get('trendy05_path') and use_trendy05:
+            data_paths.append(parsed['trendy05_path'])
+        if parsed.get('file_pattern'):
+            file_pattern = parsed['file_pattern']
+    # Fallback to defaults if none provided via CNP_IO
+    if not data_paths:
+        if use_trendy1:
+            data_paths.append("/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree")
+        if use_trendy05:
+            data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
+    if file_pattern is None:
+        file_pattern = "enhanced_1_training_data_batch_*.pkl"
 
     config.update_data_config(
         data_paths=data_paths,
@@ -646,7 +691,7 @@ def get_cnp_combined_config(
 
     # If a variable list file is provided, parse it
     longitudes_to_drop = []
-    if variable_list_path is not None:
+    if variable_list_path is not None and parsed is None:
         parsed = parse_cnp_io_list(variable_list_path)
         time_series_columns = parsed.get('time_series_variables', default_time_series)
         surface_properties = parsed.get('surface_properties', default_surface)
