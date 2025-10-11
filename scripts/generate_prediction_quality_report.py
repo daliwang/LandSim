@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import argparse
+import importlib.util
+import sys
 
 def main():
     parser = argparse.ArgumentParser(description='Generate prediction quality report from validation statistics')
@@ -45,6 +47,10 @@ def main():
                         help='Include the long detailed list of bad predictions in the text report (default: disabled)')
     parser.add_argument('--no-include-bad-details-text', dest='include_bad_details_text', action='store_false',
                         help='Do not include the long detailed list of bad predictions in the text report')
+    parser.add_argument('--top-bad-plots', dest='top_bad_plots', action='store_true', default=True,
+                        help='Generate plots for top-bad variables (default: enabled)')
+    parser.add_argument('--no-top-bad-plots', dest='top_bad_plots', action='store_false',
+                        help='Disable generating top-bad plots')
     args = parser.parse_args()
     
     # Set up input and output paths
@@ -112,7 +118,13 @@ def main():
     df['prediction_quality'] = df.apply(categorize_prediction, axis=1)
     
     # Filter out rows that are just coordinates (Longitude, Latitude)
-    analysis_df = df[~df['pft'].isin(['Longitude', 'Latitude'])].copy()
+    # Be robust to files without a 'pft' column
+    if 'pft' not in df.columns:
+        df['pft'] = ''
+    coord_labels = {'Longitude', 'Latitude'}
+    mask_pft = ~df['pft'].isin(coord_labels) if 'pft' in df.columns else True
+    mask_var = ~df['variable'].isin(coord_labels) if 'variable' in df.columns else True
+    analysis_df = df[mask_pft & mask_var].copy()
 
     # Pre-compute relative errors for later exports/reports
     analysis_df['gt_range'] = analysis_df['gt_max'] - analysis_df['gt_min']
@@ -258,6 +270,33 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(output_dir / "r2_vs_rmse.png", dpi=300)
+    
+    # 4. Optionally generate top-bad-only plots into a subfolder using the validation plotting utility
+    if args.top_bad_plots:
+        try:
+            results_dir = str(input_path.parent)
+            top_bad_out = str((output_dir / 'top_bad_plots').resolve())
+            (output_dir / 'top_bad_plots').mkdir(parents=True, exist_ok=True)
+            # Dynamically import cnp_result_validationplot without relying on PYTHONPATH
+            plot_mod_path = (output_dir.parent.parent / 'scripts' / 'cnp_result_validationplot.py')
+            # If running from repo root, construct direct path as fallback
+            if not plot_mod_path.exists():
+                plot_mod_path = Path(__file__).parent / 'cnp_result_validationplot.py'
+            spec = importlib.util.spec_from_file_location('cnp_plot_mod', str(plot_mod_path))
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules['cnp_plot_mod'] = mod
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            if hasattr(mod, 'main_with_flag'):
+                mod.main_with_flag(results_dir, plot_scatter=True, plot_loss=False,
+                                   top_bad_only=True,
+                                   top_bad_report=str(output_dir / 'quality_summary_report.txt'),
+                                   plots_dir_override=top_bad_out)
+                print(f"Top-bad plots saved to: {top_bad_out}")
+            else:
+                print("Warning: cnp_result_validationplot.main_with_flag not found; skipping top-bad plots")
+        except Exception as e:
+            print(f"Warning: Failed to generate top-bad plots: {e}")
     
     # Generate a comprehensive summary report
     print(f"Generating summary report to {output_dir / 'quality_summary_report.txt'}")
