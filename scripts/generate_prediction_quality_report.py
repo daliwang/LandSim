@@ -24,6 +24,27 @@ def main():
                         help='Relative MAE threshold for good predictions (default: 0.1)')
     parser.add_argument('--mae-ok', type=float, default=0.25,
                         help='Relative MAE threshold for ok predictions (default: 0.25)')
+    # Diagnostics and display options (default: enabled); provide --no-* to disable
+    parser.add_argument('--force-xlim-01', dest='force_xlim_01', action='store_true',
+                        help='Force R² x-axis limits to [0, 1] in the scatter plot', default=True)
+    parser.add_argument('--no-force-xlim-01', dest='force_xlim_01', action='store_false',
+                        help='Do not force R² x-axis limits to [0, 1]')
+    parser.add_argument('--print-scatter-stats', dest='print_scatter_stats', action='store_true',
+                        help='Print min/max and counts for R² and relative RMSE used in the scatter plot', default=True)
+    parser.add_argument('--no-print-scatter-stats', dest='print_scatter_stats', action='store_false',
+                        help='Disable printing diagnostics for R² and relative RMSE used in the scatter plot')
+    parser.add_argument('--bad-html-limit', type=int, default=100,
+                        help='Maximum number of bad prediction rows to show in the HTML report (default: 100)')
+    parser.add_argument('--bad-text-limit', type=int, default=200,
+                        help='Maximum number of bad prediction rows to print in the text report (default: 200)')
+    parser.add_argument('--export-bad', dest='export_bad', action='store_true', default=True,
+                        help='Export detailed bad predictions to CSV (default: enabled)')
+    parser.add_argument('--no-export-bad', dest='export_bad', action='store_false',
+                        help='Disable exporting detailed bad predictions to CSV')
+    parser.add_argument('--include-bad-details-text', dest='include_bad_details_text', action='store_true', default=False,
+                        help='Include the long detailed list of bad predictions in the text report (default: disabled)')
+    parser.add_argument('--no-include-bad-details-text', dest='include_bad_details_text', action='store_false',
+                        help='Do not include the long detailed list of bad predictions in the text report')
     args = parser.parse_args()
     
     # Set up input and output paths
@@ -91,7 +112,16 @@ def main():
     df['prediction_quality'] = df.apply(categorize_prediction, axis=1)
     
     # Filter out rows that are just coordinates (Longitude, Latitude)
-    analysis_df = df[~df['pft'].isin(['Longitude', 'Latitude'])]
+    analysis_df = df[~df['pft'].isin(['Longitude', 'Latitude'])].copy()
+
+    # Pre-compute relative errors for later exports/reports
+    analysis_df['gt_range'] = analysis_df['gt_max'] - analysis_df['gt_min']
+    analysis_df['rmse_rel'] = np.where(analysis_df['gt_range'] > 0,
+                                       analysis_df['rmse'] / analysis_df['gt_range'],
+                                       np.nan)
+    analysis_df['mae_rel'] = np.where(analysis_df['gt_range'] > 0,
+                                      analysis_df['mae'] / analysis_df['gt_range'],
+                                      np.nan)
     
     # Create summary by variable
     variable_summary = analysis_df.groupby(['variable', 'prediction_quality']).size().unstack(fill_value=0)
@@ -109,6 +139,13 @@ def main():
     # Save the detailed results
     print(f"Saving detailed quality assessment to {output_dir / 'detailed_quality_assessment.csv'}")
     df.to_csv(output_dir / "detailed_quality_assessment.csv", index=False)
+
+    # Save detailed bad predictions
+    bad_df = analysis_df[analysis_df['prediction_quality'] == 'bad'].copy()
+    if args.export_bad and not bad_df.empty:
+        bad_csv_path = output_dir / "bad_predictions_detailed.csv"
+        bad_df.to_csv(bad_csv_path, index=False)
+        print(f"Saved detailed bad predictions to: {bad_csv_path}")
     
     # Save the variable summary
     print(f"Saving variable quality summary to {output_dir / 'variable_quality_summary.csv'}")
@@ -164,12 +201,25 @@ def main():
     
     # Create a copy of the dataframe to avoid SettingWithCopyWarning
     scatter_df = analysis_df.copy()
-    
-    # Calculate relative RMSE
-    scatter_df['rmse_rel'] = scatter_df.apply(
-        lambda row: row['rmse'] / (row['gt_max'] - row['gt_min']) if row['gt_max'] > row['gt_min'] else 0, 
-        axis=1
-    )
+    # Ensure relative RMSE exists (it does from pre-compute; keep guard for safety)
+    if 'rmse_rel' not in scatter_df.columns:
+        scatter_df['rmse_rel'] = scatter_df.apply(
+            lambda row: row['rmse'] / (row['gt_max'] - row['gt_min']) if row['gt_max'] > row['gt_min'] else 0,
+            axis=1
+        )
+
+    # Optional diagnostics about what will be plotted
+    if args.print_scatter_stats:
+        r2_vals = scatter_df['r2'].replace([np.inf, -np.inf], np.nan).dropna()
+        rmse_rel_vals = scatter_df['rmse_rel'].replace([np.inf, -np.inf], np.nan).dropna()
+        total_points = len(scatter_df)
+        valid_r2 = len(r2_vals)
+        valid_rmse_rel = len(rmse_rel_vals)
+        print(f"Scatter diagnostics: total_points={total_points}, valid_r2={valid_r2}, valid_rmse_rel={valid_rmse_rel}")
+        if valid_r2 > 0:
+            print(f"  R²: min={r2_vals.min():.6f}, max={r2_vals.max():.6f}, count_>0={(r2_vals > 0).sum()}, count_>=0={(r2_vals >= 0).sum()}")
+        if valid_rmse_rel > 0:
+            print(f"  RMSE_rel: min={rmse_rel_vals.min():.6f}, max={rmse_rel_vals.max():.6f}")
     
     # Create scatter plot
     scatter = plt.scatter(
@@ -191,6 +241,10 @@ def main():
     plt.xlabel('R²', fontsize=14)
     plt.ylabel('Relative RMSE (RMSE / Range)', fontsize=14)
     plt.title('R² vs Relative RMSE for All Predictions', fontsize=16)
+    
+    # Optionally force x-axis limits for clarity
+    if args.force_xlim_01:
+        plt.xlim(0, 1)
     
     # Create custom legend
     from matplotlib.lines import Line2D
@@ -226,6 +280,69 @@ def main():
         f.write(f"Good: R² ≥ {thresholds['good']['r2']}, Relative RMSE ≤ {thresholds['good']['rmse_rel']}, Relative MAE ≤ {thresholds['good']['mae_rel']}\n")
         f.write(f"OK: R² ≥ {thresholds['ok']['r2']}, Relative RMSE ≤ {thresholds['ok']['rmse_rel']}, Relative MAE ≤ {thresholds['ok']['mae_rel']}\n")
         f.write(f"Bad: Below OK thresholds\n\n")
+
+        # Bad predictions summary and details
+        f.write("## Bad Predictions Summary\n")
+        if bad_df.empty:
+            f.write("No bad predictions found.\n\n")
+        else:
+            # Counts by type
+            f.write("Bad predictions by type:\n")
+            bad_by_type = bad_df.groupby('type').size().sort_values(ascending=False)
+            for t, c in bad_by_type.items():
+                f.write(f"  {t}: {c}\n")
+            f.write("\nTop variables by bad-count (with PFT indices or layer numbers):\n")
+            bad_by_var = bad_df.groupby('variable').size().sort_values(ascending=False).head(20)
+            for v, c in bad_by_var.items():
+                sub = bad_df[bad_df['variable'] == v]
+                # Collect pft indices if present (1D); parse trailing digits after 'pft'
+                pft_indices = []
+                for val in sub['pft'].dropna().unique():
+                    if isinstance(val, str) and 'pft' in val:
+                        try:
+                            idx = ''.join(ch for ch in val.split('pft')[-1] if ch.isdigit())
+                            if idx:
+                                pft_indices.append(int(idx))
+                        except Exception:
+                            continue
+                pft_indices = sorted(set(pft_indices))
+                # Collect layer numbers if present (2D)
+                layer_numbers = []
+                for lay in sub['layer'].dropna().unique():
+                    try:
+                        # cast to int if integral
+                        li = int(lay) if float(lay).is_integer() else float(lay)
+                        layer_numbers.append(li)
+                    except Exception:
+                        continue
+                layer_numbers = sorted(set(layer_numbers))
+
+                details_parts = []
+                if pft_indices:
+                    details_parts.append("pfts: " + ", ".join(str(i) for i in pft_indices))
+                if layer_numbers:
+                    details_parts.append("layers: " + ", ".join(str(i) for i in layer_numbers))
+                details = ("; " + " ".join(details_parts)) if details_parts else ""
+                f.write(f"  {v}: {c}{details}\n")
+            f.write("\n")
+
+            # Optional: long detailed rows (disabled by default)
+            if args.include_bad_details_text:
+                f.write(f"## Detailed Bad Predictions (first {args.bad_text_limit})\n")
+                printable = bad_df.copy()
+                # Order by worst first: lowest R², then highest relative RMSE
+                printable = printable.sort_values(by=['r2','rmse_rel'], ascending=[True, False])
+                if len(printable) > args.bad_text_limit:
+                    printable = printable.head(args.bad_text_limit)
+                for _, row in printable.iterrows():
+                    f.write(
+                        f"- {row.get('type','')}, {row.get('variable','')}, {row.get('pft','')}, layer={row.get('layer','')}"
+                        f", r2={row.get('r2',np.nan):.6f}, rmse_rel={row.get('rmse_rel',np.nan):.6f}, "
+                        f"mae_rel={row.get('mae_rel',np.nan):.6f}, rmse={row.get('rmse',np.nan):.6f}, mae={row.get('mae',np.nan):.6f}\n"
+                    )
+                f.write("\n")
+                if args.export_bad:
+                    f.write("Full list saved to bad_predictions_detailed.csv\n\n")
         
         f.write("## Variables with Best Predictions\n")
         if 'good_pct' in variable_summary.columns:
@@ -363,6 +480,45 @@ def main():
                 <h2>R² vs Relative RMSE</h2>
                 <img src="r2_vs_rmse.png" alt="R² vs Relative RMSE">
             </div>
+            
+            <h2>Detailed Bad Predictions (first {args.bad_html_limit})</h2>
+            <table>
+                <tr>
+                    <th>Type</th>
+                    <th>Variable</th>
+                    <th>PFT/Soil</th>
+                    <th>Layer</th>
+                    <th>R²</th>
+                    <th>RMSE_rel</th>
+                    <th>MAE_rel</th>
+                    <th>RMSE</th>
+                    <th>MAE</th>
+                </tr>
+    """
+
+    # Insert bad predictions table rows (limited)
+    if not bad_df.empty:
+        bad_html_rows = bad_df.copy().sort_values(by=['r2','rmse_rel'], ascending=[True, False])
+        if len(bad_html_rows) > args.bad_html_limit:
+            bad_html_rows = bad_html_rows.head(args.bad_html_limit)
+        for _, row in bad_html_rows.iterrows():
+            html_content += f"""
+                <tr>
+                    <td>{row.get('type','')}</td>
+                    <td>{row.get('variable','')}</td>
+                    <td>{row.get('pft','')}</td>
+                    <td>{row.get('layer','')}</td>
+                    <td>{row.get('r2',float('nan')):.6f}</td>
+                    <td>{row.get('rmse_rel',float('nan')):.6f}</td>
+                    <td>{row.get('mae_rel',float('nan')):.6f}</td>
+                    <td>{row.get('rmse',float('nan')):.6f}</td>
+                    <td>{row.get('mae',float('nan')):.6f}</td>
+                </tr>
+            """
+    
+    # Close bad predictions table and proceed with the rest of the report
+    html_content += """
+            </table>
             
             <h2>Best Performing Variables</h2>
             <table>
