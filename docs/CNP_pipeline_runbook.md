@@ -23,17 +23,18 @@ cd cnp_results/run_YYYYMMDD_HHMMSS  # e.g., cnp_results/run_20250815_205419
 ```
 
 ### 4) Validate predictions vs ground truth (test split) using the current run directory as default
-Generates scatter plots and statistics using individually normalized results.
+Generates quick statistics and prediction quality report
 
 ```bash
-python ../../scripts/cnp_result_validationplot.py > cnp_results_validation.log 2>&1 &
+python ../../scripts/cnp_result_validationplot.py --stats-only
+python ../../scripts/generate_prediction_quality_report.py
 ```
 
 (optional)
-For a quick result, (--stats-only) option can be used to the following quality report
-
-### 4.5) Generate comprehensive prediction quality report
-Creates detailed quality analysis categorizing predictions as "good", "ok", or "bad" based on statistical thresholds.
+For a detail scatter plot of each variables and its substructure
+```bash
+python ../../scripts/cnp_result_validationplot.py > cnp_results_validation.log 2>&1 &
+```bash
 
 ```bash
 python ../../scripts/generate_prediction_quality_report.py > prediction_quality_report.log 2>&1 &
