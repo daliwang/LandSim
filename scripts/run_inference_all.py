@@ -111,6 +111,31 @@ def _extract_variables_from_config(config_path: Path) -> dict:
         return None
 
 
+# New: load model_config from cnp_config.json for exact architecture reuse
+def _load_training_model_config_from_config(model_path: Path) -> dict:
+    """Load model_config dict from cnp_config.json in the training run directory."""
+    import json
+    try:
+        model_dir = Path(model_path).parent
+        # Search current and parent directories for cnp_config.json
+        candidate_paths = [model_dir / 'cnp_config.json'] + [p / 'cnp_config.json' for p in model_dir.parents]
+        for config_path in candidate_paths:
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        cfg = json.load(f)
+                    if isinstance(cfg, dict) and 'model_config' in cfg and isinstance(cfg['model_config'], dict):
+                        logging.info(f"Loaded model_config from {config_path}")
+                        return cfg['model_config']
+                except Exception as e:
+                    logging.warning(f"Failed reading model_config from {config_path}: {e}")
+                break
+        logging.warning("No model_config found in cnp_config.json near model path")
+    except Exception as e:
+        logging.warning(f"Error discovering model_config: {e}")
+    return None
+
+
 
 
 
@@ -190,6 +215,24 @@ def run_inference_all(
     if model_config is not None and use_training_config:
         logging.warning("--model-config provided along with --use-training-config; training config will still govern variables and scalers. Model overrides only affect architecture sizing.")
     
+    # Apply model_config from training cnp_config.json if requested
+    json_model_config = None
+    if use_training_config:
+        json_model_config = _load_training_model_config_from_config(Path(model_path))
+        if isinstance(json_model_config, dict):
+            applied = 0
+            for k, v in json_model_config.items():
+                if hasattr(config.model_config, k):
+                    try:
+                        setattr(config.model_config, k, v)
+                        applied += 1
+                    except Exception as e:
+                        logging.warning(f"Failed applying model_config.{k} from JSON: {e}")
+                else:
+                    # Some fields may be added dynamically later; log and skip
+                    logging.info(f"Ignoring unknown ModelConfig key in JSON: {k}")
+            logging.info(f"Applied {applied} model_config fields from training JSON")
+
     # CRITICAL FIX: Apply the loaded variable configuration to ensure model compatibility
     if variables is not None:
         logging.info("Applying variable configuration to model config...")
@@ -215,10 +258,13 @@ def run_inference_all(
         logging.info(f"  PFT 1D variables: {len(config.data_config.x_list_columns_1d)} variables")
         logging.info(f"  2D soil variables: {len(config.data_config.x_list_columns_2d)} variables")
         
-        # Update model configuration for output dimensions
-        config.model_config.scalar_output_size = len(config.data_config.x_list_scalar_columns)
-        config.model_config.vector_output_size = len(config.data_config.x_list_columns_1d)
-        config.model_config.matrix_output_size = len(config.data_config.x_list_columns_2d)
+        # Update model configuration for output dimensions only if not provided by JSON
+        if not (isinstance(json_model_config, dict) and 'scalar_output_size' in json_model_config):
+            config.model_config.scalar_output_size = len(config.data_config.x_list_scalar_columns)
+        if not (isinstance(json_model_config, dict) and 'vector_output_size' in json_model_config):
+            config.model_config.vector_output_size = len(config.data_config.x_list_columns_1d)
+        if not (isinstance(json_model_config, dict) and 'matrix_output_size' in json_model_config):
+            config.model_config.matrix_output_size = len(config.data_config.x_list_columns_2d)
         
         logging.info(f"Updated model output dimensions:")
         logging.info(f"  Scalar output size: {config.model_config.scalar_output_size}")
