@@ -1,7 +1,17 @@
-TRENDY1_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData//Trendy_1_data_CNP
-TRENDY05_PATH = /mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP
-DATA_PATHS: /path/extra1, /path/extra2
+# Dataset roots (any absolute paths)
+TRENDY1_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP
+TRENDY05_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP
+TVA4KM_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData/TVA_4km_data_CNP
+
+# Optional extra roots (comma-separated)
+DATA_PATHS: /another/path1, /another/path2
+
+# Global fallback pattern if a dataset-specific one isn't set
 FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
+
+# Per-dataset patterns (overrides FILE_PATTERN for that path only)
+TVA4KM_FILE_PATTERN: enhanced_monthly_training_data_batch_*.pkl
+
 
 LONGITUDE FILTERING - 2 longitudes:
 • 0, 358.75
@@ -48,13 +58,13 @@ SCALAR VARIABLES (1D - 4 variables):
 
 • tlai, totvegc
 
-2D VARIABLES (layered - 28 variables):
+2D VARIABLES (layered - 25 variables):
 
 • cwdc_vr, cwdn_vr, cwdp_vr
 
-• litr1c_vr, litr2c_vr, litr3c_vr
-• litr1n_vr, litr2n_vr, litr3n_vr
-• litr1p_vr, litr2p_vr, litr3p_vr
+• litr2c_vr, litr3c_vr
+• litr2n_vr, litr3n_vr
+• litr2p_vr, litr3p_vr
 
 • soil1c_vr, soil1n_vr, soil1p_vr
 • soil2c_vr, soil2n_vr, soil2p_vr

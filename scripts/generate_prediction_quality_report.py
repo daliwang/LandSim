@@ -7,6 +7,8 @@ from pathlib import Path
 import argparse
 import importlib.util
 import sys
+import json
+from typing import Optional, List
 
 def main():
     parser = argparse.ArgumentParser(description='Generate prediction quality report from validation statistics')
@@ -14,6 +16,8 @@ def main():
                         help='Path to validation statistics CSV file')
     parser.add_argument('--output-dir', default=None,
                         help='Directory to save output files (default: same directory as input + /analysis)')
+    parser.add_argument('--training-config', default=None,
+                        help='Path to training cnp_config.json (default: auto-detect near input)')
     parser.add_argument('--r2-good', type=float, default=0.9,
                         help='R² threshold for good predictions (default: 0.9)')
     parser.add_argument('--r2-ok', type=float, default=0.7,
@@ -69,6 +73,37 @@ def main():
     
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Helper: auto-detect training config (cnp_config.json) near the run directory
+    def _auto_detect_training_config(start_dir: Path) -> Optional[Path]:
+        for parent in [start_dir] + list(start_dir.parents):
+            cfg = parent / 'cnp_config.json'
+            if cfg.exists():
+                return cfg
+        return None
+    
+    # Load expected variables from training configuration to ensure full coverage in reports
+    expected_vars: List[str] = []
+    training_cfg_path: Optional[Path] = None
+    try:
+        training_cfg_path = Path(args.training_config) if args.training_config else _auto_detect_training_config(input_path.parent)
+        if training_cfg_path and training_cfg_path.exists():
+            with open(training_cfg_path, 'r') as f:
+                cfg = json.load(f)
+            di = cfg.get('data_info', {}) if isinstance(cfg, dict) else {}
+            # Prefer scalar target list if available; fallback to input scalar list
+            scalar_targets = di.get('y_list_scalar_columns', []) or di.get('x_list_scalar_columns', []) or []
+            # Strip any leading Y_ prefixes
+            scalar_vars = [str(v)[2:] if isinstance(v, str) and v.startswith('Y_') else str(v) for v in scalar_targets]
+            pft1d_vars = [str(v) for v in di.get('variables_1d_pft', []) or []]
+            soil2d_vars = [str(v) for v in di.get('x_list_columns_2d', []) or []]
+            expected_vars = list(dict.fromkeys(scalar_vars + pft1d_vars + soil2d_vars))
+            if expected_vars:
+                print(f"Loaded {len(expected_vars)} expected variables from training config: {training_cfg_path}")
+        else:
+            print("Warning: Could not locate cnp_config.json to derive full variable list. Proceeding with variables present in stats.")
+    except Exception as e:
+        print(f"Warning: Failed to parse training config for expected variables: {e}")
+    
     # Define thresholds for categorization
     thresholds = {
         'good': {
@@ -85,6 +120,13 @@ def main():
     
     print(f"Reading validation statistics from {input_path}")
     df = pd.read_csv(input_path)
+    
+    # Normalize variable naming: strip leading 'Y_' from variable names (targets)
+    if 'variable' in df.columns:
+        try:
+            df['variable'] = df['variable'].apply(lambda v: v[2:] if isinstance(v, str) and v.startswith('Y_') else v)
+        except Exception:
+            pass
     
     # Function to categorize prediction quality
     def categorize_prediction(row):
@@ -138,6 +180,13 @@ def main():
     # Create summary by variable
     variable_summary = analysis_df.groupby(['variable', 'prediction_quality']).size().unstack(fill_value=0)
     
+    # Ensure all expected variables appear in the summary (even if missing from CSV)
+    if expected_vars:
+        # Add any missing variables as zero rows
+        for v in expected_vars:
+            if v not in variable_summary.index:
+                variable_summary.loc[v, :] = 0
+    
     # Calculate percentages
     variable_summary['total'] = variable_summary.sum(axis=1)
     for category in ['good', 'ok', 'bad']:
@@ -179,6 +228,12 @@ def main():
     pivot_total = pivot_df.sum(axis=1)
     for col in pivot_df.columns:
         pivot_df[col] = (pivot_df[col] / pivot_total * 100).round(1)
+    
+    # Ensure all expected variables appear in the chart
+    if expected_vars:
+        for v in expected_vars:
+            if v not in pivot_df.index:
+                pivot_df.loc[v, :] = 0
     
     # Sort by 'good' percentage if it exists
     if 'good' in pivot_df.columns:
@@ -272,11 +327,20 @@ def main():
     plt.savefig(output_dir / "r2_vs_rmse.png", dpi=300)
     
     # 4. Optionally generate top-bad-only plots into a subfolder using the validation plotting utility
+    top_bad_plot_count = 0
     if args.top_bad_plots:
         try:
             results_dir = str(input_path.parent)
             top_bad_out = str((output_dir / 'top_bad_plots').resolve())
             (output_dir / 'top_bad_plots').mkdir(parents=True, exist_ok=True)
+            
+            # Protect the input validation_stats.csv from being overwritten by the plotting utility
+            original_bytes = None
+            try:
+                if input_path.exists():
+                    original_bytes = input_path.read_bytes()
+            except Exception:
+                original_bytes = None
             # Dynamically import cnp_result_validationplot without relying on PYTHONPATH
             plot_mod_path = (output_dir.parent.parent / 'scripts' / 'cnp_result_validationplot.py')
             # If running from repo root, construct direct path as fallback
@@ -286,15 +350,31 @@ def main():
             mod = importlib.util.module_from_spec(spec)
             sys.modules['cnp_plot_mod'] = mod
             assert spec.loader is not None
-            spec.loader.exec_module(mod)
-            if hasattr(mod, 'main_with_flag'):
-                mod.main_with_flag(results_dir, plot_scatter=True, plot_loss=False,
-                                   top_bad_only=True,
-                                   top_bad_report=str(output_dir / 'quality_summary_report.txt'),
-                                   plots_dir_override=top_bad_out)
-                print(f"Top-bad plots saved to: {top_bad_out}")
-            else:
-                print("Warning: cnp_result_validationplot.main_with_flag not found; skipping top-bad plots")
+            try:
+                spec.loader.exec_module(mod)
+                if hasattr(mod, 'main_with_flag'):
+                    mod.main_with_flag(results_dir, plot_scatter=True, plot_loss=False,
+                                       top_bad_only=True,
+                                       top_bad_report=str(output_dir / 'quality_summary_report.txt'),
+                                       plots_dir_override=top_bad_out)
+                    print(f"Top-bad plots saved to: {top_bad_out}")
+                    try:
+                        # Count the number of PNGs generated for quick reporting
+                        top_bad_plot_count = len(list((output_dir / 'top_bad_plots').glob('*.png')))
+                        print(f"Top-bad plot count: {top_bad_plot_count}")
+                    except Exception:
+                        top_bad_plot_count = 0
+                else:
+                    print("Warning: cnp_result_validationplot.main_with_flag not found; skipping top-bad plots")
+            finally:
+                # Restore original validation_stats.csv to prevent any overwrite
+                try:
+                    if original_bytes is not None:
+                        with open(input_path, 'wb') as _f:
+                            _f.write(original_bytes)
+                        print(f"Restored original validation_stats.csv after generating top-bad plots: {input_path}")
+                except Exception as _e:
+                    print(f"Warning: Failed to restore original validation_stats.csv: {_e}")
         except Exception as e:
             print(f"Warning: Failed to generate top-bad plots: {e}")
     
@@ -305,11 +385,21 @@ def main():
         
         # Overall statistics
         total_predictions = len(analysis_df)
+        # Variables analyzed (unique variable names in stats; if expected list provided, report both)
+        analyzed_variables = sorted(set(analysis_df['variable'].unique()))
+        num_analyzed_variables = len(analyzed_variables)
+        total_expected_variables = len(expected_vars) if expected_vars else None
         good_count = analysis_df[analysis_df['prediction_quality'] == 'good'].shape[0]
         ok_count = analysis_df[analysis_df['prediction_quality'] == 'ok'].shape[0]
         bad_count = analysis_df[analysis_df['prediction_quality'] == 'bad'].shape[0]
         
         f.write(f"## Overall Statistics\n")
+        f.write(f"Variables analyzed: {num_analyzed_variables}")
+        if total_expected_variables is not None:
+            f.write(f" (of {total_expected_variables} expected from training config)")
+        f.write("\n")
+        if args.top_bad_plots:
+            f.write(f"Top-bad plots generated: {top_bad_plot_count}\n")
         f.write(f"Total predictions analyzed: {total_predictions}\n")
         f.write(f"Good predictions: {good_count} ({good_count/total_predictions*100:.1f}%)\n")
         f.write(f"OK predictions: {ok_count} ({ok_count/total_predictions*100:.1f}%)\n")
@@ -385,15 +475,37 @@ def main():
         
         f.write("## Variables with Best Predictions\n")
         if 'good_pct' in variable_summary.columns:
-            best_vars = variable_summary.nlargest(15, 'good_pct')
+            # Treat NaN as 0 for ranking
+            _vs = variable_summary.copy()
+            _vs['good_pct'] = _vs['good_pct'].fillna(0)
+            _vs['ok_pct'] = _vs.get('ok_pct', 0)
+            _vs['bad_pct'] = _vs.get('bad_pct', 0)
+            best_vars = _vs.nlargest(15, 'good_pct')
             for var_name, row in best_vars.iterrows():
                 f.write(f"{var_name}: {row.get('good_pct', 0):.1f}% good, {row.get('ok_pct', 0):.1f}% ok, {row.get('bad_pct', 0):.1f}% bad\n")
         
         f.write("\n## Variables with Worst Predictions\n")
         if 'good_pct' in variable_summary.columns:
-            worst_vars = variable_summary.nsmallest(15, 'good_pct')
+            _vs2 = variable_summary.copy()
+            _vs2['good_pct'] = _vs2['good_pct'].fillna(0)
+            _vs2['ok_pct'] = _vs2.get('ok_pct', 0)
+            _vs2['bad_pct'] = _vs2.get('bad_pct', 0)
+            worst_vars = _vs2.nsmallest(15, 'good_pct')
             for var_name, row in worst_vars.iterrows():
                 f.write(f"{var_name}: {row.get('good_pct', 0):.1f}% good, {row.get('ok_pct', 0):.1f}% ok, {row.get('bad_pct', 0):.1f}% bad\n")
+        
+        # Report variables missing from the stats but present in training
+        if expected_vars:
+            present_vars = set(analysis_df['variable'].unique())
+            missing_vars = [v for v in expected_vars if v not in present_vars]
+            f.write("\n## Variables Missing from validation_stats.csv (listed in training config)\n")
+            if missing_vars:
+                f.write(f"Count: {len(missing_vars)}\n")
+                # Limit long lists in text to keep report concise
+                preview = missing_vars[:100]
+                f.write("" + ", ".join(preview) + (" ..." if len(missing_vars) > 100 else "") + "\n")
+            else:
+                f.write("None\n")
     
     # Generate an HTML report for better visualization
     print(f"Generating HTML report to {output_dir / 'prediction_quality_report.html'}")
@@ -595,7 +707,10 @@ def main():
     """
     
     # Add worst variables
-    worst_vars = variable_summary.nsmallest(15, 'good_pct')
+    _vw = variable_summary.copy()
+    if 'good_pct' in _vw.columns:
+        _vw['good_pct'] = _vw['good_pct'].fillna(0)
+    worst_vars = _vw.nsmallest(15, 'good_pct')
     for var_name, row in worst_vars.iterrows():
         html_content += f"""
                 <tr>
@@ -604,6 +719,27 @@ def main():
                     <td>{row.get('ok_pct', 0):.1f}%</td>
                     <td>{row.get('bad_pct', 0):.1f}%</td>
                 </tr>
+        """
+    
+    # Add missing variables section if available
+    if expected_vars:
+        present_vars = set(analysis_df['variable'].unique())
+        missing_vars = [v for v in expected_vars if v not in present_vars]
+        html_content += """
+            </table>
+            <h2>Variables Missing from validation_stats.csv (in training config)</h2>
+            <div class="summary-box">
+        """
+        if missing_vars:
+            # Show as a comma-separated list (trim if very long)
+            preview = missing_vars[:300]
+            remainder = len(missing_vars) - len(preview)
+            html_content += f"<p>Count: {len(missing_vars)}</p>"
+            html_content += f"<p>{', '.join(preview)}{' ...' if remainder > 0 else ''}</p>"
+        else:
+            html_content += "<p>None</p>"
+        html_content += """
+            </div>
         """
     
     html_content += """
@@ -624,12 +760,18 @@ def main():
         print(f"{quality}: {count} ({count/len(analysis_df)*100:.1f}%)")
     
     print("\nTop 5 Best Predicted Variables:")
-    best_vars = variable_summary.nlargest(5, 'good_pct')
+    _vb = variable_summary.copy()
+    if 'good_pct' in _vb.columns:
+        _vb['good_pct'] = _vb['good_pct'].fillna(0)
+    best_vars = _vb.nlargest(5, 'good_pct')
     for var_name, row in best_vars.iterrows():
         print(f"{var_name}: {row.get('good_pct', 0):.1f}% good")
     
     print("\nTop 5 Worst Predicted Variables:")
-    worst_vars = variable_summary.nsmallest(5, 'good_pct')
+    _vw5 = variable_summary.copy()
+    if 'good_pct' in _vw5.columns:
+        _vw5['good_pct'] = _vw5['good_pct'].fillna(0)
+    worst_vars = _vw5.nsmallest(5, 'good_pct')
     for var_name, row in worst_vars.iterrows():
         print(f"{var_name}: {row.get('good_pct', 0):.1f}% good, {row.get('bad_pct', 0):.1f}% bad")
 

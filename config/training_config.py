@@ -27,6 +27,8 @@ class DataConfig:
     
     # File patterns
     file_pattern: str = "1_training_data_batch_*.pkl"
+    # Optional per-dataset file patterns keyed by absolute path
+    dataset_file_patterns: Dict[str, str] = field(default_factory=dict)
     
     # Columns to drop
     columns_to_drop: List[str] = field(default_factory=lambda: [
@@ -435,13 +437,26 @@ def parse_cnp_io_list(filename):
     result.update({
         'trendy1_path': None,
         'trendy05_path': None,
-        'file_pattern': None
+        'tva4km_path': None,
+        'file_pattern': None,
+        'trendy1_file_pattern': None,
+        'trendy05_file_pattern': None,
+        'tva4km_file_pattern': None
     })
     current_section = None
 
     with open(filename) as f:
         for line in f:
             line = line.strip()
+            # Skip full-line comments and blanks (support //, #, ;)
+            if not line or line.startswith('#') or line.startswith('//') or line.startswith(';'):
+                continue
+            # Remove inline comments introduced by '#'; avoid '//' inline to not break paths
+            hash_idx = line.find('#')
+            if hash_idx != -1:
+                line = line[:hash_idx].strip()
+                if not line:
+                    continue
             
             # Section header detection
             for section_title, key in section_map.items():
@@ -479,7 +494,7 @@ def parse_cnp_io_list(filename):
                 #       FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
                 #       DATA_PATHS: /p1,/p2
                 if line and not line.startswith('#'):
-                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|file_pattern|data_paths)\s*[:=]\s*(.+)$', line)
+                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths)\s*[:=]\s*(.+)$', line)
                     if kv_match:
                         key = kv_match.group(1).lower()
                         val = kv_match.group(2).strip()
@@ -493,6 +508,14 @@ def parse_cnp_io_list(filename):
                             result['trendy1_path'] = val
                         elif key == 'trendy05_path':
                             result['trendy05_path'] = val
+                        elif key == 'tva4km_path':
+                            result['tva4km_path'] = val
+                        elif key == 'trendy1_file_pattern':
+                            result['trendy1_file_pattern'] = val
+                        elif key == 'trendy05_file_pattern':
+                            result['trendy05_file_pattern'] = val
+                        elif key == 'tva4km_file_pattern':
+                            result['tva4km_file_pattern'] = val
     return result
 
 def parse_cnp_model_config(filename: str) -> Dict[str, Any]:
@@ -594,6 +617,7 @@ def parse_cnp_model_config(filename: str) -> Dict[str, Any]:
 def get_cnp_combined_config(
     use_trendy1: bool = True,
     use_trendy05: bool = True,
+    use_tva4km: bool = False,
     max_files: Optional[int] = None,
     include_water: bool = False,
     variable_list_path: Optional[str] = None,
@@ -612,6 +636,7 @@ def get_cnp_combined_config(
     config = TrainingConfigManager()
     data_paths = []
     file_pattern = None
+    dataset_file_patterns: Dict[str, str] = {}
     # If a variable list is provided, prefer dataset paths from it
     parsed = None
     if variable_list_path is not None:
@@ -620,13 +645,24 @@ def get_cnp_combined_config(
         except Exception as e:
             logging.warning(f"Failed to parse variable list for data paths: {e}")
     if parsed is not None:
-        # Collect from any or all of: data_paths, trendy1_path, trendy05_path
+        # Collect from any or all of: data_paths, trendy1_path, trendy05_path, tva4km_path
         if parsed.get('data_paths'):
             data_paths.extend([p for p in parsed['data_paths'] if p])
         if parsed.get('trendy1_path') and use_trendy1:
-            data_paths.append(parsed['trendy1_path'])
+            p = parsed['trendy1_path']
+            data_paths.append(p)
+            if parsed.get('trendy1_file_pattern'):
+                dataset_file_patterns[p] = parsed['trendy1_file_pattern']
         if parsed.get('trendy05_path') and use_trendy05:
-            data_paths.append(parsed['trendy05_path'])
+            p = parsed['trendy05_path']
+            data_paths.append(p)
+            if parsed.get('trendy05_file_pattern'):
+                dataset_file_patterns[p] = parsed['trendy05_file_pattern']
+        if parsed.get('tva4km_path') and use_tva4km:
+            p = parsed['tva4km_path']
+            data_paths.append(p)
+            if parsed.get('tva4km_file_pattern'):
+                dataset_file_patterns[p] = parsed['tva4km_file_pattern']
         if parsed.get('file_pattern'):
             file_pattern = parsed['file_pattern']
     # Fallback to defaults if none provided via CNP_IO
@@ -635,12 +671,21 @@ def get_cnp_combined_config(
             data_paths.append("/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree")
         if use_trendy05:
             data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
+        if use_tva4km:
+            # Prefer environment variable if provided
+            env_tva = os.environ.get('TVA4KM_PATH')
+            if env_tva:
+                data_paths.append(env_tva)
+                env_pat = os.environ.get('TVA4KM_FILE_PATTERN')
+                if env_pat:
+                    dataset_file_patterns[env_tva] = env_pat
     if file_pattern is None:
         file_pattern = "enhanced_1_training_data_batch_*.pkl"
 
     config.update_data_config(
         data_paths=data_paths,
         file_pattern=file_pattern,
+        dataset_file_patterns=dataset_file_patterns,
         max_files=max_files,
         train_split=0.8,
         filter_column=None,

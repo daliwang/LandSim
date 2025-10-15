@@ -121,7 +121,7 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
     scalar_pred = os.path.join(results_dir, 'cnp_predictions', 'predictions_scalar.csv')
     if os.path.exists(scalar_gt) and os.path.exists(scalar_pred):
         print("Analyzing scalar data...")
-        analyze_pair(scalar_gt, scalar_pred, 'Scalar', plots_dir, stats_data, per_column=True, plot_scatter=plot_scatter)
+        analyze_pair(scalar_gt, scalar_pred, 'Scalar', plots_dir, stats_data, per_column=True, plot_scatter=plot_scatter, selection=selection)
     else:
         print("Scalar data files not found")
     
@@ -169,8 +169,13 @@ def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=Fals
     if per_column:
         # Per-column comparison for scalar
         for col in gt.columns:
+            # Normalize variable name by stripping Y_ for selection matching
+            col_norm = col[2:] if isinstance(col, str) and col.startswith('Y_') else col
+            # Skip Latitude/Longitude if top-bad-only was requested (selection provided)
+            if selection is not None and str(col_norm) in ('Latitude', 'Longitude'):
+                continue
             # If selection provided, only include scalar variables present in selection
-            if selection is not None and col not in selection:
+            if selection is not None and col_norm not in selection:
                 continue
             if col in pred.columns:
                 print(f"Analyzing variable: {col}")
