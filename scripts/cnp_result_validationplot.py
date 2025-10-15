@@ -97,6 +97,8 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
             print(f"Plotting restricted to top-bad variables from: {report_path}")
         else:
             print("No selections parsed from top-bad report; proceeding without restriction.")
+            # IMPORTANT: ensure unrestricted plotting by clearing selection
+            selection = None
     
     # Check for new directory structure first
     pft_gt_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_ground_truth')

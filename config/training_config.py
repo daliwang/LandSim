@@ -734,18 +734,38 @@ def get_cnp_combined_config(
     #        'secondp_vr' # this is not in the list, but it is in the data  
     ]
 
-    # If a variable list file is provided, parse it
+    # If a variable list file is provided, use it for variable groups; otherwise use defaults
     longitudes_to_drop = []
-    if variable_list_path is not None and parsed is None:
-        parsed = parse_cnp_io_list(variable_list_path)
-        time_series_columns = parsed.get('time_series_variables', default_time_series)
-        surface_properties = parsed.get('surface_properties', default_surface)
-        pft_parameters = parsed.get('pft_parameters', default_pft_parameters)
-        water_variables = parsed.get('water_variables', default_water)
-        scalar_variables = parsed.get('scalar_variables', default_scalar)
-        pft_1d_variables = parsed.get('pft_1d_variables', default_pft_1d)
-        variables_2d_soil = parsed.get('variables_2d_soil', default_2d_soil)
-        longitudes_to_drop = parsed.get('longitudes_to_drop', [])
+    if variable_list_path is not None:
+        if parsed is None:
+            try:
+                parsed = parse_cnp_io_list(variable_list_path)
+            except Exception as _e:
+                logging.warning(f"Failed to parse variable list at {variable_list_path}: {_e}")
+                parsed = None
+        if parsed is not None:
+            time_series_columns = parsed.get('time_series_variables', default_time_series)
+            surface_properties = parsed.get('surface_properties', default_surface)
+            pft_parameters = parsed.get('pft_parameters', default_pft_parameters)
+            water_variables = parsed.get('water_variables', default_water)
+            scalar_variables = parsed.get('scalar_variables', default_scalar)
+            pft_1d_variables = parsed.get('pft_1d_variables', default_pft_1d)
+            variables_2d_soil = parsed.get('variables_2d_soil', default_2d_soil)
+            longitudes_to_drop = parsed.get('longitudes_to_drop', [])
+            try:
+                logging.info(f"Applied variable groups from {variable_list_path}: "
+                             f"ts={len(time_series_columns)}, static={len(surface_properties)}, pft_params={len(pft_parameters)}, "
+                             f"scalar={len(scalar_variables)}, pft1d={len(pft_1d_variables)}, soil2d={len(variables_2d_soil)}")
+            except Exception:
+                pass
+        else:
+            time_series_columns = default_time_series
+            surface_properties = default_surface
+            pft_parameters = default_pft_parameters
+            water_variables = default_water
+            scalar_variables = default_scalar
+            pft_1d_variables = default_pft_1d
+            variables_2d_soil = default_2d_soil
     else:
         time_series_columns = default_time_series
         surface_properties = default_surface
@@ -843,6 +863,12 @@ def get_cnp_combined_config(
                 if applicable:
                     config.update_model_config(**applicable)
                     logging.info(f"Applied {len(applicable)} ModelConfig overrides from {model_config_path}")
+                    # Record metadata for downstream verification
+                    try:
+                        setattr(config, 'model_config_overrides_keys', sorted(list(applicable.keys())))
+                        setattr(config, 'model_config_source', model_config_path)
+                    except Exception:
+                        pass
         except Exception as e:
             logging.warning(f"Could not apply model config overrides from {model_config_path}: {e}")
     

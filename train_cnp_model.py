@@ -699,7 +699,10 @@ def main():
                 'data_counts': group_counts,
                 'prediction_element_counts': prediction_element_counts,
                 'model_config': config.model_config.__dict__,
-                'training_config': config.training_config.__dict__
+                'training_config': config.training_config.__dict__,
+                # Model-config provenance for verification
+                'model_config_source': getattr(config, 'model_config_source', None),
+                'model_config_overrides_keys': getattr(config, 'model_config_overrides_keys', None)
             }
             json.dump(config_dict, f, indent=2)
         
