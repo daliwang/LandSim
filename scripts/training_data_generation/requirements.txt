@@ -1,0 +1,16 @@
+# Training Data Generation Requirements
+# Install with: pip install -r requirements.txt
+
+# Core data processing
+pandas>=2.0.0
+numpy>=1.24.0
+netCDF4>=1.6.0
+xarray>=2023.1.0
+dask>=2023.0.0
+scipy>=1.10.0
+
+# Time handling for NetCDF files
+cftime>=1.6.0
+
+# Utilities
+tqdm>=4.65.0
