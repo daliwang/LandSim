@@ -59,7 +59,7 @@ jobs:
           source .venv/bin/activate
           python train_cnp_model.py \
             --epoch 1 \
-            --variable-list ./CNP_IO_updated14_xfer.txt \
+            --variable-list ./CNP_IO_updated9_dev.txt \
             --mask-absent-pfts \
             --model-config ./CNP_model_config_v01.txt \
             --use-trendy1 \
