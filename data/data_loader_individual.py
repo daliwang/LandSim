@@ -102,7 +102,13 @@ class DataLoaderIndividual:
         logger.info("Loading data from multiple paths...")
         for path in self.data_config.data_paths:
             # Resolve files matching pattern
-            files = list(Path(path).glob(self.data_config.file_pattern))
+            # Support per-dataset file patterns if provided
+            try:
+                per_dataset_patterns = getattr(self.data_config, 'dataset_file_patterns', {}) or {}
+            except Exception:
+                per_dataset_patterns = {}
+            pattern = per_dataset_patterns.get(path, self.data_config.file_pattern)
+            files = list(Path(path).glob(pattern))
             # Deterministic ordering for test runs
             if getattr(self.data_config, 'sort_file_list', True):
                 files = sorted(files, key=lambda p: p.name)

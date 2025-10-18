@@ -3,7 +3,7 @@
 This guide walks through the end-to-end workflow using a user-defined CNP_IO list.
 
 ### 1) Create your CNP_IO list
-Use the CNP_IO template to create a user-defined list, e.g. `CNP_IO_demo1.txt`).
+Use the CNP_IO template to create a user-defined list, e.g. `CNP_IO_demo.txt`).
 
 ### 2) Train the AI model
 Run training with your variable list (edit the filename as needed):
@@ -66,7 +66,7 @@ python ../../scripts/ai_predictions_to_netcdf.py  > ai_prediction_to_netcdf.log 
 
 ### 7) Generate comparison plots
 Creates map plots for the variables in your CNP_IO list under
-`./ai_model_comparison_plots/comparison_CNP_IO_demo1`.
+`./ai_model_comparison_plots/comparison_CNP_IO_demo`.
    
 ```bash
 python ../../scripts/ai_model_comparison_plot.py  > ai_model_comparison.log 2>&1 &

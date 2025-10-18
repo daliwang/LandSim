@@ -187,6 +187,11 @@ def main():
         help='Include Trend_05_data_CNP dataset'
     )
     parser.add_argument(
+        '--use-tva4km',
+        action='store_true',
+        help='Include TVA4km dataset'
+    )
+    parser.add_argument(
         '--variable-list',
         type=str,
         default=None,
@@ -285,7 +290,7 @@ def main():
     elif args.normalization == 'hybrid':
         logger.info("Using hybrid normalization (selective individual/group)")
     
-    if not args.use_trendy1 and not args.use_trendy05:
+    if not args.use_trendy1 and not args.use_trendy05 and not getattr(args, 'use_tva4km', False):
         args.use_trendy1 = True
         args.use_trendy05 = False
 
@@ -300,6 +305,7 @@ def main():
         config = get_cnp_combined_config(
             use_trendy1=args.use_trendy1,
             use_trendy05=args.use_trendy05,
+            use_tva4km=args.use_tva4km,
             max_files=args.max_files,
             include_water=include_water,
             variable_list_path=args.variable_list,
@@ -639,12 +645,64 @@ def main():
         
         # Save model configuration
         with open(output_dir / "cnp_config.json", "w") as f:
+            # Derive per-group counts for quick comparison with CNP_IO.txt
+            di = data_info if isinstance(data_info, dict) else {}
+            time_series_cols = di.get('time_series_columns', []) or []
+            static_cols = di.get('static_columns', []) or []
+            pft_param_cols = di.get('pft_param_columns', []) or []
+            scalar_in_cols = di.get('x_list_scalar_columns', []) or []
+            scalar_out_cols = di.get('y_list_scalar_columns', []) or []
+            pft1d_in_vars = di.get('variables_1d_pft', []) or []
+            pft1d_out_vars = di.get('y_list_columns_1d', []) or []
+            soil2d_in_vars = di.get('x_list_columns_2d', []) or []
+            soil2d_out_vars = di.get('y_list_columns_2d', []) or []
+
+            group_counts = {
+                'time_series_variables': len(time_series_cols),
+                'static_columns': len(static_cols),
+                'pft_param_columns': len(pft_param_cols),
+                'scalar_variables_in': len(scalar_in_cols),
+                'scalar_variables_out': len(scalar_out_cols),
+                'pft_1d_variables_in': len(pft1d_in_vars),
+                'pft_1d_variables_out': len(pft1d_out_vars),
+                'soil_2d_variables_in': len(soil2d_in_vars),
+                'soil_2d_variables_out': len(soil2d_out_vars),
+                'total_predicted_variables': len(scalar_out_cols) + len(pft1d_out_vars) + len(soil2d_out_vars)
+            }
+
+            # Expanded prediction element counts (PFTs and Soil layers)
+            # PFTs per variable use model_config.vector_length (expected 16: PFT1..PFT16)
+            pfts_per_var = int(getattr(config.model_config, 'vector_length', 16) or 16)
+            soil_rows_per_var = int(getattr(config.model_config, 'matrix_rows', 1) or 1)
+            soil_layers_per_var = int(getattr(config.model_config, 'matrix_cols', 10) or 10)
+            prediction_element_counts = {
+                'pft_1d': {
+                    'variables_out': len(pft1d_out_vars),
+                    'pfts_per_variable': pfts_per_var,
+                    'total_elements': len(pft1d_out_vars) * pfts_per_var
+                },
+                'soil_2d': {
+                    'variables_out': len(soil2d_out_vars),
+                    'columns_per_variable': soil_rows_per_var,
+                    'layers_per_variable': soil_layers_per_var,
+                    'total_elements': len(soil2d_out_vars) * soil_rows_per_var * soil_layers_per_var
+                },
+                'scalar_1d': {
+                    'variables_out': len(scalar_out_cols)
+                }
+            }
+
             config_dict = {
                 'include_water': include_water,
                 'normalization_method': args.normalization,
                 'data_info': data_info,
+                'data_counts': group_counts,
+                'prediction_element_counts': prediction_element_counts,
                 'model_config': config.model_config.__dict__,
-                'training_config': config.training_config.__dict__
+                'training_config': config.training_config.__dict__,
+                # Model-config provenance for verification
+                'model_config_source': getattr(config, 'model_config_source', None),
+                'model_config_overrides_keys': getattr(config, 'model_config_overrides_keys', None)
             }
             json.dump(config_dict, f, indent=2)
         

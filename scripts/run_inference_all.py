@@ -137,6 +137,37 @@ def _load_training_model_config_from_config(model_path: Path) -> dict:
 
 
 
+# Load training model architecture from cnp_config.json
+def _load_training_model_config(model_path: Path) -> dict:
+    """Load model_config (architecture) from cnp_config.json in the training run directory."""
+    import json
+    try:
+        model_dir = Path(model_path).parent
+        # Search model dir then parents
+        search_dirs = [model_dir] + list(model_dir.parents)
+        for d in search_dirs:
+            config_path = d / 'cnp_config.json'
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        cfg = json.load(f)
+                    mc = cfg.get('model_config')
+                    if isinstance(mc, dict) and mc:
+                        logging.info(f"Loaded training model_config from {config_path}")
+                        return mc
+                    else:
+                        logging.warning(f"model_config missing in {config_path}")
+                        return None
+                except Exception as e:
+                    logging.warning(f"Failed reading model_config from {config_path}: {e}")
+                    return None
+        logging.warning("No cnp_config.json found to load model_config (searched model dir and parents)")
+        return None
+    except Exception as e:
+        logging.warning(f"Error discovering training model_config: {e}")
+        return None
+
+
 
 
 
@@ -272,6 +303,28 @@ def run_inference_all(
         logging.info(f"  Matrix output size: {config.model_config.matrix_output_size}")
     else:
         logging.info("Using default configuration - no variable override applied")
+    
+    # CRITICAL FIX: Apply training architecture (model_config) so weights match exactly
+    if use_training_config:
+        training_model_cfg = _load_training_model_config(Path(model_path))
+        if training_model_cfg:
+            logging.info("Applying training model_config (architecture) from cnp_config.json...")
+            # Set attributes present in config.model_config
+            for key, value in training_model_cfg.items():
+                try:
+                    if hasattr(config.model_config, key):
+                        setattr(config.model_config, key, value)
+                except Exception as e:
+                    logging.warning(f"Failed to apply model_config key '{key}': {e}")
+            # Re-log a few critical dimensions
+            try:
+                logging.info(
+                    f"Architecture summary: lstm_hidden_size={getattr(config.model_config, 'lstm_hidden_size', 'NA')}, "
+                    f"pft_1d_fc_size={getattr(config.model_config, 'pft_1d_fc_size', 'NA')}, "
+                    f"transformer_layers={getattr(config.model_config, 'transformer_layers', 'NA')}"
+                )
+            except Exception:
+                pass
     
     # Update data config with provided paths and pattern
     config.data_config.data_paths = [data_paths]
