@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 import os
 import numpy as np
 import xarray as xr
@@ -19,7 +21,7 @@ from config.training_config import parse_cnp_io_list
 
 # Default paths
 DEFAULT_AI_PREDICTIONS = './comparison_results/ai_predictions_for_plotting.nc'
-DEFAULT_MODEL = '/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/original_780_spinup_from_modelsimulation.nc'
+DEFAULT_MODEL = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
 DEFAULT_OUTPUT_DIR = "./ai_model_comparison_plots"
 
 # Default variables to plot unless '--variables all' is used
@@ -185,10 +187,12 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_ai, data_model, out_dir,
         return float(np.nanmax(a)) if np.any(np.isfinite(a)) else float('nan')
 
     sum_ai = float(np.nansum(data_ai))
+    std_ai = float(np.nanstd(data_ai)) if np.any(np.isfinite(data_ai)) else float('nan')
     min_ai = _nan_min(data_ai)
     max_ai = _nan_max(data_ai)
 
     sum_model = float(np.nansum(data_model))
+    std_model = float(np.nanstd(data_model)) if np.any(np.isfinite(data_model)) else float('nan')
     min_model = _nan_min(data_model)
     max_model = _nan_max(data_model)
 
@@ -208,15 +212,17 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_ai, data_model, out_dir,
         r2 = float('nan')
 
     print(f"Stats for {var}{label_suffix}:")
-    print(f"  {label_ai}: sum={sum_ai:.6g} min={min_ai:.6g} max={max_ai:.6g}")
-    print(f"  {label_model}: sum={sum_model:.6g} min={min_model:.6g} max={max_model:.6g}")
+    print(f"  {label_ai}: sum={sum_ai:.6g} std={std_ai:.6g} min={min_ai:.6g} max={max_ai:.6g}")
+    print(f"  {label_model}: sum={sum_model:.6g} std={std_model:.6g} min={min_model:.6g} max={max_model:.6g}")
     print(f"  Metrics (AI vs Model): n={n} rmse={rmse:.6g} nrmse={nrmse:.6g} r2={r2:.6g}")
 
     stats = {
         "ai_sum": sum_ai,
+        "ai_std": std_ai,
         "ai_min": min_ai,
         "ai_max": max_ai,
         "model_sum": sum_model,
+        "model_std": std_model,
         "model_min": min_model,
         "model_max": max_model,
         "n": n,
@@ -394,8 +400,18 @@ Examples:
                        help='Path to write CSV of statistics (defaults to output dir stats.txt)')
     parser.add_argument('--stats-format', type=str, choices=['csv', 'txt', 'both'], default='txt',
                        help='Format of statistics output: csv, txt, or both [default: txt]')
+    parser.add_argument('--stats-only', action='store_true',
+                       help='Only compute statistics and write CSV (sum/std/min/max per variable and layer/PFT); saves into output_dir/stats')
     
     args = parser.parse_args()
+    # If stats-only is requested, force no-plot and CSV output into a dedicated stats folder
+    if getattr(args, 'stats_only', False):
+        args.no_plot = True
+        # Route outputs to a stats subfolder for cleaner organization
+        # The final output_dir will be resolved below after potential variable-list handling
+        _stats_only_requested = True
+    else:
+        _stats_only_requested = False
     
     # Validate input files
     if not Path(args.ai_predictions).exists():
@@ -422,6 +438,9 @@ Examples:
     requested_all = False
     if args.variables:
         requested_all = (len(args.variables) == 1 and str(args.variables[0]).lower() == 'all')
+    # In stats-only mode, if a variable list is provided, treat as "all" variables from the list
+    if getattr(args, 'stats_only', False) and args.variable_list:
+        requested_all = True
 
     if requested_all:
         if args.variable_list:
@@ -499,6 +518,11 @@ Examples:
         output_dir = Path(args.output_dir)
         os.makedirs(output_dir, exist_ok=True)
     
+    # If stats-only, place outputs under a dedicated stats subdirectory
+    if _stats_only_requested:
+        output_dir = output_dir / 'stats'
+        os.makedirs(output_dir, exist_ok=True)
+
     # Update the output directory for the plotting function
     args.output_dir = str(output_dir)
     
@@ -691,25 +715,56 @@ Examples:
     # Write statistics outputs (CSV/TXT)
     if stats_rows:
         # Resolve output paths
-        csv_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.csv')) else os.path.join(args.output_dir, "stats.csv")
-        txt_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.txt')) else os.path.join(args.output_dir, "stats.txt")
+        if _stats_only_requested:
+            # In stats-only mode, write a concise CSV with the requested metrics under stats folder
+            csv_out = os.path.join(args.output_dir, "summary_stats.csv")
+            txt_out = None
+            output_mode = 'csv'
+        else:
+            csv_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.csv')) else os.path.join(args.output_dir, "stats.csv")
+            txt_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.txt')) else os.path.join(args.output_dir, "stats.txt")
+            output_mode = args.stats_format
         os.makedirs(args.output_dir, exist_ok=True)
 
         # CSV output
-        if args.stats_format in ('csv', 'both'):
-            fieldnames = [
-                "variable", "suffix", "ai_sum", "ai_min", "ai_max",
-                "model_sum", "model_min", "model_max", "n", "rmse", "nrmse", "r2"
-            ]
+        if (output_mode in ('csv', 'both')):
+            if _stats_only_requested:
+                fieldnames = [
+                    "variable", "suffix",
+                    "ai_sum", "ai_std", "ai_min", "ai_max",
+                    "model_sum", "model_std", "model_min", "model_max"
+                ]
+                # Reduce rows to requested columns only
+                filtered_rows = []
+                for row in stats_rows:
+                    filtered_rows.append({
+                        "variable": row.get("variable"),
+                        "suffix": row.get("suffix"),
+                        "ai_sum": row.get("ai_sum"),
+                        "ai_std": row.get("ai_std"),
+                        "ai_min": row.get("ai_min"),
+                        "ai_max": row.get("ai_max"),
+                        "model_sum": row.get("model_sum"),
+                        "model_std": row.get("model_std"),
+                        "model_min": row.get("model_min"),
+                        "model_max": row.get("model_max"),
+                    })
+                rows_to_write = filtered_rows
+            else:
+                fieldnames = [
+                    "variable", "suffix", "ai_sum", "ai_min", "ai_max",
+                    "model_sum", "model_min", "model_max", "n", "rmse", "nrmse", "r2"
+                ]
+                rows_to_write = stats_rows
             with open(csv_out, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
-                for row in stats_rows:
+                for row in rows_to_write:
                     writer.writerow(row)
             print(f"Saved statistics CSV: {csv_out}")
 
         # TXT output (readable, grouped by variable and suffix)
-        if args.stats_format in ('txt', 'both'):
+        if (not _stats_only_requested) and (output_mode in ('txt', 'both')):
             # Group stats by variable then suffix
             from collections import defaultdict
             grouped = defaultdict(list)

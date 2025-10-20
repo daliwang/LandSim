@@ -17,8 +17,8 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from config.training_config import parse_cnp_io_list
 
 # Default file paths
-DATA_DIR = '/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/'
-DEFAULT_FILE_OLD = DATA_DIR + 'original_780_spinup_from_modelsimulation.nc'
+DATA_DIR = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/'
+DEFAULT_FILE_OLD = DATA_DIR + '20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
 
 LABEL_NEW = "AI Generated"
 LABEL_OLD = "Original Model"
@@ -243,6 +243,10 @@ def parse_arguments():
                        help='Comma-separated list of PFTs to plot (default: all PFT0-PFT15)')
     parser.add_argument('--plot-all', action='store_true',
                        help='If set, plot all variables for all 10 layers (0-9) and all 16 PFTs (1-16, skip pft0)')
+    parser.add_argument('--stats-only', action='store_true',
+                       help='Only compute statistics (sum/std/min/max) for all variables and all layers/PFTs; no plots')
+    parser.add_argument('--output-dir', type=str, default=OUTPUT_DIR,
+                       help=f'Output directory for plots or stats (default: {OUTPUT_DIR})')
     return parser.parse_args()
 
 def find_ai_restart_file():
@@ -260,7 +264,13 @@ def find_ai_restart_file():
 def main():
     args = parse_arguments()
     
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # Resolve output directory (stats-only goes to a stats subfolder)
+    out_dir_base = Path(args.output_dir)
+    if args.stats_only:
+        output_dir = out_dir_base / 'stats'
+    else:
+        output_dir = out_dir_base
+    os.makedirs(output_dir, exist_ok=True)
     # Parse layers and PFTs
     global LEVGRND_LAYERS, PFT_PICK_LIST
     if args.plot_all:
@@ -327,7 +337,8 @@ def main():
     print(f"Total gridcells: {n_grid} | total columns: {col2grid.size} | total pfts: {pft2grid.size}")
     print(f"Example: gridcell 0 -> columns {grid_to_cols[0][:5]}, pfts {grid_to_pfts[0][:5]}")
 
-    print(f"\nStart plotting: {len(VARIABLES)} variables")
+    stats_rows = []
+    print(f"\nStart {'statistics' if args.stats_only else 'plotting'}: {len(VARIABLES)} variables")
     for var in VARIABLES:
         if (var not in ds_new.data_vars) or (var not in ds_old.data_vars):
             print(f"Skip {var} (not found in both files)")
@@ -345,7 +356,13 @@ def main():
             vals_new = _to_nan_fillvalue(da_new_cl.values)
             vals_old = _to_nan_fillvalue(da_old_cl.values)
 
-            for lev in LEVGRND_LAYERS:
+            # Iterate all layers if stats-only; otherwise iterate requested layers
+            if args.stats_only:
+                lev_iter = range(int(da_new_cl.sizes["levgrnd"]))
+            else:
+                lev_iter = LEVGRND_LAYERS
+
+            for lev in lev_iter:
                 if lev < 0 or lev >= da_new_cl.sizes["levgrnd"]:
                     print(f"  Layer {lev} out of range, skipped")
                     continue
@@ -366,12 +383,26 @@ def main():
                     # Always use mapping for old/model file
                     old_grid[g] = vals_old[c0, lev]
 
-                # Debug print for this layer
-                print(f"[DEBUG] {var} lev{lev}: new_grid min={np.nanmin(new_grid)}, max={np.nanmax(new_grid)}, mean={np.nanmean(new_grid)}, sample={new_grid[:10]}")
-                print(f"[DEBUG] {var} lev{lev}: old_grid min={np.nanmin(old_grid)}, max={np.nanmax(old_grid)}, mean={np.nanmean(old_grid)}, sample={old_grid[:10]}")
-
-                _plot_tripanel(var, f"_lev{lev}", grid_lon, grid_lat, new_grid, old_grid, OUTPUT_DIR,
-                               label_new=LABEL_NEW, label_old=LABEL_OLD)
+                if args.stats_only:
+                    # Compute stats only
+                    new_sum = float(np.nansum(new_grid))
+                    new_std = float(np.nanstd(new_grid)) if np.any(np.isfinite(new_grid)) else float('nan')
+                    new_min = float(np.nanmin(new_grid)) if np.any(np.isfinite(new_grid)) else float('nan')
+                    new_max = float(np.nanmax(new_grid)) if np.any(np.isfinite(new_grid)) else float('nan')
+                    old_sum = float(np.nansum(old_grid))
+                    old_std = float(np.nanstd(old_grid)) if np.any(np.isfinite(old_grid)) else float('nan')
+                    old_min = float(np.nanmin(old_grid)) if np.any(np.isfinite(old_grid)) else float('nan')
+                    old_max = float(np.nanmax(old_grid)) if np.any(np.isfinite(old_grid)) else float('nan')
+                    stats_rows.append({
+                        "variable": var,
+                        "suffix": f"_lev{lev}",
+                        "new_sum": new_sum, "new_std": new_std, "new_min": new_min, "new_max": new_max,
+                        "old_sum": old_sum, "old_std": old_std, "old_min": old_min, "old_max": old_max,
+                    })
+                else:
+                    # Plotting mode
+                    _plot_tripanel(var, f"_lev{lev}", grid_lon, grid_lat, new_grid, old_grid, str(out_dir_base),
+                                   label_new=LABEL_NEW, label_old=LABEL_OLD)
 
         elif ("pft" in dims) and (len(dims) == 1):
             # PFT1D variable
@@ -380,7 +411,15 @@ def main():
             vals_new = _to_nan_fillvalue(da_new_p.values)
             vals_old = _to_nan_fillvalue(da_old_p.values)
 
-            for k in PFT_PICK_LIST:
+            # Iterate all PFT TYPES (0..15) if stats-only; otherwise iterate requested PFTs
+            # Note: da_new_p.sizes["pft"] is the total number of PFT entries across all gridcells (very large).
+            #       For comparison we want PFT type indices 0..15 which are mapped per-gridcell via grid_to_pfts.
+            if args.stats_only:
+                pft_iter = range(16)
+            else:
+                pft_iter = PFT_PICK_LIST
+
+            for k in pft_iter:
                 if k < 0 or k >= da_new_p.sizes["pft"]:
                     print(f"  PFT {k} out of range, skipped")
                     continue
@@ -398,28 +437,66 @@ def main():
                         new_grid[g] = vals_new[p_idx]
                         old_grid[g] = vals_old[p_idx]
 
-                _plot_tripanel(var, f"_pft{k}", grid_lon, grid_lat, new_grid, old_grid, OUTPUT_DIR,
-                               label_new=LABEL_NEW, label_old=LABEL_OLD)
+                if args.stats_only:
+                    new_sum = float(np.nansum(new_grid))
+                    new_std = float(np.nanstd(new_grid)) if np.any(np.isfinite(new_grid)) else float('nan')
+                    new_min = float(np.nanmin(new_grid)) if np.any(np.isfinite(new_grid)) else float('nan')
+                    new_max = float(np.nanmax(new_grid)) if np.any(np.isfinite(new_grid)) else float('nan')
+                    old_sum = float(np.nansum(old_grid))
+                    old_std = float(np.nanstd(old_grid)) if np.any(np.isfinite(old_grid)) else float('nan')
+                    old_min = float(np.nanmin(old_grid)) if np.any(np.isfinite(old_grid)) else float('nan')
+                    old_max = float(np.nanmax(old_grid)) if np.any(np.isfinite(old_grid)) else float('nan')
+                    stats_rows.append({
+                        "variable": var,
+                        "suffix": f"_pft{k}",
+                        "new_sum": new_sum, "new_std": new_std, "new_min": new_min, "new_max": new_max,
+                        "old_sum": old_sum, "old_std": old_std, "old_min": old_min, "old_max": old_max,
+                    })
+                else:
+                    _plot_tripanel(var, f"_pft{k}", grid_lon, grid_lat, new_grid, old_grid, str(out_dir_base),
+                                   label_new=LABEL_NEW, label_old=LABEL_OLD)
 
         else:
             print(f"  Skip {var} (only supports (column, levgrnd) and (pft,))")
 
+    # Write stats CSV if stats-only
+    if args.stats_only and stats_rows:
+        import csv
+        csv_path = output_dir / 'summary_stats.csv'
+        fieldnames = [
+            'variable', 'suffix',
+            'new_sum', 'new_std', 'new_min', 'new_max',
+            'old_sum', 'old_std', 'old_min', 'old_max'
+        ]
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in stats_rows:
+                writer.writerow(row)
+        print(f"Saved statistics CSV: {csv_path}")
+
     ds_new.close()
     ds_old.close()
-    
-    # Print comparison summary
+
+    # Print summary
     print("\n" + "="*80)
     print("AI RESTART COMPARISON SUMMARY:")
     print("="*80)
     print(f"Original restart: {os.path.abspath(FILE_OLD)}")
     print(f"AI-enhanced restart: {os.path.abspath(FILE_NEW)}")
     print(f"Labels: {LABEL_OLD} vs {LABEL_NEW}")
-    print(f"Output directory: {os.path.abspath(OUTPUT_DIR)}")
-    print(f"Variables plotted: {VARIABLES}")
-    print(f"Layers plotted: {LEVGRND_LAYERS}")
-    print(f"PFTs plotted: {PFT_PICK_LIST}")
+    print(f"Output directory: {os.path.abspath(str(output_dir))}")
+    print(f"Variables processed: {VARIABLES}")
+    if args.stats_only:
+        print("Mode: stats-only (all layers and all PFTs)")
+    else:
+        print(f"Layers plotted: {LEVGRND_LAYERS}")
+        print(f"PFTs plotted: {PFT_PICK_LIST}")
     print("="*80)
-    print("\nAll plots done! Output dir:", OUTPUT_DIR)
+    if args.stats_only:
+        print("\nCompleted without plotting. Stats CSV saved to:", str(output_dir))
+    else:
+        print("\nAll plots done! Output dir:", str(out_dir_base))
 
 if __name__ == "__main__":
     main()
