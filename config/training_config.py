@@ -441,7 +441,12 @@ def parse_cnp_io_list(filename):
         'file_pattern': None,
         'trendy1_file_pattern': None,
         'trendy05_file_pattern': None,
-        'tva4km_file_pattern': None
+        'tva4km_file_pattern': None,
+        'ai_predictions_default': None,
+        'model_default': None,
+        'comparison_output_dir': None,
+        'csv_predictions_default': None,
+        'ai_restart_default': None
     })
     current_section = None
 
@@ -494,7 +499,7 @@ def parse_cnp_io_list(filename):
                 #       FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
                 #       DATA_PATHS: /p1,/p2
                 if line and not line.startswith('#'):
-                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths)\s*[:=]\s*(.+)$', line)
+                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths|ai_predictions_default|model_default|comparison_output_dir|csv_predictions_default|ai_restart_default)\s*[:=]\s*(.+)$', line)
                     if kv_match:
                         key = kv_match.group(1).lower()
                         val = kv_match.group(2).strip()
@@ -516,6 +521,16 @@ def parse_cnp_io_list(filename):
                             result['trendy05_file_pattern'] = val
                         elif key == 'tva4km_file_pattern':
                             result['tva4km_file_pattern'] = val
+                        elif key == 'ai_predictions_default':
+                            result['ai_predictions_default'] = val
+                        elif key == 'model_default':
+                            result['model_default'] = val
+                        elif key == 'comparison_output_dir':
+                            result['comparison_output_dir'] = val
+                        elif key == 'csv_predictions_default':
+                            result['csv_predictions_default'] = val
+                        elif key == 'ai_restart_default':
+                            result['ai_restart_default'] = val
     return result
 
 def parse_cnp_model_config(filename: str) -> Dict[str, Any]:

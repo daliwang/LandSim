@@ -91,13 +91,9 @@ def create_spatial_mapping(ds_ai: xr.Dataset, ds_model: xr.Dataset) -> tuple[np.
     from scipy.spatial.distance import cdist
     ai_coords = np.column_stack([ai_lon, ai_lat])
     model_coords = np.column_stack([model_lon, model_lat])
-    distances = cdist(ai_coords, model_coords)
-    ai_to_model_mapping = np.argmin(distances, axis=1)
-    
-    print(f"  Spatial mapping created: {len(ai_to_model_mapping)} AI -> {len(set(ai_to_model_mapping))} Model")
-    print(f"  Mapping range: AI gridcell 0->model gridcell {ai_to_model_mapping[0]}")
-    print(f"  Mapping range: AI gridcell {len(ai_lon)-1}->model gridcell {ai_to_model_mapping[-1]}")
-    
+    distances = cdist(model_coords, ai_coords)
+    model_to_ai_mapping = np.argmin(distances, axis=1) # 索引是模型格点, 值是最近的 AI 格点
+    print(f"  Spatial mapping created: {len(model_to_ai_mapping)} Model -> {len(set(model_to_ai_mapping))} AI")
     # Get grid information from the MODEL file as the master coordinate system
     n_grid = ds_model.sizes["gridcell"]
     print(f"  Using MODEL gridcell count: {n_grid}")
@@ -119,7 +115,7 @@ def create_spatial_mapping(ds_ai: xr.Dataset, ds_model: xr.Dataset) -> tuple[np.
         'n_grid': n_grid
     }
     
-    return ai_to_model_mapping, variable_mapping
+    return model_to_ai_mapping, variable_mapping
 
 
 def auto_detect_variable_list(ai_predictions_path: Path) -> list:
@@ -148,8 +144,7 @@ def auto_detect_variable_list(ai_predictions_path: Path) -> list:
 
 def create_updated_restart_file(restart_file_path: Path, output_path: Path, 
                                ai_predictions_path: Path, cnp_io_variables: List[str],
-                               ai_to_model_mapping: np.ndarray, variable_mapping: Dict[str, Any]) -> None:
-    """Directly update the restart file using netCDF4 without xarray encoding issues."""
+                               model_to_ai_mapping: np.ndarray, variable_mapping: Dict[str, Any]) -> None:
     print(f"Saving updated restart file to: {output_path}")
     
     # Create output directory if it doesn't exist
@@ -184,23 +179,15 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                                 # Get PFTs in this gridcell
                                 gridcell_pfts = grid_to_pfts[g]
                                 
-                                # Find corresponding AI gridcell using spatial mapping
-                                ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
-                                if len(ai_gridcell_idx) > 0:
-                                    ai_gridcell_idx = ai_gridcell_idx[0]
-                                    
-                                    # Update each PFT instance in this gridcell
-                                    # Only update PFT1-PFT16 (skip PFT0), and only in the first column
-                                    # Get the first 16 PFTs in this gridcell (exact same as working script)
-                                    gridcell_pfts = gridcell_pfts[:16]  # First 16 PFTs
-                                    for pft_idx, model_pft_idx in enumerate(gridcell_pfts):
-                                        # Skip PFT0 (index 0), start from PFT1 (index 1)
-                                        if 1 <= pft_idx <= 16 and model_pft_idx < len(model_var):
-                                            # AI PFT0 -> Model PFT1, AI PFT1 -> Model PFT2, etc.
-                                            # Adjust index: AI PFT k corresponds to Model PFT (k+1) in the first 16
-                                            adjusted_k = pft_idx - 1  # AI PFT0 -> Model PFT1, AI PFT1 -> Model PFT2
-                                            if adjusted_k < ai_data.shape[0]:
-                                                model_var[model_pft_idx] = ai_data[adjusted_k, ai_gridcell_idx]
+
+                                ai_gridcell_idx = model_to_ai_mapping[g]
+                                gridcell_pfts = gridcell_pfts[:16] 
+                                for pft_idx, model_pft_idx in enumerate(gridcell_pfts):
+                                    # Skip PFT0 (index 0), start from PFT1 (index 1)
+                                    if 1 <= pft_idx <= 16 and model_pft_idx < len(model_var):
+                                        adjusted_k = pft_idx - 1  
+                                        if adjusted_k < ai_data.shape[0]:
+                                            model_var[model_pft_idx] = ai_data[adjusted_k, ai_gridcell_idx]
             
             # Update soil variables
             for var_name in ds_ai.variables:
@@ -224,27 +211,21 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                                 # Get columns in this gridcell
                                 gridcell_cols = grid_to_cols[g]
                                 
-                                # Find corresponding AI gridcell using spatial mapping
-                                ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
-                                if len(ai_gridcell_idx) > 0:
-                                    ai_gridcell_idx = ai_gridcell_idx[0]
-                                    
-                                    # Update first column in this gridcell (use AI column 0)
-                                    if len(gridcell_cols) > 0:
-                                        model_col_idx = gridcell_cols[0]  # First column of this gridcell
-                                        if model_col_idx < model_var.shape[0]:
-                                            # Update only first 10 layers for this column (even if model has 15 layers)
-                                            layers_to_update = min(10, ai_data.shape[1])
-                                            for layer_idx in range(layers_to_update):
-                                                # Handle AI data indexing - shape is (column, levgrnd, gridcell)
-                                                if ai_data.ndim == 3:
-                                                    model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx, ai_gridcell_idx]
-                                                else:
-                                                    model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx]
+
+                                ai_gridcell_idx = model_to_ai_mapping[g]
+
+                                if len(gridcell_cols) > 0:
+                                    model_col_idx = gridcell_cols[0]  
+                                    if model_col_idx < model_var.shape[0]:
+                                        layers_to_update = min(10, ai_data.shape[1])
+                                        for layer_idx in range(layers_to_update):
+                                            if ai_data.ndim == 3:
+                                                model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx, ai_gridcell_idx]
+                                            else:
+                                                model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx]
     
     print(f"Updated restart file saved successfully!")
     print(f"File size: {output_path.stat().st_size / (1024*1024):.1f} MB")
-
 
 def get_varlist_name_from_config(ai_predictions_path):
     for parent in [ai_predictions_path.parent] + list(ai_predictions_path.parents):

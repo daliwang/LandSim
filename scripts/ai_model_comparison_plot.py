@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-import ssl
-ssl._create_default_https_context = ssl._create_unverified_context
 import os
 import numpy as np
 import xarray as xr
@@ -14,15 +12,18 @@ from pathlib import Path
 import sys
 from typing import List
 import csv
-
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+import pandas as pd
 # Project imports
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from config.training_config import parse_cnp_io_list
 
 # Default paths
-DEFAULT_AI_PREDICTIONS = './comparison_results/ai_predictions_for_plotting.nc'
-DEFAULT_MODEL = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
-DEFAULT_OUTPUT_DIR = "./ai_model_comparison_plots"
+FALLBACK_AI_PREDICTIONS = './comparison_results/ai_predictions_for_plotting.nc'
+FALLBACK_MODEL = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+FALLBACK_OUTPUT_DIR = "./ai_model_comparison_plots"
+FALLBACK_CSV_PREDICTIONS = './cnp_inference_entire_dataset/cnp_predictions'
 
 # Default variables to plot unless '--variables all' is used
 VARIABLES = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc']
@@ -33,6 +34,280 @@ LEVGRND_LAYERS = [0, 4, 9]  # Layers 0, 4, 9 (corresponding to AI layers 1, 5, 1
 # PFTs to plot (AI has PFT1-16, model has PFT0-16)
 # Note: AI PFT0 = Model PFT1, AI PFT1 = Model PFT2, etc.
 PFT_PICK_LIST = [0, 1, 2, 3, 4]  # PFT1, PFT2, PFT3, PFT4, PFT5 (0-indexed, so 0=PFT1, 1=PFT2, etc.)
+
+CSV_LONGITUDE_NAMES = ("Longitude", "Long", "long", "lon", "LON")
+CSV_LATITUDE_NAMES = ("Latitude", "Lat", "lat", "LAT")
+CSV_COORD_COLUMNS = CSV_LONGITUDE_NAMES + CSV_LATITUDE_NAMES
+
+
+QUALITY_THRESHOLDS = {
+    'good': 0.9,  # R² >= 0.9 for good quality
+    'ok': 0.7     # R² >= 0.7 for ok quality
+}
+
+
+def _extract_coords_from_df(df: pd.DataFrame):
+    lon = lat = None
+    for col in CSV_LONGITUDE_NAMES:
+        if col in df.columns:
+            lon = pd.to_numeric(df[col], errors='coerce').to_numpy()
+            break
+    for col in CSV_LATITUDE_NAMES:
+        if col in df.columns:
+            lat = pd.to_numeric(df[col], errors='coerce').to_numpy()
+            break
+    return lon, lat
+
+
+def _drop_coord_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop(columns=[c for c in CSV_COORD_COLUMNS if c in df.columns], errors='ignore')
+
+
+def _get_case_insensitive(mapping, key):
+    if mapping is None:
+        return None
+    if key in mapping:
+        return mapping[key]
+    key_lower = key.lower()
+    for k, v in mapping.items():
+        if k.lower() == key_lower:
+            return v
+    return None
+
+
+def _classify_quality_from_r2(value: float) -> str:
+    """Classify quality based on R² value (similar to generate_prediction_quality_report.py)"""
+    if value is None or not np.isfinite(value):
+        return 'unknown'
+    val = float(value)
+    if val >= QUALITY_THRESHOLDS['good']:
+        return 'good'
+    if val >= QUALITY_THRESHOLDS['ok']:
+        return 'ok'
+    return 'bad'
+
+
+def load_csv_predictions(csv_path: str) -> dict:
+    path = Path(csv_path)
+    if not path.exists():
+        raise FileNotFoundError(f"CSV predictions source not found: {csv_path}")
+
+    store = {
+        'source': str(path),
+        'scalar_df': None,
+        'scalar_columns': {},
+        'scalar_vars': set(),
+        'scalar_coords': None,
+        'pft_data': {},
+        'pft_columns': {},
+        'pft_vars': set(),
+        'pft_coords': {},
+        'soil_data': {},
+        'soil_columns': {},
+        'soil_vars': set(),
+        'soil_coords': {},
+        'static_inverse': None,
+        'flat_df': None,
+        'flat_columns': {},
+        'flat_vars': set(),
+        'flat_coords': None,
+    }
+
+    if path.is_dir():
+        scalar_path = path / 'predictions_scalar.csv'
+        if scalar_path.exists():
+            df = pd.read_csv(scalar_path)
+            lon, lat = _extract_coords_from_df(df)
+            data = _drop_coord_columns(df)
+            col_map = {}
+            scalar_vars = set()
+            for col in data.columns:
+                base = col[2:] if col.startswith('Y_') else col
+                scalar_vars.add(base)
+                if base not in col_map:
+                    col_map[base] = col
+                if base.lower() not in col_map:
+                    col_map[base.lower()] = col
+            store['scalar_df'] = data
+            store['scalar_columns'] = col_map
+            store['scalar_vars'] = scalar_vars
+            store['scalar_coords'] = (lon, lat)
+
+        pft_dir = path / 'pft_1d_predictions'
+        if pft_dir.exists():
+            for csv_file in sorted(pft_dir.glob('predictions_*.csv')):
+                var_name = csv_file.stem.replace('predictions_Y_', '')
+                df = pd.read_csv(csv_file)
+                lon, lat = _extract_coords_from_df(df)
+                data = _drop_coord_columns(df)
+                cols = [c for c in data.columns if '_pft' in c]
+                if not cols:
+                    continue
+                def _pft_idx(col_name: str) -> int:
+                    try:
+                        return int(col_name.split('_pft')[-1])
+                    except Exception:
+                        return 999999
+                cols = sorted(cols, key=_pft_idx)
+                store['pft_data'][var_name] = data
+                store['pft_columns'][var_name] = cols
+                store['pft_vars'].add(var_name)
+                store['pft_coords'][var_name] = (lon, lat)
+
+        soil_dir = path / 'soil_2d_predictions'
+        if soil_dir.exists():
+            for csv_file in sorted(soil_dir.glob('predictions_*.csv')):
+                var_name = csv_file.stem.replace('predictions_Y_', '')
+                df = pd.read_csv(csv_file)
+                lon, lat = _extract_coords_from_df(df)
+                data = _drop_coord_columns(df)
+                cols = [c for c in data.columns if '_layer' in c]
+                if not cols:
+                    continue
+                def _layer_idx(col_name: str) -> int:
+                    try:
+                        return int(col_name.split('_layer')[-1])
+                    except Exception:
+                        return 999999
+                cols = sorted(cols, key=_layer_idx)
+                store['soil_data'][var_name] = data
+                store['soil_columns'][var_name] = cols
+                store['soil_vars'].add(var_name)
+                store['soil_coords'][var_name] = (lon, lat)
+
+        static_path = path / 'test_static_inverse.csv'
+        if static_path.exists():
+            try:
+                store['static_inverse'] = pd.read_csv(static_path)
+            except Exception as exc:
+                print(f"Warning: failed to load test_static_inverse.csv: {exc}")
+
+    elif path.is_file():
+        df = pd.read_csv(path)
+        lon, lat = _extract_coords_from_df(df)
+        data = _drop_coord_columns(df)
+        col_map = {}
+        flat_vars = set()
+        for col in data.columns:
+            base = col[2:] if col.startswith('Y_') else col
+            flat_vars.add(base)
+            if base not in col_map:
+                col_map[base] = col
+            if base.lower() not in col_map:
+                col_map[base.lower()] = col
+        store['flat_df'] = data
+        store['flat_columns'] = col_map
+        store['flat_vars'] = flat_vars
+        store['flat_coords'] = (lon, lat)
+    else:
+        raise ValueError(f"Unsupported CSV predictions path: {csv_path}")
+
+    available = set()
+    for key in ('scalar_vars', 'pft_vars', 'soil_vars', 'flat_vars'):
+        available.update(store.get(key, set()))
+    store['available_vars'] = available
+    print(f"Loaded CSV predictions from {path} with {len(available)} variables")
+    return store
+
+
+def build_variable_category_map(variable_list_path: str) -> dict:
+    if not variable_list_path:
+        return {}
+    try:
+        parsed = parse_cnp_io_list(variable_list_path)
+    except Exception as exc:
+        print(f"Warning: unable to parse variable list for category mapping: {exc}")
+        return {}
+    mapping = {}
+    for name in parsed.get('scalar_variables', []) or []:
+        mapping[name] = 'scalar'
+    for name in parsed.get('pft_1d_variables', []) or []:
+        mapping[name] = 'pft1d'
+    for name in parsed.get('variables_2d_soil', []) or []:
+        mapping[name] = 'soil2d'
+    return mapping
+
+
+def infer_variable_category(var: str, dims, category_map: dict) -> str:
+    if category_map and var in category_map:
+        return category_map[var]
+    if dims and any(dim in ('levgrnd', 'column') for dim in dims):
+        return 'soil2d'
+    if dims and any(dim == 'pft' for dim in dims):
+        return 'pft1d'
+    return 'scalar'
+
+
+def csv_has_variable(store: dict, var: str, category: str = None) -> bool:
+    if store is None:
+        return False
+    if category == 'scalar':
+        if store.get('scalar_df') is not None and _get_case_insensitive(store.get('scalar_columns'), var):
+            return True
+        if store.get('flat_df') is not None and _get_case_insensitive(store.get('flat_columns'), var):
+            return True
+        return False
+    if category == 'pft1d':
+        return _get_case_insensitive(store.get('pft_data'), var) is not None
+    if category == 'soil2d':
+        return _get_case_insensitive(store.get('soil_data'), var) is not None
+    return (csv_has_variable(store, var, 'scalar') or
+            csv_has_variable(store, var, 'pft1d') or
+            csv_has_variable(store, var, 'soil2d'))
+
+
+def extract_csv_scalar(store: dict, var: str):
+    df = store.get('scalar_df')
+    columns = store.get('scalar_columns')
+    col = _get_case_insensitive(columns, var) if columns else None
+    if df is None or col is None:
+        df = store.get('flat_df')
+        columns = store.get('flat_columns')
+        col = _get_case_insensitive(columns, var) if columns else None
+    if df is None or col is None:
+        col = _get_case_insensitive(columns, f'Y_{var}') if columns else None
+        if df is None or col is None:
+            return None
+    return pd.to_numeric(df[col], errors='coerce').to_numpy()
+
+
+def extract_csv_pft(store: dict, var: str):
+    data_dict = store.get('pft_data')
+    df = _get_case_insensitive(data_dict, var)
+    if df is None:
+        return None
+    columns_map = store.get('pft_columns')
+    cols = _get_case_insensitive(columns_map, var)
+    if not cols:
+        cols = [c for c in df.columns if '_pft' in c]
+        if not cols:
+            return None
+        def _pft_idx(col_name: str) -> int:
+            try:
+                return int(col_name.split('_pft')[-1])
+            except Exception:
+                return 999999
+        cols = sorted(cols, key=_pft_idx)
+    arr = np.full((len(cols), len(df)), np.nan, dtype=float)
+    for idx, col in enumerate(cols):
+        arr[idx, :] = pd.to_numeric(df[col], errors='coerce').to_numpy()
+    return arr
+
+
+def extract_csv_soil(store: dict, var: str):
+    data_dict = store.get('soil_data')
+    df = _get_case_insensitive(data_dict, var)
+    if df is None:
+        return None
+    columns_map = store.get('soil_columns')
+    cols = _get_case_insensitive(columns_map, var)
+    if not cols:
+        cols = list(df.columns)
+    arr = np.full((len(cols), len(df)), np.nan, dtype=float)
+    for idx, col in enumerate(cols):
+        arr[idx, :] = pd.to_numeric(df[col], errors='coerce').to_numpy()
+    return arr
+
 
 def _safe_get(ds, name):
     """Safely get a variable from dataset, with error handling."""
@@ -304,6 +579,21 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_ai, data_model, out_dir,
 
     return stats
 
+def _load_default_paths(variable_list_path: str):
+    defaults = {}
+    if variable_list_path:
+        try:
+            vl_path = Path(variable_list_path)
+            if vl_path.exists():
+                parsed = parse_cnp_io_list(variable_list_path)
+                for key in ('ai_predictions_default', 'model_default', 'comparison_output_dir', 'csv_predictions_default'):
+                    value = parsed.get(key) if isinstance(parsed, dict) else None
+                    if value:
+                        defaults[key] = value
+        except Exception as exc:
+            print(f"Warning: Failed to load default paths from {variable_list_path}: {exc}")
+    return defaults
+
 def parse_variable_list_file(variable_list_path: str) -> List[str]:
     """Parse the CNP IO list file to extract all variables."""
     print(f"Parsing variable list file: {variable_list_path}")
@@ -380,12 +670,12 @@ Examples:
         """
     )
     
-    parser.add_argument('--ai-predictions', default=DEFAULT_AI_PREDICTIONS,
-                       help=f'Path to AI predictions NetCDF file [default: {DEFAULT_AI_PREDICTIONS}]')
-    parser.add_argument('--model', default=DEFAULT_MODEL,
-                       help=f'Path to model results NetCDF file [default: {DEFAULT_MODEL}]')
-    parser.add_argument('--output-dir', default=DEFAULT_OUTPUT_DIR,
-                       help=f'Output directory for plots [default: {DEFAULT_OUTPUT_DIR}]')
+    parser.add_argument('--ai-predictions', default=None,
+                       help=f'Path to AI predictions NetCDF file [default: AI_PREDICTIONS_DEFAULT in variable list or {FALLBACK_AI_PREDICTIONS}]')
+    parser.add_argument('--model', default=None,
+                       help=f'Path to model results NetCDF file [default: MODEL_DEFAULT in variable list or {FALLBACK_MODEL}]')
+    parser.add_argument('--output-dir', default=None,
+                       help=f'Output directory for plots [default: COMPARISON_OUTPUT_DIR in variable list or {FALLBACK_OUTPUT_DIR}]')
     parser.add_argument('--variable-list', type=str,
                        help='Path to CNP_IO_list file to extract all variables for plotting')
     parser.add_argument('--variables', nargs='*', default=VARIABLES,
@@ -400,30 +690,51 @@ Examples:
                        help='Path to write CSV of statistics (defaults to output dir stats.txt)')
     parser.add_argument('--stats-format', type=str, choices=['csv', 'txt', 'both'], default='txt',
                        help='Format of statistics output: csv, txt, or both [default: txt]')
+    parser.add_argument('--csv-predictions', type=str, default=None,
+                       help='Path to CSV predictions (directory or file) containing original AI outputs for comparison')
     parser.add_argument('--stats-only', action='store_true',
-                       help='Only compute statistics and write CSV (sum/std/min/max per variable and layer/PFT); saves into output_dir/stats')
-    
+                       help='Only compute statistics; disables plotting and processes all layers/PFTs when used with --variable-list')
+
     args = parser.parse_args()
-    # If stats-only is requested, force no-plot and CSV output into a dedicated stats folder
-    if getattr(args, 'stats_only', False):
+
+    defaults_from_config = _load_default_paths(args.variable_list)
+
+    def _resolve_default(current_value, config_key, fallback):
+        candidate = current_value or defaults_from_config.get(config_key)
+        if candidate:
+            return str(candidate)
+        return fallback
+
+    args.ai_predictions = _resolve_default(args.ai_predictions, 'ai_predictions_default', FALLBACK_AI_PREDICTIONS)
+    args.model = _resolve_default(args.model, 'model_default', FALLBACK_MODEL)
+    args.output_dir = _resolve_default(args.output_dir, 'comparison_output_dir', FALLBACK_OUTPUT_DIR)
+    args.csv_predictions = _resolve_default(args.csv_predictions, 'csv_predictions_default', FALLBACK_CSV_PREDICTIONS)
+
+    use_csv_predictions = bool(args.csv_predictions)
+    if args.stats_only:
         args.no_plot = True
-        # Route outputs to a stats subfolder for cleaner organization
-        # The final output_dir will be resolved below after potential variable-list handling
-        _stats_only_requested = True
-    else:
-        _stats_only_requested = False
-    
+
     # Validate input files
     if not Path(args.ai_predictions).exists():
         raise FileNotFoundError(f"AI predictions file not found: {args.ai_predictions}")
-    if not Path(args.model).exists():
-        raise FileNotFoundError(f"Model file not found: {args.model}")
-    
+    if use_csv_predictions:
+        if not Path(args.csv_predictions).exists():
+            raise FileNotFoundError(f"CSV predictions source not found: {args.csv_predictions}")
+    else:
+        if not Path(args.model).exists():
+            raise FileNotFoundError(f"Model file not found: {args.model}")
+
     print("="*60)
-    print("AI vs Model Comparison")
+    if use_csv_predictions:
+        print("CSV vs NetCDF Comparison")
+    else:
+        print("AI vs Model Comparison")
     print("="*60)
-    print(f"AI predictions: {args.ai_predictions}")
-    print(f"Model results: {args.model}")
+    print(f"AI predictions (NetCDF): {args.ai_predictions}")
+    if use_csv_predictions:
+        print(f"CSV predictions: {args.csv_predictions}")
+    else:
+        print(f"Model results: {args.model}")
     print(f"Output directory: {args.output_dir}")
     print(f"Variables to plot: {args.variables}")
     print(f"Layers to plot: {args.layers}")
@@ -432,81 +743,117 @@ Examples:
     
     # Open datasets once
     ds_ai = xr.open_dataset(args.ai_predictions)
-    ds_model = xr.open_dataset(args.model)
+    csv_predictions = None
+    if use_csv_predictions:
+        csv_predictions = load_csv_predictions(args.csv_predictions)
+        ds_model = None
+    else:
+        ds_model = xr.open_dataset(args.model)
 
     # Determine variable selection behavior
     requested_all = False
     if args.variables:
         requested_all = (len(args.variables) == 1 and str(args.variables[0]).lower() == 'all')
-    # In stats-only mode, if a variable list is provided, treat as "all" variables from the list
-    if getattr(args, 'stats_only', False) and args.variable_list:
+    if args.stats_only and args.variable_list:
         requested_all = True
+
+    variable_category_map = build_variable_category_map(args.variable_list) if args.variable_list else {}
+
+    ai_vars = set(ds_ai.data_vars.keys())
 
     if requested_all:
         if args.variable_list:
             if not Path(args.variable_list).exists():
-                ds_ai.close(); ds_model.close()
+                ds_ai.close()
+                if ds_model is not None:
+                    ds_model.close()
                 raise FileNotFoundError(f"Variable list file not found: {args.variable_list}")
-            # Parse the variable list file to get all variables
             all_variables = parse_variable_list_file(args.variable_list)
-            # Filter to only include variables that exist in both datasets
-            ai_vars = set(ds_ai.data_vars.keys())
-            model_vars = set(ds_model.data_vars.keys())
-            available_vars = [var for var in all_variables if var in ai_vars and var in model_vars]
+            if use_csv_predictions:
+                available_vars = [
+                    var for var in all_variables
+                    if var in ai_vars and csv_has_variable(csv_predictions, var, variable_category_map.get(var))
+                ]
+            else:
+                model_vars = set(ds_model.data_vars.keys())
+                available_vars = [var for var in all_variables if var in ai_vars and var in model_vars]
             if available_vars:
                 args.variables = available_vars
                 print(f"Using all variables from variable list ({len(available_vars)}): {available_vars}")
             else:
-                print("Warning: No variables from variable list found in both datasets!")
-                ds_ai.close(); ds_model.close()
+                print("Warning: No variables from variable list found in available datasets!")
+                ds_ai.close()
+                if ds_model is not None:
+                    ds_model.close()
                 return
         else:
-            # Discover all common variables across datasets
-            discovered_vars = discover_common_variables(ds_ai, ds_model)
-            if discovered_vars:
-                args.variables = discovered_vars
-                print(f"Using all common variables ({len(discovered_vars)}): {discovered_vars}")
+            if use_csv_predictions:
+                csv_vars = set(csv_predictions.get('available_vars', set()))
+                discovered_vars = sorted(ai_vars.intersection(csv_vars))
+                if discovered_vars:
+                    args.variables = discovered_vars
+                    print(f"Using all common variables between NetCDF and CSV ({len(discovered_vars)}): {discovered_vars}")
+                else:
+                    print("Warning: No common variables found between AI NetCDF predictions and CSV source!")
+                    ds_ai.close()
+                    return
             else:
-                print("Warning: No common variables found between AI predictions and model!")
+                discovered_vars = discover_common_variables(ds_ai, ds_model)
+                if discovered_vars:
+                    args.variables = discovered_vars
+                    print(f"Using all common variables ({len(discovered_vars)}): {discovered_vars}")
+                else:
+                    print("Warning: No common variables found between AI predictions and model!")
+                    ds_ai.close(); ds_model.close()
+                    return
+    else:
+        forced = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc']
+        if use_csv_predictions:
+            selected = [
+                v for v in forced
+                if v in ai_vars and csv_has_variable(csv_predictions, v, variable_category_map.get(v))
+            ]
+            if not selected:
+                print("Warning: None of the default variables are present in both NetCDF and CSV data!")
+                ds_ai.close()
+                return
+            missing = [v for v in forced if v not in selected]
+            if missing:
+                print(f"Note: Skipping default variables missing from CSV source: {missing}")
+        else:
+            model_vars = set(ds_model.data_vars.keys())
+            selected = [v for v in forced if v in ai_vars and v in model_vars]
+            if not selected:
+                print("Warning: None of the default variables are present in both datasets!")
                 ds_ai.close(); ds_model.close()
                 return
-    else:
-        # Force the script to only plot the default subset unless 'all' is requested
-        forced = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc']
-        ai_vars = set(ds_ai.data_vars.keys())
-        model_vars = set(ds_model.data_vars.keys())
-        selected = [v for v in forced if v in ai_vars and v in model_vars]
-        if not selected:
-            print("Warning: None of the default variables are present in both datasets!")
-            ds_ai.close(); ds_model.close()
-            return
-        missing = [v for v in forced if v not in selected]
-        if missing:
-            print(f"Note: Skipping missing default variables not present in both datasets: {missing}")
+            missing = [v for v in forced if v not in selected]
+            if missing:
+                print(f"Note: Skipping missing default variables not present in both datasets: {missing}")
         args.variables = selected
         print(f"Using default subset of variables ({len(selected)}): {selected}")
-    
-    # Get grid information from the MODEL file as the master coordinate system
-    # This ensures AI predictions can be properly ingested into the model
-    grid_lon, grid_lat = _gridcell_lonlat(ds_model)
-    n_grid = ds_model.sizes["gridcell"]
-    
-    print(f"Using MODEL gridcell count: {n_grid}")
-    print(f"Model coordinates: lon range [{grid_lon.min():.3f}, {grid_lon.max():.3f}], lat range [{grid_lat.min():.3f}, {grid_lat.max():.3f}]")
-    
-    # Build mappings from the model file for extracting model data
-    col2grid = _to_zero_based_index(_safe_get(ds_model, "cols1d_gridcell_index").values, n_grid)
-    pft2grid = _to_zero_based_index(_safe_get(ds_model, "pfts1d_gridcell_index").values, n_grid)
-    
-    grid_to_cols = _build_gridcell_groups(col2grid, n_grid)
-    grid_to_pfts = _build_gridcell_groups(pft2grid, n_grid)
-    
-    # Create spatial mapping from AI gridcells to model gridcells
-    ai_to_model_mapping = _create_ai_to_model_mapping(ds_ai, ds_model, n_grid)
-    
-    print(f"Model mappings: total columns: {col2grid.size} | total pfts: {pft2grid.size}")
-    print(f"Example: gridcell 0 -> columns {grid_to_cols[0][:5]}, pfts {grid_to_pfts[0][:5]}")
-    
+
+    if use_csv_predictions:
+        grid_lon, grid_lat = _gridcell_lonlat(ds_ai)
+        n_grid = ds_ai.sizes['gridcell']
+        print(f"Using AI gridcell count: {n_grid}")
+        print(f"AI coordinates: lon range [{grid_lon.min():.3f}, {grid_lon.max():.3f}], lat range [{grid_lat.min():.3f}, {grid_lat.max():.3f}]")
+        grid_to_cols = None
+        grid_to_pfts = None
+        ai_to_model_mapping = None
+    else:
+        grid_lon, grid_lat = _gridcell_lonlat(ds_model)
+        n_grid = ds_model.sizes['gridcell']
+        print(f"Using MODEL gridcell count: {n_grid}")
+        print(f"Model coordinates: lon range [{grid_lon.min():.3f}, {grid_lon.max():.3f}], lat range [{grid_lat.min():.3f}, {grid_lat.max():.3f}]")
+        col2grid = _to_zero_based_index(_safe_get(ds_model, 'cols1d_gridcell_index').values, n_grid)
+        pft2grid = _to_zero_based_index(_safe_get(ds_model, 'pfts1d_gridcell_index').values, n_grid)
+        grid_to_cols = _build_gridcell_groups(col2grid, n_grid)
+        grid_to_pfts = _build_gridcell_groups(pft2grid, n_grid)
+        ai_to_model_mapping = _create_ai_to_model_mapping(ds_ai, ds_model, n_grid)
+        print(f"Model mappings: total columns: {col2grid.size} | total pfts: {pft2grid.size}")
+        print(f"Example: gridcell 0 -> columns {grid_to_cols[0][:5]}, pfts {grid_to_pfts[0][:5]}")
+
     # Create output directory
     if args.variable_list and requested_all:
         # Use a more descriptive output directory name when using variable list
@@ -518,301 +865,418 @@ Examples:
         output_dir = Path(args.output_dir)
         os.makedirs(output_dir, exist_ok=True)
     
-    # If stats-only, place outputs under a dedicated stats subdirectory
-    if _stats_only_requested:
-        output_dir = output_dir / 'stats'
-        os.makedirs(output_dir, exist_ok=True)
-
     # Update the output directory for the plotting function
     args.output_dir = str(output_dir)
     
     print(f"\nStart processing: {len(args.variables)} variables")
     stats_rows = []
     for var in args.variables:
-        if (var not in ds_ai.data_vars) or (var not in ds_model.data_vars):
-            print(f"Skip {var} (not found in both files)")
+        if var not in ds_ai.data_vars:
+            print(f"Skip {var} (not found in AI NetCDF)")
             continue
 
         da_ai = ds_ai[var]
-        da_model = ds_model[var]
         dims = da_ai.dims
+        category = infer_variable_category(var, dims, variable_category_map)
         print(f"\nVariable {var}, dims: {dims}")
-        print(f"  AI shape: {da_ai.shape}")
-        print(f"  Model shape: {da_model.shape}")
+        print(f"  NetCDF shape: {da_ai.shape}")
 
-        if ("column" in dims) and ("levgrnd" in dims):
-            # Handle column-type variables (e.g., soil variables)
-            # Handle different dimension orders
-            if len(dims) == 3:
-                # If we have (column, levgrnd, gridcell) or similar, transpose to (column, levgrnd)
-                if "gridcell" in dims:
-                    da_ai_cl = da_ai.transpose("column", "levgrnd", ...)
-                    da_model_cl = da_model.transpose("column", "levgrnd", ...)
-                else:
-                    da_ai_cl = da_ai.transpose("column", "levgrnd")
-                    da_model_cl = da_model.transpose("column", "levgrnd")
-            else:
-                da_ai_cl = da_ai.transpose("column", "levgrnd")
-                da_model_cl = da_model.transpose("column", "levgrnd")
-            
-            vals_ai = _to_nan_fillvalue(da_ai_cl.values)
-            vals_model = _to_nan_fillvalue(da_model_cl.values)
-            
-            # Debug: Print data structure information
-            print(f"  Column variable: AI shape {vals_ai.shape}, Model shape {vals_model.shape}")
-            print(f"  Grid mapping: {len(grid_to_cols)} gridcells with columns")
-            print(f"  Sample gridcell 0 has columns: {grid_to_cols[0][:5] if grid_to_cols[0] else 'none'}")
+        if use_csv_predictions:
+            if not csv_has_variable(csv_predictions, var, category):
+                print(f"  Skip {var} (not present in CSV source)")
+                continue
 
-            # Compute statistics for all layers; only plot selected layers
-            total_layers = int(da_ai_cl.sizes["levgrnd"]) if "levgrnd" in da_ai_cl.sizes else 0
-            for lev in range(total_layers):
-                if lev < 0 or lev >= total_layers:
+            label_ai = "NetCDF Predictions"
+            label_csv = "CSV Predictions"
+
+            if category == 'soil2d' and 'levgrnd' in dims:
+                da_ai_sel = da_ai
+                if 'column' in da_ai_sel.dims:
+                    da_ai_sel = da_ai_sel.isel(column=0)
+                try:
+                    da_ai_sel = da_ai_sel.transpose('levgrnd', 'gridcell', ...)
+                except ValueError:
+                    da_ai_sel = da_ai_sel.transpose(..., 'levgrnd', 'gridcell')
+                ai_vals = _to_nan_fillvalue(da_ai_sel.values)
+                if ai_vals.ndim == 1:
+                    ai_vals = ai_vals[np.newaxis, :]
+                csv_vals = extract_csv_soil(csv_predictions, var)
+                if csv_vals is None:
+                    print(f"  Skip {var} (CSV layers unavailable)")
                     continue
-
-                ai_grid = np.full(n_grid, np.nan, dtype=float)
-                model_grid = np.full(n_grid, np.nan, dtype=float)
-
-                for g in range(n_grid):
-                    cols = grid_to_cols[g]
-                    if len(cols) == 0:
+                layer_count = ai_vals.shape[0]
+                csv_layer_count = csv_vals.shape[0]
+                if csv_vals.shape[1] != ai_vals.shape[1]:
+                    min_len = min(ai_vals.shape[1], csv_vals.shape[1], len(grid_lon))
+                    if min_len == 0:
+                        print(f"  Skip {var} (no grid overlap between NetCDF and CSV)")
                         continue
-                    
-                    # For AI data: map from model gridcell g to corresponding AI gridcell
-                    ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
-                    if len(ai_gridcell_idx) > 0:
-                        ai_gridcell_idx = ai_gridcell_idx[0]
-                        ai_col_idx = 0
-                        # Handle AI data indexing - shape is (column, levgrnd, gridcell)
-                        if vals_ai.ndim == 3:
-                            ai_grid[g] = vals_ai[ai_col_idx, lev, ai_gridcell_idx]
-                        else:
-                            ai_grid[g] = vals_ai[ai_col_idx, lev]
+                    print(f"  Warning: grid mismatch for {var}; trimming to {min_len} cells")
+                else:
+                    min_len = ai_vals.shape[1]
+                lon_subset = grid_lon[:min_len]
+                lat_subset = grid_lat[:min_len]
+                for lev in range(layer_count):
+                    ai_layer = ai_vals[lev, :min_len]
+                    if lev < csv_layer_count:
+                        csv_layer = csv_vals[lev, :min_len]
                     else:
-                        ai_grid[g] = np.nan
-                    
-                    # For model: use the first column of this gridcell
-                    if g < len(grid_to_cols) and len(grid_to_cols[g]) > 0:
-                        model_col_idx = grid_to_cols[g][0]
-                        if model_col_idx < vals_model.shape[0]:
-                            if vals_model.ndim == 2:
-                                if lev < vals_model.shape[1]:
-                                    model_grid[g] = vals_model[model_col_idx, lev]
-                            else:
-                                model_grid[g] = vals_model[model_col_idx]
+                        csv_layer = np.full(min_len, np.nan, dtype=float)
+                    plot_flag = (not args.no_plot) and (lev in args.layers)
+                    stats = _plot_tripanel(var, f"_lev{lev}", lon_subset, lat_subset, ai_layer, csv_layer, args.output_dir,
+                                           label_ai=label_ai, label_model=label_csv, plot=plot_flag)
+                    stats_rows.append({
+                        'variable': var,
+                        'suffix': f"_lev{lev}",
+                        **stats,
+                    })
 
-                # Plot only if requested layer in args.layers and plotting enabled
-                do_plot = (not args.no_plot) and (lev in args.layers)
-                stats = _plot_tripanel(var, f"_lev{lev}", grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
-                               label_ai="AI Predictions", label_model="Model Results", plot=do_plot)
+            elif category == 'pft1d' or ('pft' in dims):
+                try:
+                    da_ai_p = da_ai.transpose('pft', 'gridcell', ...)
+                except ValueError:
+                    da_ai_p = da_ai.transpose(..., 'pft', 'gridcell')
+                ai_vals = _to_nan_fillvalue(da_ai_p.values)
+                if ai_vals.ndim == 1:
+                    ai_vals = ai_vals[np.newaxis, :]
+                csv_vals = extract_csv_pft(csv_predictions, var)
+                if csv_vals is None:
+                    print(f"  Skip {var} (CSV PFT entries unavailable)")
+                    continue
+                pft_count = ai_vals.shape[0]
+                csv_pft_count = csv_vals.shape[0]
+                if csv_vals.shape[1] != ai_vals.shape[1]:
+                    min_len = min(ai_vals.shape[1], csv_vals.shape[1], len(grid_lon))
+                    if min_len == 0:
+                        print(f"  Skip {var} (no grid overlap between NetCDF and CSV)")
+                        continue
+                    print(f"  Warning: grid mismatch for {var}; trimming to {min_len} cells")
+                else:
+                    min_len = ai_vals.shape[1]
+                lon_subset = grid_lon[:min_len]
+                lat_subset = grid_lat[:min_len]
+                for k in range(pft_count):
+                    ai_slice = ai_vals[k, :min_len]
+                    if k < csv_pft_count:
+                        csv_slice = csv_vals[k, :min_len]
+                    else:
+                        csv_slice = np.full(min_len, np.nan, dtype=float)
+                    plot_flag = (not args.no_plot) and (k in args.pfts)
+                    stats = _plot_tripanel(var, f"_pft{k+1}", lon_subset, lat_subset, ai_slice, csv_slice, args.output_dir,
+                                           label_ai=label_ai, label_model=label_csv, plot=plot_flag)
+                    stats_rows.append({
+                        'variable': var,
+                        'suffix': f"_pft{k+1}",
+                        **stats,
+                    })
+
+            elif 'gridcell' in dims:
+                try:
+                    da_ai_gc = da_ai.transpose(..., 'gridcell')
+                except ValueError:
+                    da_ai_gc = da_ai
+                ai_vals = _to_nan_fillvalue(np.asarray(da_ai_gc.values))
+                ai_vals = np.reshape(ai_vals, (-1, ai_vals.shape[-1])) if ai_vals.ndim > 1 else ai_vals
+                ai_vals = ai_vals[-1] if ai_vals.ndim > 1 else ai_vals
+                csv_vals = extract_csv_scalar(csv_predictions, var)
+                if csv_vals is None:
+                    print(f"  Skip {var} (CSV scalar column unavailable)")
+                    continue
+                csv_vals = np.asarray(csv_vals, dtype=float)
+                min_len = min(len(ai_vals), len(csv_vals), len(grid_lon))
+                if min_len == 0:
+                    print(f"  Skip {var} (no overlapping records)")
+                    continue
+                if len(ai_vals) != len(csv_vals):
+                    print(f"  Warning: record mismatch for {var}; trimming to {min_len}")
+                lon_subset = grid_lon[:min_len]
+                lat_subset = grid_lat[:min_len]
+                ai_trim = ai_vals[:min_len]
+                csv_trim = csv_vals[:min_len]
+                stats = _plot_tripanel(var, '', lon_subset, lat_subset, ai_trim, csv_trim, args.output_dir,
+                                       label_ai=label_ai, label_model=label_csv, plot=(not args.no_plot))
                 stats_rows.append({
-                    "variable": var,
-                    "suffix": f"_lev{lev}",
+                    'variable': var,
+                    'suffix': '',
                     **stats,
                 })
-
-        elif ("pft" in dims):
-            # Handle PFT-type variables
-            # Handle different dimension orders
-            if len(dims) == 2 and "gridcell" in dims:
-                # If we have (pft, gridcell), transpose to (pft, ...)
-                da_ai_p = da_ai.transpose("pft", ...)
-                da_model_p = da_model.transpose("pft", ...)
             else:
-                da_ai_p = da_ai.transpose("pft")
-                da_model_p = da_model.transpose("pft")
-            
-            vals_ai = _to_nan_fillvalue(da_ai_p.values)
-            vals_model = _to_nan_fillvalue(da_model_p.values)
+                print(f"  Skip {var} (unsupported dimensions for CSV comparison: {dims})")
 
-            # Compute statistics for all PFTs in AI data; only plot selected ones
-            total_pfts = vals_ai.shape[0]
-            for k in range(total_pfts):
+        else:
+            if var not in ds_model.data_vars:
+                print(f"Skip {var} (not found in model file)")
+                continue
+
+            da_model = ds_model[var]
+            print(f"  Model shape: {da_model.shape}")
+
+            if ('column' in dims) and ('levgrnd' in dims):
+                if len(dims) == 3:
+                    if 'gridcell' in dims:
+                        da_ai_cl = da_ai.transpose('column', 'levgrnd', ...)
+                        da_model_cl = da_model.transpose('column', 'levgrnd', ...)
+                    else:
+                        da_ai_cl = da_ai.transpose('column', 'levgrnd')
+                        da_model_cl = da_model.transpose('column', 'levgrnd')
+                else:
+                    da_ai_cl = da_ai.transpose('column', 'levgrnd')
+                    da_model_cl = da_model.transpose('column', 'levgrnd')
+
+                vals_ai = _to_nan_fillvalue(da_ai_cl.values)
+                vals_model = _to_nan_fillvalue(da_model_cl.values)
+
+                print(f"  Column variable: AI shape {vals_ai.shape}, Model shape {vals_model.shape}")
+                print(f"  Grid mapping: {len(grid_to_cols)} gridcells with columns")
+                print(f"  Sample gridcell 0 has columns: {grid_to_cols[0][:5] if grid_to_cols[0] else 'none'}")
+
+                total_layers = int(da_ai_cl.sizes['levgrnd']) if 'levgrnd' in da_ai_cl.sizes else 0
+                for lev in range(total_layers):
+                    if lev < 0 or lev >= total_layers:
+                        continue
+
+                    ai_grid = np.full(n_grid, np.nan, dtype=float)
+                    model_grid = np.full(n_grid, np.nan, dtype=float)
+
+                    for g in range(n_grid):
+                        cols = grid_to_cols[g]
+                        if len(cols) == 0:
+                            continue
+                        ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
+                        if len(ai_gridcell_idx) > 0:
+                            ai_gridcell_idx = ai_gridcell_idx[0]
+                            ai_col_idx = 0
+                            if vals_ai.ndim == 3:
+                                ai_grid[g] = vals_ai[ai_col_idx, lev, ai_gridcell_idx]
+                            else:
+                                ai_grid[g] = vals_ai[ai_col_idx, lev]
+                        else:
+                            ai_grid[g] = np.nan
+
+                        if g < len(grid_to_cols) and len(grid_to_cols[g]) > 0:
+                            model_col_idx = grid_to_cols[g][0]
+                            if model_col_idx < vals_model.shape[0]:
+                                if vals_model.ndim == 2:
+                                    if lev < vals_model.shape[1]:
+                                        model_grid[g] = vals_model[model_col_idx, lev]
+                                else:
+                                    model_grid[g] = vals_model[model_col_idx]
+
+                    do_plot = (not args.no_plot) and (lev in args.layers)
+                    stats = _plot_tripanel(var, f"_lev{lev}", grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
+                                           label_ai='AI Predictions', label_model='Model Results', plot=do_plot)
+                    stats_rows.append({
+                        'variable': var,
+                        'suffix': f"_lev{lev}",
+                        **stats,
+                    })
+
+            elif ('pft' in dims):
+                if len(dims) == 2 and 'gridcell' in dims:
+                    da_ai_p = da_ai.transpose('pft', ...)
+                    da_model_p = da_model.transpose('pft', ...)
+                else:
+                    da_ai_p = da_ai.transpose('pft')
+                    da_model_p = da_model.transpose('pft')
+
+                vals_ai = _to_nan_fillvalue(da_ai_p.values)
+                vals_model = _to_nan_fillvalue(da_model_p.values)
+
+                total_pfts = vals_ai.shape[0]
+                for k in range(total_pfts):
+                    ai_grid = np.full(n_grid, np.nan, dtype=float)
+                    model_grid = np.full(n_grid, np.nan, dtype=float)
+
+                    if vals_ai.ndim == 2:
+                        for g in range(n_grid):
+                            ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
+                            if len(ai_gridcell_idx) > 0:
+                                ai_gridcell_idx = ai_gridcell_idx[0]
+                                ai_grid[g] = vals_ai[k, ai_gridcell_idx]
+                    else:
+                        for g in range(n_grid):
+                            ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
+                            if len(ai_gridcell_idx) > 0:
+                                ai_grid[g] = vals_ai[k]
+
+                    for g in range(n_grid):
+                        if g < len(grid_to_pfts) and len(grid_to_pfts[g]) > 0:
+                            gridcell_pfts = grid_to_pfts[g][:16]
+                            adjusted_k = k + 1
+                            if adjusted_k < len(gridcell_pfts):
+                                model_pft_idx = gridcell_pfts[adjusted_k]
+                                if model_pft_idx < vals_model.shape[0]:
+                                    model_grid[g] = vals_model[model_pft_idx]
+
+                    do_plot = (not args.no_plot) and (k in args.pfts)
+                    stats = _plot_tripanel(var, f"_pft{k+1}", grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
+                                           label_ai='AI Predictions', label_model='Model Results', plot=do_plot)
+                    stats_rows.append({
+                        'variable': var,
+                        'suffix': f"_pft{k+1}",
+                        **stats,
+                    })
+
+            elif 'gridcell' in dims:
+                if len(dims) == 1:
+                    da_ai_gc = da_ai
+                    da_model_gc = da_model
+                else:
+                    da_ai_gc = da_ai.transpose(..., 'gridcell')
+                    da_model_gc = da_model.transpose(..., 'gridcell')
+
+                vals_ai = _to_nan_fillvalue(da_ai_gc.values)
+                vals_model = _to_nan_fillvalue(da_model_gc.values)
+
                 ai_grid = np.full(n_grid, np.nan, dtype=float)
-                model_grid = np.full(n_grid, np.nan, dtype=float)
 
-                # Map AI data for PFT k to model gridcells
-                if vals_ai.ndim == 2:
+                if vals_ai.ndim == 1:
                     for g in range(n_grid):
                         ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
                         if len(ai_gridcell_idx) > 0:
                             ai_gridcell_idx = ai_gridcell_idx[0]
-                            ai_grid[g] = vals_ai[k, ai_gridcell_idx]
+                            ai_grid[g] = vals_ai[ai_gridcell_idx]
                 else:
                     for g in range(n_grid):
                         ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
                         if len(ai_gridcell_idx) > 0:
-                            ai_grid[g] = vals_ai[k]
+                            ai_gridcell_idx = ai_gridcell_idx[0]
+                            if vals_ai.ndim == 2:
+                                ai_grid[g] = vals_ai[0, ai_gridcell_idx]
+                            else:
+                                ai_grid[g] = vals_ai[ai_gridcell_idx]
 
-                # Model data: use first 16 PFTs per gridcell; AI PFT k -> Model PFT (k+1)
-                for g in range(n_grid):
-                    if g < len(grid_to_pfts) and len(grid_to_pfts[g]) > 0:
-                        gridcell_pfts = grid_to_pfts[g][:16]
-                        adjusted_k = k + 1
-                        if adjusted_k < len(gridcell_pfts):
-                            model_pft_idx = gridcell_pfts[adjusted_k]
-                            if model_pft_idx < vals_model.shape[0]:
-                                model_grid[g] = vals_model[model_pft_idx]
+                model_grid = vals_model
 
-                do_plot = (not args.no_plot) and (k in args.pfts)
-                stats = _plot_tripanel(var, f"_pft{k+1}", grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
-                               label_ai="AI Predictions", label_model="Model Results", plot=do_plot)
+                stats = _plot_tripanel(var, '', grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
+                                       label_ai='AI Predictions', label_model='Model Results', plot=(not args.no_plot))
                 stats_rows.append({
-                    "variable": var,
-                    "suffix": f"_pft{k+1}",
+                    'variable': var,
+                    'suffix': '',
                     **stats,
                 })
 
-        elif "gridcell" in dims:
-            # Handle gridcell-level variables (e.g., GPP, NPP)
-            # Handle different dimension orders
-            if len(dims) == 1:
-                da_ai_gc = da_ai
-                da_model_gc = da_model
             else:
-                # If we have multiple dimensions including gridcell, transpose to put gridcell last
-                da_ai_gc = da_ai.transpose(..., "gridcell")
-                da_model_gc = da_model.transpose(..., "gridcell")
-            
-            vals_ai = _to_nan_fillvalue(da_ai_gc.values)
-            vals_model = _to_nan_fillvalue(da_model_gc.values)
-            
-            # Map AI data to model gridcell positions using spatial mapping
-            ai_grid = np.full(n_grid, np.nan, dtype=float)
-            
-            if vals_ai.ndim == 1:
-                # For each model gridcell, find the corresponding AI gridcell and extract data
-                for g in range(n_grid):
-                    ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
-                    if len(ai_gridcell_idx) > 0:
-                        ai_gridcell_idx = ai_gridcell_idx[0]  # Take the first match
-                        ai_grid[g] = vals_ai[ai_gridcell_idx]
-            else:
-                # Handle multi-dimensional AI data
-                for g in range(n_grid):
-                    ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
-                    if len(ai_gridcell_idx) > 0:
-                        ai_gridcell_idx = ai_gridcell_idx[0]  # Take the first match
-                        # Extract data for this gridcell (handle different dimension orders)
-                        if vals_ai.ndim == 2:
-                            ai_grid[g] = vals_ai[0, ai_gridcell_idx]  # Assume first dimension is not gridcell
-                        else:
-                            ai_grid[g] = vals_ai[ai_gridcell_idx]
-            
-            # Model data is already in the correct gridcell order
-            model_grid = vals_model
-            
-            stats = _plot_tripanel(var, "", grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
-                           label_ai="AI Predictions", label_model="Model Results", plot=(not args.no_plot))
-            stats_rows.append({
-                "variable": var,
-                "suffix": "",
-                **stats,
-            })
-
-        else:
-            print(f"  Skip {var} (unsupported dimensions: {dims})")
+                print(f"  Skip {var} (unsupported dimensions: {dims})")
 
     # Write statistics outputs (CSV/TXT)
     if stats_rows:
-        # Resolve output paths
-        if _stats_only_requested:
-            # In stats-only mode, write a concise CSV with the requested metrics under stats folder
-            csv_out = os.path.join(args.output_dir, "summary_stats.csv")
-            txt_out = None
-            output_mode = 'csv'
-        else:
-            csv_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.csv')) else os.path.join(args.output_dir, "stats.csv")
-            txt_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.txt')) else os.path.join(args.output_dir, "stats.txt")
-            output_mode = args.stats_format
+        csv_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.csv')) else os.path.join(args.output_dir, 'stats.csv')
+        txt_out = args.stats_file if (args.stats_file and args.stats_file.lower().endswith('.txt')) else os.path.join(args.output_dir, 'stats.txt')
         os.makedirs(args.output_dir, exist_ok=True)
 
-        # CSV output
-        if (output_mode in ('csv', 'both')):
-            if _stats_only_requested:
-                fieldnames = [
-                    "variable", "suffix",
-                    "ai_sum", "ai_std", "ai_min", "ai_max",
-                    "model_sum", "model_std", "model_min", "model_max"
-                ]
-                # Reduce rows to requested columns only
-                filtered_rows = []
-                for row in stats_rows:
-                    filtered_rows.append({
-                        "variable": row.get("variable"),
-                        "suffix": row.get("suffix"),
-                        "ai_sum": row.get("ai_sum"),
-                        "ai_std": row.get("ai_std"),
-                        "ai_min": row.get("ai_min"),
-                        "ai_max": row.get("ai_max"),
-                        "model_sum": row.get("model_sum"),
-                        "model_std": row.get("model_std"),
-                        "model_min": row.get("model_min"),
-                        "model_max": row.get("model_max"),
-                    })
-                rows_to_write = filtered_rows
-            else:
-                fieldnames = [
-                    "variable", "suffix", "ai_sum", "ai_min", "ai_max",
-                    "model_sum", "model_min", "model_max", "n", "rmse", "nrmse", "r2"
-                ]
-                rows_to_write = stats_rows
-            with open(csv_out, "w", newline="") as f:
+        if args.stats_format in ('csv', 'both'):
+            fieldnames = [
+                'variable', 'suffix', 'ai_sum', 'ai_std', 'ai_min', 'ai_max',
+                'model_sum', 'model_std', 'model_min', 'model_max', 'n', 'rmse', 'nrmse', 'r2'
+            ]
+            with open(csv_out, 'w', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
-                for row in rows_to_write:
+                for row in stats_rows:
                     writer.writerow(row)
             print(f"Saved statistics CSV: {csv_out}")
 
-        # TXT output (readable, grouped by variable and suffix)
-        if (not _stats_only_requested) and (output_mode in ('txt', 'both')):
-            # Group stats by variable then suffix
+        if args.stats_format in ('txt', 'both'):
             from collections import defaultdict
             grouped = defaultdict(list)
             for row in stats_rows:
-                grouped[row["variable"]].append(row)
+                grouped[row['variable']].append(row)
 
             def _suffix_key(s):
-                # Sort order: gridcell-level (empty) first, then lev by number, then pft by number
-                if s == "":
+                if s == '':
                     return (0, 0, 0)
-                if s.startswith("_lev"):
+                if s.startswith('_lev'):
                     try:
-                        return (1, int(s.replace("_lev", "")), 0)
+                        return (1, int(s.replace('_lev', '')), 0)
                     except Exception:
                         return (1, 999999, 0)
-                if s.startswith("_pft"):
+                if s.startswith('_pft'):
                     try:
-                        return (2, int(s.replace("_pft", "")), 0)
+                        return (2, int(s.replace('_pft', '')), 0)
                     except Exception:
                         return (2, 999999, 0)
                 return (3, 0, 0)
 
             lines = []
-            lines.append("AI vs Model Statistics Report")
-            lines.append("=" * 80)
+            header = 'NetCDF vs CSV Statistics Report' if use_csv_predictions else 'AI vs Model Statistics Report'
+            lines.append(header)
+            lines.append('=' * 80)
             for var in sorted(grouped.keys()):
-                rows = sorted(grouped[var], key=lambda r: _suffix_key(r.get("suffix", "")))
-                lines.append("")
+                rows = sorted(grouped[var], key=lambda r: _suffix_key(r.get('suffix', '')))
+                lines.append('')
                 lines.append(f"Variable: {var}")
-                lines.append("-" * 80)
+                lines.append('-' * 80)
                 for row in rows:
                     title = f"{var}{row.get('suffix','')}"
                     lines.append(title)
-                    lines.append("  AI:    sum={ai_sum:.6g} min={ai_min:.6g} max={ai_max:.6g}".format(**row))
-                    lines.append("  Model: sum={model_sum:.6g} min={model_min:.6g} max={model_max:.6g}".format(**row))
+                    if use_csv_predictions:
+                        lines.append("  NetCDF: sum={ai_sum:.6g} std={ai_std:.6g} min={ai_min:.6g} max={ai_max:.6g}".format(**row))
+                        lines.append("  CSV:    sum={model_sum:.6g} std={model_std:.6g} min={model_min:.6g} max={model_max:.6g}".format(**row))
+                    else:
+                        lines.append("  AI:    sum={ai_sum:.6g} std={ai_std:.6g} min={ai_min:.6g} max={ai_max:.6g}".format(**row))
+                        lines.append("  Model: sum={model_sum:.6g} std={model_std:.6g} min={model_min:.6g} max={model_max:.6g}".format(**row))
                     lines.append("  Compare: n={n} rmse={rmse:.6g} nrmse={nrmse:.6g} r2={r2:.6g}".format(**row))
-                    lines.append("")
+                    lines.append('')
 
-            with open(txt_out, "w") as f:
+            with open(txt_out, 'w') as f:
                 f.write("\n".join(lines))
             print(f"Saved statistics report: {txt_out}")
+
+        # Generate a stacked bar chart summarizing quality by variable (CSV vs NetCDF)
+        try:
+            stats_df = pd.DataFrame(stats_rows)
+            if not stats_df.empty:
+                stats_df['quality'] = stats_df['r2'].apply(_classify_quality_from_r2)
+                quality_counts = (
+                    stats_df.groupby(['variable', 'quality']).size().unstack(fill_value=0)
+                )
+                if not quality_counts.empty:
+                    totals = quality_counts.sum(axis=1).replace(0, np.nan)
+                    quality_pct = (quality_counts.div(totals, axis=0) * 100.0).fillna(0.0)
+                    desired_order = ['good', 'ok', 'bad', 'unknown']
+                    available_cols = [c for c in desired_order if c in quality_pct.columns]
+                    missing_cols = [c for c in desired_order if c not in available_cols]
+                    for col in missing_cols:
+                        quality_pct[col] = 0.0
+                    quality_pct = quality_pct[available_cols + missing_cols] if missing_cols else quality_pct[available_cols]
+                    if 'good' in quality_pct.columns:
+                        quality_pct = quality_pct.sort_values(by='good', ascending=False)
+                    colors = {
+                        'good': '#2ecc71',
+                        'ok': '#f39c12',
+                        'bad': '#e74c3c',
+                        'unknown': '#7f8c8d'
+                    }
+                    plot_cols = [c for c in ['good', 'ok', 'bad', 'unknown'] if c in quality_pct.columns]
+                    if plot_cols:
+                        ax = quality_pct[plot_cols].plot(
+                            kind='bar',
+                            stacked=True,
+                            figsize=(14, 10),
+                            color=[colors.get(col, 'gray') for col in plot_cols]
+                        )
+                        title = 'CSV vs NetCDF Agreement by Variable' if use_csv_predictions else 'AI vs Model Agreement by Variable'
+                        plt.title(title, fontsize=16)
+                        plt.xlabel('Variable', fontsize=14)
+                        plt.ylabel('Percentage (%)', fontsize=14)
+                        plt.xticks(rotation=90)
+                        plt.legend(title='Category')
+                        plt.tight_layout()
+                        quality_fig = Path(args.output_dir) / 'comparison_quality_by_variable.png'
+                        plt.savefig(quality_fig, dpi=300)
+                        plt.close()
+                        print(f"Saved quality summary figure: {quality_fig}")
+        except Exception as exc:
+            print(f"Warning: Failed to generate quality summary figure ({exc})")
     else:
         print("No statistics to write.")
 
     ds_ai.close()
-    ds_model.close()
+    if ds_model is not None:
+        ds_model.close()
     if args.no_plot:
-        print(f"\nCompleted without plotting. Output directory (for CSV): {args.output_dir}")
+        print(f"\nCompleted without plotting. Output directory: {args.output_dir}")
     else:
         print(f"\nAll plots done! Output directory: {args.output_dir}")
 

@@ -1,3 +1,9 @@
+AI_PREDICTIONS_DEFAULT: ./comparison_results/ai_predictions_for_plotting.nc
+MODEL_DEFAULT: /global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc
+COMPARISON_OUTPUT_DIR: ./ai_model_comparison_plots
+CSV_PREDICTIONS_DEFAULT: ./cnp_inference_entire_dataset/cnp_predictions
+AI_RESTART_DEFAULT: ./updated_restart_CNP_IO_updated9_dev_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc
+
 TRENDY1_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree
 TRENDY05_PATH = 
 DATA_PATHS: 
