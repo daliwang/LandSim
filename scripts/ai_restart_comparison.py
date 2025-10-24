@@ -264,7 +264,7 @@ def _load_default_paths(variable_list_path: str):
             if vl_path.exists():
                 parsed = parse_cnp_io_list(variable_list_path)
                 if isinstance(parsed, dict):
-                    for key in ('ai_predictions_default', 'model_default', 'comparison_output_dir', 'ai_restart_default'):
+                    for key in ('ai_predictions_default', 'model_default', 'comparison_output_dir', 'ai_restart_default', 'fallback_data_dir', 'fallback_reference_file', 'fallback_reference_filename'):
                         value = parsed.get(key)
                         if value:
                             defaults[key] = value
@@ -316,6 +316,23 @@ def main():
     args = parse_arguments()
 
     defaults = _load_default_paths(args.variable_list)
+    
+    # Set FALLBACK_DATA_DIR and FALLBACK_REFERENCE_FILE from config if available
+    global FALLBACK_DATA_DIR, FALLBACK_REFERENCE_FILE
+    if 'fallback_data_dir' in defaults:
+        FALLBACK_DATA_DIR = defaults['fallback_data_dir']
+    
+    # Priority order for FALLBACK_REFERENCE_FILE:
+    # 1. Explicit fallback_reference_file in config
+    # 2. fallback_data_dir + fallback_reference_filename in config  
+    # 3. fallback_data_dir + default filename
+    if 'fallback_reference_file' in defaults:
+        FALLBACK_REFERENCE_FILE = defaults['fallback_reference_file']
+    elif 'fallback_data_dir' in defaults and 'fallback_reference_filename' in defaults:
+        FALLBACK_REFERENCE_FILE = FALLBACK_DATA_DIR + defaults['fallback_reference_filename']
+    elif 'fallback_data_dir' in defaults:
+        # Fallback: construct reference file from data dir if not explicitly set
+        FALLBACK_REFERENCE_FILE = FALLBACK_DATA_DIR + '20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
 
     def _resolve(value, keys, fallback):
         if value:

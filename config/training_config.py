@@ -446,7 +446,10 @@ def parse_cnp_io_list(filename):
         'model_default': None,
         'comparison_output_dir': None,
         'csv_predictions_default': None,
-        'ai_restart_default': None
+        'ai_restart_default': None,
+        'fallback_data_dir': None,
+        'fallback_reference_file': None,
+        'fallback_reference_filename': None
     })
     current_section = None
 
@@ -499,7 +502,7 @@ def parse_cnp_io_list(filename):
                 #       FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
                 #       DATA_PATHS: /p1,/p2
                 if line and not line.startswith('#'):
-                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths|ai_predictions_default|model_default|comparison_output_dir|csv_predictions_default|ai_restart_default)\s*[:=]\s*(.+)$', line)
+                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths|ai_predictions_default|model_default|comparison_output_dir|csv_predictions_default|ai_restart_default|fallback_data_dir|fallback_reference_file|fallback_reference_filename)\s*[:=]\s*(.+)$', line)
                     if kv_match:
                         key = kv_match.group(1).lower()
                         val = kv_match.group(2).strip()
@@ -531,6 +534,12 @@ def parse_cnp_io_list(filename):
                             result['csv_predictions_default'] = val
                         elif key == 'ai_restart_default':
                             result['ai_restart_default'] = val
+                        elif key == 'fallback_data_dir':
+                            result['fallback_data_dir'] = val
+                        elif key == 'fallback_reference_file':
+                            result['fallback_reference_file'] = val
+                        elif key == 'fallback_reference_filename':
+                            result['fallback_reference_filename'] = val
     return result
 
 def parse_cnp_model_config(filename: str) -> Dict[str, Any]:
