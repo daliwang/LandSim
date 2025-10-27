@@ -71,6 +71,13 @@ Creates map plots for the variables in your CNP_IO list under
 ```bash
 python ../../scripts/ai_model_comparison_plot.py  > ai_model_comparison.log 2>&1 &
 ```
+#### 7.1) Stats-only mode (no plotting)
+To validate that the variable values from the CSV file are consistent with those in the NetCDF file, you can compare their summary statistics (sum, standard deviation, minimum, and maximum) for all variables and their corresponding layers/PFTs using the --stats-only and --variable-list options:
+```bash
+python ../../scripts/ai_model_comparison_plot.py \
+  --stats-only \
+  --variable-list ../../CNP_IO_updated9_dev.txt
+```
 
 ### 8) Create a new ELM restart file using AI predictions
 
@@ -88,7 +95,13 @@ Compares selected layers and PFTs; optionally verify with `restart_variable_plot
 python ../../scripts/ai_restart_comparison.py --variable-list ../../CNP_IO_demo1.txt --layers 0,5,9 --pfts 0,1,2,3,4,5
 # Optionally use ../../scripts/restart_variable_plot.py for manual verification
 ```
-
+#### 9.1) Stats-only mode (no plotting)
+To validate that the variable values in the predicted NetCDF file are consistent with those in the updated restart file, you can compare their summary statistics (sum, standard deviation, minimum, and maximum) for all variables and their corresponding layers/PFTs using the --stats-only and --variable-list options:
+```bash
+python ../../scripts/ai_restart_comparison.py \
+  --stats-only \
+  --variable-list ../../CNP_IO_updated9_dev.txt
+```
 ---
 
 ### Old scripts (to be double-checked)

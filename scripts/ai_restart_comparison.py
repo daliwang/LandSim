@@ -11,18 +11,36 @@ import glob
 from pathlib import Path
 import sys
 import json
+from scipy.spatial.distance import cdist
 
 # Project imports
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 from config.training_config import parse_cnp_io_list
 
-# Default file paths
-DATA_DIR = '/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/'
-DEFAULT_FILE_OLD = DATA_DIR + 'original_780_spinup_from_modelsimulation.nc'
+# Default file paths (fallback values)
+FALLBACK_DATA_DIR = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/'
+FALLBACK_REFERENCE_FILE = FALLBACK_DATA_DIR + '20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+FALLBACK_AI_PREDICTIONS = './comparison_results/ai_predictions_for_plotting.nc'
+FALLBACK_OUTPUT_DIR = './ai_restart_comparison_plots'
+LABEL_NEW = 'AI Restart'
+LABEL_OLD_DEFAULT = 'Original Restart'
 
-LABEL_NEW = "AI Generated"
-LABEL_OLD = "Original Model"
-OUTPUT_DIR = "./ai_restart_comparison_plots"
+QUALITY_THRESHOLDS = {
+    'good': 0.9,  # R² >= 0.9 for good quality
+    'ok': 0.7     # R² >= 0.7 for ok quality
+}
+
+
+def _classify_quality_from_r2(value):
+    """Classify quality based on R² value (similar to generate_prediction_quality_report.py)"""
+    if value is None or not np.isfinite(value):
+        return 'unknown'
+    val = float(value)
+    if val >= QUALITY_THRESHOLDS['good']:
+        return 'good'
+    if val >= QUALITY_THRESHOLDS['ok']:
+        return 'ok'
+    return 'bad'
 
 def _safe_get(ds, name):
     if name not in ds:
@@ -55,6 +73,19 @@ def _build_gridcell_groups(one_d_to_grid, n_grid):
         if 0 <= g < n_grid:
             groups[g].append(idx)
     return groups
+
+def _build_target_to_source_mapping(ds_source, ds_target):
+    src_lon = _safe_get(ds_source, 'grid1d_lon').values
+    src_lat = _safe_get(ds_source, 'grid1d_lat').values
+    tgt_lon = _safe_get(ds_target, 'grid1d_lon').values
+    tgt_lat = _safe_get(ds_target, 'grid1d_lat').values
+    if (len(src_lon) == len(tgt_lon) and
+            np.allclose(src_lon, tgt_lon) and
+            np.allclose(src_lat, tgt_lat)):
+        return np.arange(len(tgt_lon), dtype=int)
+    mapping = np.argmin(cdist(np.column_stack([tgt_lon, tgt_lat]),
+                               np.column_stack([src_lon, src_lat])), axis=1)
+    return mapping
 
 def _plot_map(ax, lon, lat, data, title, vmin=None, vmax=None, cmap="viridis", norm=None):
     ax.add_feature(cfeature.COASTLINE)
@@ -95,14 +126,14 @@ def _percent_diff_categories(model_vals: np.ndarray, ai_vals: np.ndarray) -> np.
     cat[finite] = categories.astype(float)
     return cat
 
+
 def _plot_tripanel(var, label_suffix, lon, lat, data_new, data_old, out_dir,
-                   label_new="AI Enhanced", label_old="Original Model"):
+                   label_new="AI Restart", label_old="Original Restart", plot=True):
     diff = data_new - data_old
     vmin_orig = np.nanmin([np.nanmin(data_new), np.nanmin(data_old)])
     vmax_orig = np.nanmax([np.nanmax(data_new), np.nanmax(data_old)])
     diff_abs = np.nanmax(np.abs(diff))
 
-    # Compute stats and metrics (old vs new) with NaN safety
     finite_new = np.isfinite(data_new)
     finite_old = np.isfinite(data_old)
     mask = finite_new & finite_old
@@ -115,10 +146,12 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_new, data_old, out_dir,
         return float(np.nanmax(a)) if np.any(np.isfinite(a)) else float('nan')
 
     sum_new = float(np.nansum(data_new))
+    std_new = float(np.nanstd(data_new)) if np.any(np.isfinite(data_new)) else float('nan')
     min_new = _nan_min(data_new)
     max_new = _nan_max(data_new)
 
     sum_old = float(np.nansum(data_old))
+    std_old = float(np.nanstd(data_old)) if np.any(np.isfinite(data_old)) else float('nan')
     min_old = _nan_min(data_old)
     max_old = _nan_max(data_old)
 
@@ -138,9 +171,27 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_new, data_old, out_dir,
         r2 = float('nan')
 
     print(f"Stats for {var}{label_suffix}:")
-    print(f"  {label_new}: sum={sum_new:.6g} min={min_new:.6g} max={max_new:.6g}")
-    print(f"  {label_old}: sum={sum_old:.6g} min={min_old:.6g} max={max_old:.6g}")
-    print(f"  Metrics (AI vs Model): n={n} rmse={rmse:.6g} nrmse={nrmse:.6g} r2={r2:.6g}")
+    print(f"  {label_new}: sum={sum_new:.6g} std={std_new:.6g} min={min_new:.6g} max={max_new:.6g}")
+    print(f"  {label_old}: sum={sum_old:.6g} std={std_old:.6g} min={min_old:.6g} max={max_old:.6g}")
+    print(f"  Metrics ({label_new} vs {label_old}): n={n} rmse={rmse:.6g} nrmse={nrmse:.6g} r2={r2:.6g}")
+
+    stats = {
+        'new_sum': sum_new,
+        'new_std': std_new,
+        'new_min': min_new,
+        'new_max': max_new,
+        'old_sum': sum_old,
+        'old_std': std_old,
+        'old_min': min_old,
+        'old_max': max_old,
+        'n': n,
+        'rmse': rmse,
+        'nrmse': nrmse,
+        'r2': r2,
+    }
+
+    if not plot:
+        return stats
 
     fig = plt.figure(figsize=(12, 20))
     gs = gridspec.GridSpec(4, 1, figure=fig, hspace=0.3)
@@ -165,18 +216,16 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_new, data_old, out_dir,
         norm = TwoSlopeNorm(vmin=-diff_abs, vcenter=0, vmax=diff_abs)
         _plot_map(ax3, lon, lat, diff, f"{var} - Diff ({label_new} - {label_old})", cmap="RdBu_r", norm=norm)
 
-    # Percent-difference categorical map (fourth panel)
     ax4 = fig.add_subplot(gs[3, 0], projection=ccrs.PlateCarree())
-    # Treat data_old as model, data_new as AI
     cat = _percent_diff_categories(data_old, data_new)
     colors = [
-        "#08519c",  # -3: 30%+
-        "#6baed6",  # -2: 10–30%
-        "#c6dbef",  # -1: 0–10%
-        "#bdbdbd",  #  0: 0
-        "#fcbba1",  # +1: 0–10%
-        "#fb6a4a",  # +2: 10–30%
-        "#cb181d",  # +3: 30%+
+        "#08519c",
+        "#6baed6",
+        "#c6dbef",
+        "#bdbdbd",
+        "#fcbba1",
+        "#fb6a4a",
+        "#cb181d",
     ]
     cmap = ListedColormap(colors)
     boundaries = [-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5]
@@ -200,33 +249,28 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_new, data_old, out_dir,
     plt.suptitle(f"{var} {label_suffix}", fontsize=16, fontweight="bold", y=0.96)
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"{var}{label_suffix}.png")
-    plt.savefig(path, dpi=300, bbox_inches="tight")
+    path_out = os.path.join(out_dir, f"{var}{label_suffix}.png")
+    plt.savefig(path_out, dpi=300, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}")
+    print(f"  Saved: {path_out}")
 
-def auto_detect_variable_list_from_config(ai_restart_path: str):
-    run_dir = Path(ai_restart_path).parent if ai_restart_path else Path('.')
-    for parent in [run_dir] + list(run_dir.parents):
-        config_path = parent / 'cnp_config.json'
-        if config_path.exists():
-            try:
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-                data_info = config.get('data_info', {})
-                vars_1d = data_info.get('variables_1d_pft', [])
-                # Try both keys for 2d soil variables
-                vars_2d = data_info.get('variables_2d_soil', [])
-                if not vars_2d:
-                    vars_2d = data_info.get('x_list_columns_2d', [])
-                print(f"Auto-detected variables from {config_path}")
-                print(f"  1D PFT variables: {vars_1d}")
-                print(f"  2D soil variables: {vars_2d}")
-                return list(vars_1d), list(vars_2d)
-            except Exception as e:
-                print(f"Warning: Failed to parse {config_path}: {e}")
-    print("Warning: Could not auto-detect variable list. No variables will be plotted.")
-    return [], []
+    return stats
+
+def _load_default_paths(variable_list_path: str):
+    defaults = {}
+    if variable_list_path:
+        try:
+            vl_path = Path(variable_list_path)
+            if vl_path.exists():
+                parsed = parse_cnp_io_list(variable_list_path)
+                if isinstance(parsed, dict):
+                    for key in ('ai_predictions_default', 'model_default', 'comparison_output_dir', 'ai_restart_default', 'fallback_data_dir', 'fallback_reference_file', 'fallback_reference_filename'):
+                        value = parsed.get(key)
+                        if value:
+                            defaults[key] = value
+        except Exception as exc:
+            print(f"Warning: Failed to load default paths from {variable_list_path}: {exc}")
+    return defaults
 
 def parse_arguments():
     """Parse command line arguments."""
@@ -236,13 +280,23 @@ def parse_arguments():
     parser.add_argument('--ai-restart', type=str, default=None,
                        help='Path to AI-enhanced restart file (auto-detected if not specified)')
     parser.add_argument('--original-restart', type=str, default=None,
-                       help='Path to original model restart file (default: 780 year model results)')
+                       help='Path to reference dataset (original restart or AI predictions)')
     parser.add_argument('--layers', type=str, default='0,3,5',
                        help='Comma-separated list of soil layers to plot (default: 0,3,5)')
     parser.add_argument('--pfts', type=str, default='1,2,4,5',
                        help='Comma-separated list of PFTs to plot (default: all PFT0-PFT15)')
     parser.add_argument('--plot-all', action='store_true',
                        help='If set, plot all variables for all 10 layers (0-9) and all 16 PFTs (1-16, skip pft0)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Output directory for plots/statistics')
+    parser.add_argument('--stats-only', action='store_true',
+                       help='Only compute statistics (no plots)')
+    parser.add_argument('--no-plot', action='store_true',
+                       help='Disable plot generation')
+    parser.add_argument('--stats-file', type=str, default=None,
+                       help='Optional path to write statistics file (csv/txt)')
+    parser.add_argument('--stats-format', type=str, choices=['csv', 'txt', 'both'], default='txt',
+                       help='Statistics output format (default: txt)')
     return parser.parse_args()
 
 def find_ai_restart_file():
@@ -257,80 +311,119 @@ def find_ai_restart_file():
     else:
         return None
 
+
 def main():
     args = parse_arguments()
+
+    defaults = _load_default_paths(args.variable_list)
     
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    # Parse layers and PFTs
+    # Set FALLBACK_DATA_DIR and FALLBACK_REFERENCE_FILE from config if available
+    global FALLBACK_DATA_DIR, FALLBACK_REFERENCE_FILE
+    if 'fallback_data_dir' in defaults:
+        FALLBACK_DATA_DIR = defaults['fallback_data_dir']
+    
+    # Priority order for FALLBACK_REFERENCE_FILE:
+    # 1. Explicit fallback_reference_file in config
+    # 2. fallback_data_dir + fallback_reference_filename in config  
+    # 3. fallback_data_dir + default filename
+    if 'fallback_reference_file' in defaults:
+        FALLBACK_REFERENCE_FILE = defaults['fallback_reference_file']
+    elif 'fallback_data_dir' in defaults and 'fallback_reference_filename' in defaults:
+        FALLBACK_REFERENCE_FILE = FALLBACK_DATA_DIR + defaults['fallback_reference_filename']
+    elif 'fallback_data_dir' in defaults:
+        # Fallback: construct reference file from data dir if not explicitly set
+        FALLBACK_REFERENCE_FILE = FALLBACK_DATA_DIR + '20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+
+    def _resolve(value, keys, fallback):
+        if value:
+            return str(value)
+        for key in keys:
+            val = defaults.get(key)
+            if val:
+                return str(val)
+        return fallback
+
+    if args.stats_only:
+        args.no_plot = True
+    plot_enabled = not args.no_plot
+
+    ai_restart_path = _resolve(args.ai_restart, ('ai_restart_default',), None)
+    if not ai_restart_path:
+        ai_restart_path = find_ai_restart_file()
+        if not ai_restart_path:
+            print('Error: No AI-enhanced restart file found. Please specify with --ai-restart')
+            return
+
+    reference_path = _resolve(args.original_restart, ('ai_predictions_default', 'model_default'), FALLBACK_REFERENCE_FILE)
+    output_dir_str = _resolve(args.output_dir, ('comparison_output_dir',), FALLBACK_OUTPUT_DIR)
+    output_dir = Path(output_dir_str)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    label_new = LABEL_NEW
+    label_old = LABEL_OLD_DEFAULT
+    default_ai_predictions = defaults.get('ai_predictions_default', FALLBACK_AI_PREDICTIONS)
+    try:
+        if Path(reference_path).resolve() == Path(default_ai_predictions).resolve():
+            label_old = 'AI Predictions'
+    except Exception:
+        pass
+
+    print(f'Using AI-enhanced restart: {ai_restart_path}')
+    print(f'Using reference dataset: {reference_path}')
+    print(f'Output directory: {output_dir}')
+
     global LEVGRND_LAYERS, PFT_PICK_LIST
     if args.plot_all:
-        LEVGRND_LAYERS = list(range(10))  # 0-9
-        PFT_PICK_LIST = list(range(16))   # 0-15 (will skip pft0 in plotting)
+        LEVGRND_LAYERS = list(range(10))
+        PFT_PICK_LIST = list(range(16))
     else:
-        LEVGRND_LAYERS = [int(x.strip()) for x in args.layers.split(',')]
-        PFT_PICK_LIST = [int(x.strip()) for x in args.pfts.split(',')]
-    
-    # Set file paths
-    if args.ai_restart:
-        FILE_NEW = args.ai_restart
-    else:
-        FILE_NEW = find_ai_restart_file()
-        if not FILE_NEW:
-            print("Error: No AI-enhanced restart file found. Please specify with --ai-restart")
-            return
-    
-    if args.original_restart:
-        FILE_OLD = args.original_restart
-    else:
-        FILE_OLD = DEFAULT_FILE_OLD
-    
-    print(f"Using AI-enhanced restart: {FILE_NEW}")
-    print(f"Using original restart: {FILE_OLD}")
-    print(f"Layers to plot: {LEVGRND_LAYERS}")
-    print(f"PFTs to plot: {PFT_PICK_LIST}")
-    print("-" * 80)
-    
-    # Parse CNP_IO list to get variables
+        if args.stats_only:
+            LEVGRND_LAYERS = list(range(10))
+            PFT_PICK_LIST = list(range(16))
+        else:
+            LEVGRND_LAYERS = [int(x.strip()) for x in args.layers.split(',') if x.strip()]
+            PFT_PICK_LIST = [int(x.strip()) for x in args.pfts.split(',') if x.strip()]
+    print(f'Layers to process: {LEVGRND_LAYERS}')
+    print(f'PFTs to process: {PFT_PICK_LIST}')
+    print('-' * 80)
+
     if args.variable_list:
-        print("Parsing CNP_IO list...")
+        print('Parsing CNP_IO list...')
         cnp_io_vars = parse_cnp_io_list(Path(args.variable_list))
         pft_1d_variables = cnp_io_vars.get('pft_1d_variables', [])
-        variables_2d_soil = cnp_io_vars.get('variables_2d_soil', [])
-        if not variables_2d_soil:
-            variables_2d_soil = cnp_io_vars.get('x_list_columns_2d', [])
-        print(f"  PFT1D: {pft_1d_variables}")
-        print(f"  Soil2D: {variables_2d_soil}")
+        variables_2d_soil = cnp_io_vars.get('variables_2d_soil', []) or cnp_io_vars.get('x_list_columns_2d', [])
     else:
-        print("Auto-detecting CNP_IO variables from config.json...")
-        pft_1d_variables, variables_2d_soil = auto_detect_variable_list_from_config(FILE_NEW)
-    # Combine all variables to plot
-    VARIABLES = pft_1d_variables + variables_2d_soil
-    if not VARIABLES:
-        print("Error: No variables found in CNP_IO list or config.json")
+        print('Auto-detecting CNP_IO variables from config.json...')
+        pft_1d_variables, variables_2d_soil = auto_detect_variable_list_from_config(ai_restart_path)
+    variables = pft_1d_variables + variables_2d_soil
+    if not variables:
+        print('Error: No variables found in CNP_IO list or config.json')
         return
-    print(f"Variables to plot: {VARIABLES}")
-    print(f"  PFT1D: {pft_1d_variables}")
-    print(f"  Soil2D: {variables_2d_soil}")
-    
-    ds_new = xr.open_dataset(FILE_NEW)
-    ds_old = xr.open_dataset(FILE_OLD)
+    print(f'Variables to process ({len(variables)}): {variables}')
+
+    ds_new = xr.open_dataset(ai_restart_path)
+    ds_old = xr.open_dataset(reference_path)
+
+    grid_mapping = _build_target_to_source_mapping(ds_old, ds_new)
 
     grid_lon, grid_lat = _gridcell_lonlat(ds_new)
-    n_grid = ds_new.sizes["gridcell"]
+    n_grid = ds_new.sizes['gridcell']
 
-    col2grid = _to_zero_based_index(_safe_get(ds_new, "cols1d_gridcell_index").values, n_grid)
-    pft2grid = _to_zero_based_index(_safe_get(ds_new, "pfts1d_gridcell_index").values, n_grid)
-
+    col2grid = _to_zero_based_index(_safe_get(ds_new, 'cols1d_gridcell_index').values, n_grid)
+    pft2grid = _to_zero_based_index(_safe_get(ds_new, 'pfts1d_gridcell_index').values, n_grid)
     grid_to_cols = _build_gridcell_groups(col2grid, n_grid)
     grid_to_pfts = _build_gridcell_groups(pft2grid, n_grid)
 
-    print(f"Total gridcells: {n_grid} | total columns: {col2grid.size} | total pfts: {pft2grid.size}")
-    print(f"Example: gridcell 0 -> columns {grid_to_cols[0][:5]}, pfts {grid_to_pfts[0][:5]}")
+    print(f'Total gridcells: {n_grid} | total columns: {col2grid.size} | total pfts: {pft2grid.size}')
+    print(f'Example: gridcell 0 -> columns {grid_to_cols[0][:5]}, pfts {grid_to_pfts[0][:5]}')
 
-    print(f"\nStart plotting: {len(VARIABLES)} variables")
-    for var in VARIABLES:
+    stats_rows = []
+    debug_enabled = not args.stats_only
+
+
+    for var in variables:
         if (var not in ds_new.data_vars) or (var not in ds_old.data_vars):
-            print(f"Skip {var} (not found in both files)")
+            print(f'Skip {var} (not found in both files)')
             continue
 
         da_new = ds_new[var]
@@ -338,16 +431,25 @@ def main():
         dims = da_new.dims
         print(f"\nVariable {var}, dims: {dims}")
 
-        if ("column" in dims) and ("levgrnd" in dims):
-            # Soil2D variable
-            da_new_cl = da_new.transpose("column", "levgrnd")
-            da_old_cl = da_old.transpose("column", "levgrnd")
+        if ('column' in dims) and ('levgrnd' in dims):
+            da_new_cl = da_new.transpose('column', 'levgrnd', ...)
             vals_new = _to_nan_fillvalue(da_new_cl.values)
+
+            if 'gridcell' not in da_old.dims:
+                print('  Skip (reference dataset lacks gridcell dimension)')
+                continue
+
+            old_order = [dim for dim in da_old.dims if dim != 'gridcell'] + ['gridcell']
+            da_old_cl = da_old.transpose(*old_order)
             vals_old = _to_nan_fillvalue(da_old_cl.values)
+            dims_old = da_old_cl.dims
+            axis_grid = dims_old.index('gridcell')
+            axis_column = dims_old.index('column') if 'column' in dims_old else None
+            axis_lev = dims_old.index('levgrnd') if 'levgrnd' in dims_old else None
 
             for lev in LEVGRND_LAYERS:
-                if lev < 0 or lev >= da_new_cl.sizes["levgrnd"]:
-                    print(f"  Layer {lev} out of range, skipped")
+                if lev < 0 or lev >= da_new_cl.sizes['levgrnd']:
+                    print(f'  Layer {lev} out of range, skipped')
                     continue
 
                 new_grid = np.full(n_grid, np.nan, dtype=float)
@@ -357,35 +459,54 @@ def main():
                     cols = grid_to_cols[g]
                     if len(cols) == 0:
                         continue
-                    c0 = cols[0]  # First column only
-                    # Use column 0 for AI prediction file if it has only one column
+                    c0 = cols[0]
                     if vals_new.shape[0] == 1:
                         new_grid[g] = vals_new[0, lev]
                     else:
                         new_grid[g] = vals_new[c0, lev]
-                    # Always use mapping for old/model file
-                    old_grid[g] = vals_old[c0, lev]
 
-                # Debug print for this layer
-                print(f"[DEBUG] {var} lev{lev}: new_grid min={np.nanmin(new_grid)}, max={np.nanmax(new_grid)}, mean={np.nanmean(new_grid)}, sample={new_grid[:10]}")
-                print(f"[DEBUG] {var} lev{lev}: old_grid min={np.nanmin(old_grid)}, max={np.nanmax(old_grid)}, mean={np.nanmean(old_grid)}, sample={old_grid[:10]}")
+                    src_idx = int(grid_mapping[g]) if g < len(grid_mapping) else -1
+                    if src_idx < 0 or src_idx >= da_old_cl.sizes['gridcell']:
+                        continue
 
-                _plot_tripanel(var, f"_lev{lev}", grid_lon, grid_lat, new_grid, old_grid, OUTPUT_DIR,
-                               label_new=LABEL_NEW, label_old=LABEL_OLD)
+                    idx = [slice(None)] * vals_old.ndim
+                    if axis_column is not None:
+                        col_sel = min(c0, vals_old.shape[axis_column] - 1)
+                        idx[axis_column] = col_sel
+                    if axis_lev is not None:
+                        if lev >= vals_old.shape[axis_lev]:
+                            continue
+                        idx[axis_lev] = lev
+                    idx[axis_grid] = src_idx
+                    old_grid[g] = vals_old[tuple(idx)]
 
-        elif ("pft" in dims) and (len(dims) == 1):
-            # PFT1D variable
-            da_new_p = da_new.transpose("pft")
-            da_old_p = da_old.transpose("pft")
+                if debug_enabled:
+                    print(f'[DEBUG] {var} lev{lev}: new min={np.nanmin(new_grid)} max={np.nanmax(new_grid)} mean={np.nanmean(new_grid)}')
+                    print(f'[DEBUG] {var} lev{lev}: ref min={np.nanmin(old_grid)} max={np.nanmax(old_grid)} mean={np.nanmean(old_grid)}')
+
+                stats = _plot_tripanel(var, f'_lev{lev}', grid_lon, grid_lat, new_grid, old_grid, str(output_dir),
+                                       label_new=label_new, label_old=label_old, plot=plot_enabled)
+                stats_rows.append({'variable': var, 'suffix': f'_lev{lev}', 'label_new': label_new, 'label_old': label_old, 'quality': _classify_quality_from_r2(stats['r2']), **stats})
+
+        elif 'pft' in dims:
+            if 'gridcell' not in da_old.dims:
+                print('  Skip (reference dataset lacks gridcell dimension)')
+                continue
+
+            da_new_p = da_new.transpose(..., 'pft')
             vals_new = _to_nan_fillvalue(da_new_p.values)
+
+            da_old_p = da_old.transpose('pft', 'gridcell')
             vals_old = _to_nan_fillvalue(da_old_p.values)
+            total_pfts = da_new_p.sizes.get('pft', vals_new.shape[0])
 
             for k in PFT_PICK_LIST:
-                if k < 0 or k >= da_new_p.sizes["pft"]:
-                    print(f"  PFT {k} out of range, skipped")
+                if k < 0 or k >= total_pfts:
+                    print(f'  PFT {k} out of range, skipped')
                     continue
                 if args.plot_all and k == 0:
-                    continue  # skip pft0 for plot-all
+                    continue
+
                 new_grid = np.full(n_grid, np.nan, dtype=float)
                 old_grid = np.full(n_grid, np.nan, dtype=float)
 
@@ -395,31 +516,137 @@ def main():
                         continue
                     if k < len(pfts):
                         p_idx = pfts[k]
-                        new_grid[g] = vals_new[p_idx]
-                        old_grid[g] = vals_old[p_idx]
+                        if p_idx < vals_new.shape[0]:
+                            new_grid[g] = vals_new[p_idx]
+                    src_idx = int(grid_mapping[g]) if g < len(grid_mapping) else -1
+                    if src_idx < 0 or src_idx >= vals_old.shape[1]:
+                        continue
+                    ai_pft_idx = k - 1
+                    if ai_pft_idx >= 0 and ai_pft_idx < vals_old.shape[0]:
+                        old_grid[g] = vals_old[ai_pft_idx, src_idx]
 
-                _plot_tripanel(var, f"_pft{k}", grid_lon, grid_lat, new_grid, old_grid, OUTPUT_DIR,
-                               label_new=LABEL_NEW, label_old=LABEL_OLD)
-
+                stats = _plot_tripanel(var, f'_pft{k}', grid_lon, grid_lat, new_grid, old_grid, str(output_dir),
+                                       label_new=label_new, label_old=label_old, plot=plot_enabled)
+                stats_rows.append({'variable': var, 'suffix': f'_pft{k}', 'label_new': label_new, 'label_old': label_old, 'quality': _classify_quality_from_r2(stats['r2']), **stats})
         else:
-            print(f"  Skip {var} (only supports (column, levgrnd) and (pft,))")
-
+            print(f'  Skip {var} (unsupported dimensions)')
     ds_new.close()
     ds_old.close()
-    
-    # Print comparison summary
-    print("\n" + "="*80)
-    print("AI RESTART COMPARISON SUMMARY:")
-    print("="*80)
-    print(f"Original restart: {os.path.abspath(FILE_OLD)}")
-    print(f"AI-enhanced restart: {os.path.abspath(FILE_NEW)}")
-    print(f"Labels: {LABEL_OLD} vs {LABEL_NEW}")
-    print(f"Output directory: {os.path.abspath(OUTPUT_DIR)}")
-    print(f"Variables plotted: {VARIABLES}")
-    print(f"Layers plotted: {LEVGRND_LAYERS}")
-    print(f"PFTs plotted: {PFT_PICK_LIST}")
-    print("="*80)
-    print("\nAll plots done! Output dir:", OUTPUT_DIR)
+
+    if stats_rows:
+        stats_format = args.stats_format
+        stats_dir = output_dir
+        csv_out = None
+        txt_out = None
+        if args.stats_file:
+            stats_path = Path(args.stats_file)
+            if stats_path.suffix.lower() == '.csv':
+                csv_out = stats_path
+            elif stats_path.suffix.lower() == '.txt':
+                txt_out = stats_path
+            else:
+                csv_out = stats_path.with_suffix('.csv')
+                txt_out = stats_path.with_suffix('.txt')
+        else:
+            csv_out = stats_dir / 'restart_stats.csv'
+            txt_out = stats_dir / 'restart_stats.txt'
+
+        if stats_format in ('csv', 'both') and csv_out:
+            fieldnames = ['variable', 'suffix', 'label_new', 'label_old', 'quality', 'new_sum', 'new_std', 'new_min', 'new_max', 'old_sum', 'old_std', 'old_min', 'old_max', 'n', 'rmse', 'nrmse', 'r2']
+            with csv_out.open('w', newline='') as f:
+                import csv
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in stats_rows:
+                    writer.writerow(row)
+            print(f'Saved statistics CSV: {csv_out}')
+
+        if stats_format in ('txt', 'both') and txt_out:
+            from collections import defaultdict
+            grouped = defaultdict(list)
+            for row in stats_rows:
+                grouped[row['variable']].append(row)
+            lines = []
+            lines.append('AI Restart Comparison Statistics')
+            lines.append('=' * 80)
+            for var in sorted(grouped.keys()):
+                rows = sorted(grouped[var], key=lambda r: r.get('suffix', ''))
+                lines.append('')
+                lines.append(f'Variable: {var}')
+                lines.append('-' * 80)
+                for row in rows:
+                    lines.append(f"{var}{row.get('suffix', '')}")
+                    lines.append(f"  {row['label_new']}: sum={row['new_sum']:.6g} std={row['new_std']:.6g} min={row['new_min']:.6g} max={row['new_max']:.6g}")
+                    lines.append(f"  {row['label_old']}: sum={row['old_sum']:.6g} std={row['old_std']:.6g} min={row['old_min']:.6g} max={row['old_max']:.6g}")
+                    lines.append(f"  Compare: n={row['n']} rmse={row['rmse']:.6g} nrmse={row['nrmse']:.6g} r2={row['r2']:.6g}")
+                    lines.append(f"  Quality: {row['quality']}")
+                    lines.append('')
+            txt_out.write_text('\n'.join(lines))
+            print(f'Saved statistics report: {txt_out}')
+
+        # Generate quality summary figure
+        categories = ['good', 'ok', 'bad', 'unknown']
+        category_colors = {
+            'good': '#2ecc71',
+            'ok': '#f39c12',
+            'bad': '#e74c3c',
+            'unknown': '#7f8c8d'
+        }
+        from collections import defaultdict
+        quality_counts = defaultdict(lambda: {cat: 0 for cat in categories})
+        for row in stats_rows:
+            cat = row.get('quality', 'unknown') or 'unknown'
+            if cat not in categories:
+                cat = 'unknown'
+            quality_counts[row['variable']][cat] += 1
+        labels = sorted(quality_counts.keys())
+        totals = [sum(quality_counts[var].values()) for var in labels]
+        if labels and any(total > 0 for total in totals):
+            percentages = []
+            for idx, var in enumerate(labels):
+                total = totals[idx]
+                pct = {}
+                for cat in categories:
+                    if total > 0:
+                        pct[cat] = quality_counts[var].get(cat, 0) / total * 100.0
+                    else:
+                        pct[cat] = 0.0
+                percentages.append(pct)
+            fig_width = max(12.0, len(labels) * 0.4)
+            fig, ax = plt.subplots(figsize=(fig_width, 8))
+            positions = np.arange(len(labels))
+            bottom = np.zeros(len(labels), dtype=float)
+            for cat in categories:
+                heights = [pct[cat] for pct in percentages]
+                ax.bar(positions, heights, bottom=bottom, color=category_colors.get(cat, 'gray'), label=cat.capitalize())
+                bottom += heights
+            ax.set_xticks(positions)
+            ax.set_xticklabels(labels, rotation=90)
+            ax.set_ylabel('Percentage (%)')
+            ax.set_ylim(0, 100)
+            ax.set_title('Restart Comparison Quality by Variable')
+            ax.legend(title='Category')
+            fig.tight_layout()
+            quality_fig = output_dir / 'restart_quality_by_variable.png'
+            plt.savefig(quality_fig, dpi=300, bbox_inches='tight')
+            plt.close(fig)
+            print(f'Saved quality summary figure: {quality_fig}')
+
+    print('\n' + '=' * 80)
+    print('AI RESTART COMPARISON SUMMARY:')
+    print('=' * 80)
+    print(f'Reference dataset: {os.path.abspath(reference_path)}')
+    print(f'AI-enhanced restart: {os.path.abspath(ai_restart_path)}')
+    print(f'Labels: {label_old} vs {label_new}')
+    print(f'Output directory: {output_dir.resolve()}')
+    print(f'Variables processed: {variables}')
+    print(f'Layers processed: {LEVGRND_LAYERS}')
+    print(f'PFTs processed: {PFT_PICK_LIST}')
+    print('=' * 80)
+    if plot_enabled:
+        print('\nAll plots done! Output dir:', output_dir)
+    else:
+        print('\nPlots disabled. Statistics written to output directory.')
 
 if __name__ == "__main__":
     main()
