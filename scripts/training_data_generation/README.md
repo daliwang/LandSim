@@ -1,17 +1,18 @@
 # Training Data Generation
 
-Simple workflow to extract TVA forcing data from monthly NetCDF files.
+Simple workflow to generate training datasets for machine learning using two main scripts.
 
 ## Setup
 
 ### 1. Create Virtual Environment
 ```bash
-python3.11 -m venv venv_py311
+# Create a virtual environment in the current directory
+python3 -m venv venv
 ```
 
 ### 2. Activate Virtual Environment
 ```bash
-source venv_py311/bin/activate
+source venv/bin/activate
 ```
 
 ### 3. Install Dependencies
@@ -19,102 +20,145 @@ source venv_py311/bin/activate
 pip install -r requirements.txt
 ```
 
+## Scripts Overview
+
+### 1. `construct_forcing_20years.py`
+Generates processed forcing NetCDF files from raw monthly data.
+
+### 2. `enhanced_training_dataset.py`
+Generates three different types of training datasets for machine learning.
+
 ## Usage
 
-### Complete Workflow
+### Step 1: Generate Forcing NetCDF Files
 
-1. **Generate Forcing NetCDF Files**
+First, create the forcing NetCDF files from raw monthly data:
+
 ```bash
-./bash_script/run_all_forcing_extraction.sh
+python python_scripts/construct_forcing_20years.py
 ```
-Generates 6 NetCDF files in `output/forcing_netcdf/`:
-- TVA_FLDS_1980-1999.nc (Longwave radiation)
-- TVA_FSDS_1980-1999.nc (Shortwave radiation)
-- TVA_PSRF_1980-1999.nc (Surface pressure)
-- TVA_QBOT_1980-1999.nc (Specific humidity)
-- TVA_PRECTmms_1980-1999.nc (Precipitation)
-- TVA_TBOT_1980-1999.nc (Air temperature)
 
-2. **Validate NetCDF Data Accuracy**
+**Command Line Options:**
 ```bash
-./bash_script/run_forcing_netcdf_validation.sh
+python python_scripts/construct_forcing_20years.py \
+    --input-dir /path/to/raw/forcing/data \
+    --output-dir /path/to/output/directory \
+    --start-year 1980 \
+    --end-year 1999
 ```
-Compares generated NetCDF files with reference files to ensure correctness.
 
-3. **Generate PKL Files (Training Ready)**
+**Output**: `output/forcing_netcdf/`
+- `FLDS_1980-1999.nc` (Downward longwave radiation)
+- `FSDS_1980-1999.nc` (Downward shortwave radiation)
+- `PRECTmms_1980-1999.nc` (Precipitation rate)
+- `PSRF_1980-1999.nc` (Surface pressure)
+- `QBOT_1980-1999.nc` (Specific humidity)
+- `TBOT_1980-1999.nc` (Air temperature)
+
+### Step 2: Generate Training Datasets
+
+Use the unified script with three different modes:
+
 ```bash
-./bash_script/run_forcing_pkl_generation.sh
+python python_scripts/enhanced_training_dataset.py --[mode]
 ```
-Creates optimized PKL files in `output/forcing_hourly_pkl/` for machine learning:
-- 12 batch files (TVA_forcing_batch_01.pkl to TVA_forcing_batch_12.pkl)
-- Each batch contains 1000 gridcells (except last batch: 357)
-- 9 variables per gridcell: landfrac, lat, lon, 6 forcing variables
-- 58,400 time steps (3-hour resolution, 20 years)
-- **Automatically converts forcing variables to list format for training compatibility**
 
-4. **Validate PKL Data Accuracy**
-```bash
-./bash_script/run_forcing_pkl_validation.sh
+#### Mode 1: Forcing-Only Dataset (`--forcing_only`)
+- **Purpose**: Raw meteorological forcing data (no monthly averaging)
+- **Variables**: 9 variables (landfrac, lat, lon, 6 forcing variables)
+- **Data**: Raw 3-hour time series (58,400 time steps)
+- **Output**: `output/forcing_only_dataset/`
+- **Files**: `forcing_data_batch_XX.pkl`
+
+#### Mode 2: Enhanced Dataset (`--enhanced_dataset`)
+- **Purpose**: Complete ecosystem training dataset with all variables
+- **Variables**: 291 variables (initial conditions + Y_variables + PFT variables)
+- **Data**: Monthly averaged time series + ecosystem state variables
+- **Output**: `output/enhanced_training_dataset/`
+- **Files**: `enhanced_monthly_training_data_batch_XX.pkl`
+- **Intermediate**: `output/training_dataset_pkl/` (Step 1 output)
+
+#### Mode 3: Initial-Only Dataset (`--initial_only`)
+- **Purpose**: Initial conditions without simulation results (no Y_variables)
+- **Variables**: 195 variables (initial conditions + PFT variables, NO Y_variables)
+- **Data**: Initial state variables only
+- **Output**: `output/initial_condition_dataset/`
+- **Files**: `enhanced_monthly_training_data_batch_XX.pkl`
+
+## Output Directory Structure
+
 ```
-Validates PKL files against generated NetCDF files using sequential gridcell mapping:
-- Validates first 5 PKL batches (5000 gridcells total)
-- Each batch corresponds to sequential NetCDF gridcells (0-999, 1000-1999, etc.)
-- Ensures PKL data matches NetCDF data with 100% accuracy
-- **PKL files are already in list format and ready for training**
-
-5. **Generate Complete Training Dataset (Monthly Averaged)**
-```bash
-./bash_script/run_incomplete_training_dataset.sh
+output/
+├── forcing_netcdf/                     # Step 1: Forcing NetCDF files
+│   ├── FLDS_1980-1999.nc
+│   ├── FSDS_1980-1999.nc
+│   └── ... (6 NetCDF files)
+│
+├── forcing_only_dataset/               # Mode 1: Forcing-only
+│   ├── forcing_data_batch_01.pkl
+│   └── ... (batch files)
+│
+├── training_dataset_pkl/               # Mode 2: Intermediate (Step 1)
+│   ├── training_data_batch_01.pkl
+│   └── ... (batch files)
+│
+├── enhanced_training_dataset/           # Mode 2: Final output
+│   ├── enhanced_monthly_training_data_batch_01.pkl
+│   └── ... (batch files)
+│
+└── initial_condition_dataset/          # Mode 3: Initial-only
+    ├── enhanced_monthly_training_data_batch_01.pkl
+    └── ... (batch files)
 ```
-- Integrates ecosystem variables with forcing data
-- Applies monthly averaging to forcing variables (240 values for 20 years)
-- Output: `output/training_dataset_pkl/monthly_training_data_batch_XX.pkl`
-- Automatically removes original PKL files
 
-6. **Generate Enhanced Dataset**
-```bash
-./bash_script/run_enhanced_dataset_generation.sh
-```
-- Adds pool variables (cpool, npool, ppool, xsmrpool) from restart files
-- Adds 38 transfer variables and corresponding Y variables
-- Output: `output/enhanced_training_dataset/enhanced_monthly_training_data_batch_XX.pkl`
-- Automatically removes intermediate files
+## Quick Start
 
-7. **Add PFT Variables**
-```bash
-./bash_script/run_adding_pft_variables.sh
-```
-- Adds PFT (Plant Functional Type) variables from `clm_params_c211124.nc`
-- Removes unwanted variables (fire-related, unnecessary PFT variables, SCALARAVG_vr)
-- **Final dataset ready for machine learning training**
+1. **Generate forcing files**:
+   ```bash
+   python python_scripts/construct_forcing_20years.py
+   ```
 
-## Data Validation
+2. **Choose your dataset mode**:
+   ```bash
+   # For complete ecosystem data (291 variables)
+   python python_scripts/enhanced_training_dataset.py --enhanced_dataset
+   
+   # For initial conditions only (195 variables)
+   python python_scripts/enhanced_training_dataset.py --initial_only
+   
+   # For forcing data only (9 variables, raw time series)
+   python python_scripts/enhanced_training_dataset.py --forcing_only
+   ```
 
-### When to Validate Your Data
-
-**After Step 1 (Forcing NetCDF Generation):**
-```bash
-./validation/forcing_netcdf_validation.py
-```
-- Validates generated NetCDF files against reference files
-- Ensures 6 forcing variables are correctly processed
-
-**After Step 4 (Forcing PKL Generation):**
-```bash
-./bash_script/run_forcing_pkl_validation.sh
-```
-- Validates PKL files against generated NetCDF files
-- Sequential gridcell mapping validation (first 5 batches)
-
-**After Step 7 (Final Enhanced Dataset):**
-```bash
-./bash_script/run_comprehensive_validation.sh
-```
-- Complete validation of the final enhanced dataset
-- Includes monthly averaging, data consistency, spatial mapping, and scientific validity checks
-- **This is the most important validation** - run after completing all processing steps
-
+3. **Find your results** in the corresponding `output/` subdirectory.
 
 ## Configuration
 
-Edit `config.py` to modify paths and settings.
+**All file paths and settings can be modified in `config.py`:**
+
+- **Input data paths**: Raw forcing data, surface data, restart files
+- **Output directories**: Where to save generated datasets
+- **File patterns**: How to find input files
+- **Variable definitions**: Which variables to include (from CNP_IO file)
+
+**Key configuration sections:**
+- `forcing_raw_data_path`: Raw monthly forcing data directory
+- `forcing_netcdf_output_dir`: Processed forcing NetCDF output
+- `output_dir`: Base output directory for all datasets
+- `surface_data_files`: Surface data NetCDF files
+- `ad_spinup_*_files`: Initial spinup files
+- `final_spinup_*_files`: Final spinup files (for Y_variables)
+- `clm_params_nc_path`: CLM parameters file for PFT variables
+
+**Example configuration changes:**
+```python
+# Change input data directory
+forcing_raw_data_path = '/path/to/your/raw/data'
+
+# Change output directory
+output_dir = './your_output'
+
+# Change dataset files
+surface_data_files = ['/path/to/your/surface.nc']
+```
+

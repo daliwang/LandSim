@@ -1,16 +1,19 @@
 # Training Data Generation Requirements
 # Install with: pip install -r requirements.txt
+# Updated based on working virtual environment: venv_py311
+# Only includes packages actually used by the scripts
 
-# Core data processing
-pandas>=2.0.0
-numpy>=1.24.0
-netCDF4>=1.6.0
-xarray>=2023.1.0
-dask>=2023.0.0
-scipy>=1.10.0
+# Core data processing libraries (required)
+netCDF4==1.7.3          # For reading/writing NetCDF files
+numpy==2.3.4             # Numerical computing
+pandas==2.3.3            # Data manipulation
+scipy==1.16.2            # Scientific computing (used for cKDTree)
+xarray==2025.10.1        # For multi-dimensional arrays and NetCDF handling
+dask==2025.10.0          # Parallel computing (required by xarray)
 
-# Time handling for NetCDF files
-cftime>=1.6.0
+# Time handling for NetCDF files (required for construct_forcing_20years.py)
+cftime==1.6.5            # Calendar/time handling
 
-# Utilities
-tqdm>=4.65.0
+# Note: The following packages are automatically installed as dependencies:
+# certifi, click, cloudpickle, fsspec, importlib_metadata, locket, 
+# packaging, partd, python-dateutil, pytz, PyYAML, six, toolz, tzdata, zipp

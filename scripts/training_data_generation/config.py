@@ -16,94 +16,82 @@ except Exception:
 # Raw forcing data directory (contains monthly NetCDF files)
 forcing_raw_data_path = '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/forcing'
 
-# Base output directory
-output_dir = './output'
+# Base output directory (use absolute path)
+import os
+base_dir = os.path.dirname(os.path.abspath(__file__))
+output_dir = os.path.join(base_dir, 'output')
 
 # Processed forcing NetCDF files output directory
-forcing_netcdf_output_dir = './output/forcing_netcdf'
+forcing_netcdf_output_dir = os.path.join(output_dir, 'forcing_netcdf', 'TES_SE')
 
 # Forcing PKL files output directory
-forcing_pkl_output_dir = './output/forcing_hourly_pkl'
+forcing_pkl_output_dir = os.path.join(output_dir, 'forcing_hourly_pkl')
 
 # Training dataset PKL files output directory
-training_dataset_pkl_output_dir = './output/training_dataset_pkl'
+training_dataset_pkl_output_dir = os.path.join(output_dir, 'training_dataset_pkl')
 
 # CLM parameters NetCDF file path
-clm_params_nc_path = '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/clm_params_c211124.nc'
+clm_params_nc_path = '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/domain_surfdata/clm_params_c211124.nc'
+
+# =============================================================================
+# INPUT FILES CONFIGURATION
+# =============================================================================
+
+# Surface data files
+surface_data_files = [
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/domain_surfdata/SEBOX1_surfdata.TES_SE.4km.1d.NLCD.c250202.nc'
+]
+
+# AD-SPINUP files (initial spinup)
+ad_spinup_history_files = [
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/history_restart_files/uELM_SEBOX1_I1850CNPRDCTCBC.elm.h0.0021-01-01-00000.nc'
+]
+
+ad_spinup_restart_files = [
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/history_restart_files/uELM_SEBOX1_I1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc'
+]
+
+# FINAL-SPINUP files (final spinup)
+final_spinup_history_files = [
+    #'/gpfs/wolf2/cades/cli185/proj-shared/wangd/kmELM/e3sm_runs/uELM_TVA_finalspinref/run/uELM_TVA_finalspinref.elm.h0.0781-01.nc'
+]
+
+final_spinup_restart_files = [
+    #'/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_finalspinref.elm.r.0781-01-01-00000.nc'
+]
+
+# Special P input NetCDF file
+#special_p_input_nc = '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_finalspinref.elm.r.0781-01-01-00000.nc'
 
 # =============================================================================
 # 37_DATASET CONFIGURATION (Enhanced Dataset Generation)
 # =============================================================================
 
 class Config:
-    # Input paths for 37_dataset.py
-    INPUT_GLOB = "./output/training_dataset_pkl/monthly_training_data_batch_*.pkl"
-    OUTPUT_DIR = "./output/enhanced_training_dataset"
+    # Input paths for enhanced dataset generation
+    INPUT_GLOB = os.path.join(output_dir, "training_dataset_pkl", "monthly_training_data_batch_*.pkl")
+    OUTPUT_DIR = os.path.join(output_dir, "enhanced_training_dataset")
     ENHANCED_PREFIX = "enhanced_"
     POOL_VARS = ["cpool", "npool", "ppool", "xsmrpool"]
     
     # Special P input NetCDF file
-    SPECIAL_P_INPUT_NC = "/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_finalspinref.elm.r.0781-01-01-00000.nc"
+    #SPECIAL_P_INPUT_NC = "/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_finalspinref.elm.r.0781-01-01-00000.nc"
     SPECIAL_P_VARS = []
 
-    # CNP IO configuration file
+    # CNP IO configuration file (can be changed to any CNP_IO file)
     CNP_IO_FILE = os.path.join(os.path.dirname(__file__), "python_scripts", "CNP_IO_updated14_xfer.txt")
-
-    # Columns to drop during processing
-    COLS_TO_DROP = [
-        'H2OSFC', 'H2OSNO', 'H2OSOI_LIQ', 'H2OSOI_ICE', 'LAKE_SOILC', 'H2OCAN',
-        'TH2OSFC', 'T_GRND', 'T_GRND_R', 'T_GRND_U', 'T_LAKE', 'T_SOISNO',
-        'TS_TOPO', 'taf', 'T_VEG', 'T10_VALUE',
-        'Y_H2OSFC', 'Y_H2OSNO', 'Y_H2OSOI_LIQ', 'Y_H2OSOI_ICE', 'Y_LAKE_SOILC', 'Y_H2OCAN',
-        'Y_TH2OSFC', 'Y_T_GRND', 'Y_T_GRND_R', 'Y_T_GRND_U', 'Y_T_LAKE', 'Y_T_SOISNO',
-        'Y_TS_TOPO', 'Y_taf', 'Y_T_VEG', 'Y_T10_VALUE',
-        'annsum_npp', 'avail_retransn', 'avail_retransp', 'cannsum_npp', 
-        'Y_annsum_npp', 'Y_avail_retransn', 'Y_avail_retransp', 'Y_cannsum_npp',
-        'leafc_xfer', 'frootc_xfer', 'livestemc_xfer', 'deadstemc_xfer', 'livecrootc_xfer', 'deadcrootc_xfer',
-        'gresp_xfer', 'leafn_xfer', 'frootn_xfer', 'livestemn_xfer', 'deadstemn_xfer', 'livecrootn_xfer',
-        'deadcrootn_xfer', 'leafp_xfer', 'frootp_xfer', 'livestemp_xfer', 'deadstemp_xfer', 'livecrootp_xfer', 'deadcrootp_xfer', 
-        'retransn', 'retransp', 'gresp_storage',
-        'Y_leafc_xfer', 'Y_frootc_xfer', 'Y_livestemc_xfer', 'Y_deadstemc_xfer', 'Y_livecrootc_xfer', 'Y_deadcrootc_xfer',
-        'Y_gresp_xfer', 'Y_leafn_xfer', 'Y_frootn_xfer', 'Y_livestemn_xfer', 'Y_deadstemn_xfer', 'Y_livecrootn_xfer',
-        'Y_deadcrootn_xfer', 'Y_leafp_xfer', 'Y_frootp_xfer', 'Y_livestemp_xfer', 'Y_deadstemp_xfer', 'Y_livecrootp_xfer', 'Y_deadcrootp_xfer', 
-        'Y_retransn', 'Y_retransp', 'Y_gresp_storage',
-        'labilep_vr', 'occlp_vr', 'primp_vr',
-        'Y_labilep_vr', 'Y_occlp_vr', 'Y_primp_vr',
-        'cpool', 'npool', 'ppool', 'xsmrpool',
-        'Y_cpool', 'Y_npool', 'Y_ppool', 'Y_xsmrpool',
-        'FH2OSFC',
-        'Y_FH2OSFC',
-        'secondp_vr',
-        'Y_secondp_vr'
-    ]
     
-    # List columns configuration
-    X_LIST_COLUMNS_2D = [
-        'soil3c_vr', 'soil4c_vr', 'cwdc_vr', 'cwdn_vr', 'secondp_vr', 'cwdp', 'totcolp', 'totlitc', 'cwdp_vr',
-        'soil1c_vr', 'soil1n_vr', 'soil1p_vr',
-        'soil2c_vr', 'soil2n_vr', 'soil2p_vr',
-        'soil3n_vr', 'soil3p_vr',
-        'soil4n_vr', 'soil4p_vr',
-        'litr1c_vr', 'litr2c_vr', 'litr3c_vr',
-        'litr1n_vr', 'litr2n_vr', 'litr3n_vr',
-        'litr1p_vr', 'litr2p_vr', 'litr3p_vr',
-        'sminn_vr', 'smin_no3_vr', 'smin_nh4_vr',
-    ]
+    # Alternative CNP_IO files (uncomment to use different files)
+    # CNP_IO_FILE = os.path.join(os.path.dirname(__file__), "python_scripts", "CNP_IO_alternative.txt")
+    # CNP_IO_FILE = os.path.join(os.path.dirname(__file__), "python_scripts", "CNP_IO_custom.txt")
 
-    X_LIST_COLUMNS_1D = [
-        'deadcrootc', 'deadstemc', 'tlai', 'totvegc', 'deadstemn', 'deadcrootn', 'deadstemp', 'deadcrootp',
-        'leafc', 'leafc_storage', 'frootc', 'frootc_storage',
-        'leafn', 'leafn_storage', 'frootn', 'frootn_storage',
-        'leafp', 'leafp_storage', 'frootp', 'frootp_storage',
-        'livestemc', 'livestemc_storage', 'livestemn', 'livestemn_storage',
-        'livestemp', 'livestemp_storage', 'deadcrootc_storage', 'deadstemc_storage',
-        'livecrootc', 'livecrootc_storage', 'deadcrootn_storage', 'deadstemn_storage',
-        'livecrootn', 'livecrootn_storage', 'deadcrootp_storage', 'deadstemp_storage',
-        'livecrootp', 'livecrootp_storage',
-    ]
-
-    Y_LIST_COLUMNS_2D = [f"Y_{name}" for name in X_LIST_COLUMNS_2D]
-    Y_LIST_COLUMNS_1D = [f"Y_{name}" for name in X_LIST_COLUMNS_1D]
+    # Dynamic variable lists (populated from CNP_IO file)
+    # These will be automatically populated by apply_cnp_io_overrides()
+    X_LIST_COLUMNS_1D = []
+    X_LIST_COLUMNS_2D = []
+    Y_LIST_COLUMNS_1D = []
+    Y_LIST_COLUMNS_2D = []
+    COLS_TO_DROP = []
 
     WATER_VARIABLES = []
     Y_WATER_VARIABLES = []
@@ -131,6 +119,7 @@ class Config:
             new_1d_vars = list(dict.fromkeys(parsed.get('pft_1d_variables', []) or []))
             new_2d_vars = list(dict.fromkeys(parsed.get('variables_2d_soil', []) or []))
             new_water_vars = list(dict.fromkeys(parsed.get('water_variables', []) or []))
+            new_cols_to_drop = list(dict.fromkeys(parsed.get('cols_to_drop', []) or []))
 
             cls.dataset_new_1D_PFT_VARIABLES = list(dict.fromkeys(
                 (parsed.get('dataset_new_1D_PFT_VARIABLES') or parsed.get('pft_1d_variables') or [])
@@ -170,6 +159,9 @@ class Config:
             if new_water_vars:
                 cls.WATER_VARIABLES = new_water_vars
                 cls.X_LIST_COLUMNS_2D = list(dict.fromkeys(list(cls.X_LIST_COLUMNS_2D) + new_water_vars))
+            
+            if new_cols_to_drop:
+                cls.COLS_TO_DROP = list(dict.fromkeys(list(cls.COLS_TO_DROP) + new_cols_to_drop))
 
             cls.Y_LIST_COLUMNS_1D = [f"Y_{name}" for name in cls.X_LIST_COLUMNS_1D]
             cls.Y_LIST_COLUMNS_2D = [f"Y_{name}" for name in cls.X_LIST_COLUMNS_2D]
