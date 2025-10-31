@@ -101,28 +101,37 @@ def process_forcing_variable(var_name, var_info):
     print(f"Target output file: {final_output_file}")
     
     # --- Find and build all monthly file list ---
-    print("Searching for monthly files...")
+    print(f"[{datetime.datetime.now()}] Searching for monthly files...")
     all_monthly_files = []
     
+    # Pre-scan directory for efficiency (especially important for TES_NORTH with 4000+ files)
+    print(f"[{datetime.datetime.now()}] Pre-scanning directory for available files...")
+    available_files = set(os.listdir(data_dir))
+    print(f"[{datetime.datetime.now()}] Found {len(available_files)} files in directory")
+    
     for year in range(start_year, end_year + 1):
+        year_found = 0
         for month in range(1, 13):
             file_name = var_info['file_pattern'].format(year=year, month=month)
-            file_path = os.path.join(data_dir, file_name)
-            if os.path.exists(file_path):
+            if file_name in available_files:
+                file_path = os.path.join(data_dir, file_name)
                 all_monthly_files.append(file_path)
+                year_found += 1
             else:
                 print(f"   Warning: File {file_name} does not exist, skipping.")
+        print(f"[{datetime.datetime.now()}] {var_name}: year {year} -> found {year_found}/12 monthly files")
     
     if not all_monthly_files:
         print(f"❌ Error: No valid monthly files found for {var_name} in directory {data_dir}")
         return False
     
-    print(f"Found {len(all_monthly_files)} valid monthly files.")
+    print(f"[{datetime.datetime.now()}] {var_name}: total valid monthly files: {len(all_monthly_files)}")
     
     # --- Define Dask chunks ---
     dask_chunks = {'time': 366*8}
     
     try:
+        print(f"[{datetime.datetime.now()}] Opening {len(all_monthly_files)} monthly files with xarray.open_mfdataset ...")
         with xr.open_mfdataset(
             all_monthly_files,
             combine='nested',
@@ -131,9 +140,10 @@ def process_forcing_variable(var_name, var_info):
             chunks=dask_chunks,
             parallel=False,
         ) as ds:
+            print(f"[{datetime.datetime.now()}] Dataset opened. Dims: {dict(ds.dims)} | Vars: {list(ds.data_vars)}")
 
             # === Separate static variables ===
-            print("Separating static coordinate/ID variables...")
+            print(f"[{datetime.datetime.now()}] Separating static coordinate/ID variables...")
             static_var_names = ['gridID', 'LONGXY', 'LATIXY']
             static_data = {}
             
@@ -150,11 +160,11 @@ def process_forcing_variable(var_name, var_info):
                 print(f"Error: {var_name} variable not found.")
                 return False
             
-            print(f"Processing variables: {time_varying_vars}")
+            print(f"[{datetime.datetime.now()}] Processing variables: {time_varying_vars}")
             ds_temporal = ds[['time'] + time_varying_vars]
 
             # --- Time axis correction ---
-            print("Loading raw time coordinates...")
+            print(f"[{datetime.datetime.now()}] Loading raw time coordinates...")
             time_values_raw = ds_temporal['time'].load().values
             units = ds_temporal['time'].attrs['units']
             calendar = ds_temporal['time'].attrs.get('calendar', 'standard')
@@ -163,7 +173,7 @@ def process_forcing_variable(var_name, var_info):
             
             print(f"  Time points: {len(time_values_raw)}")
 
-            print("Starting time coordinate correction...")
+            print(f"[{datetime.datetime.now()}] Starting time coordinate correction...")
             time_values_corrected = np.copy(time_values_raw).astype(float)
             cumulative_offset_days = 0.0
             expected_step_days = 3.0 / 24.0
@@ -182,16 +192,16 @@ def process_forcing_variable(var_name, var_info):
                 
                 time_values_corrected[i+1] = time_values_raw[i+1] + cumulative_offset_days
             
-            print(f"Time correction completed. Corrected {jump_count} jumps.")
+            print(f"[{datetime.datetime.now()}] Time correction completed. Corrected {jump_count} jumps.")
 
-            print("Decoding corrected time values...")
+            print(f"[{datetime.datetime.now()}] Decoding corrected time values...")
             try:
                 dates = cftime.num2date(time_values_corrected, units, calendar=calendar, only_use_cftime_datetimes=True)
             except ValueError:
                 dates = cftime.num2date(time_values_corrected, units, calendar=calendar)
 
             # --- Check time monotonicity ---
-            print("Checking time monotonicity...")
+            print(f"[{datetime.datetime.now()}] Checking time monotonicity...")
             if len(dates) >= 2:
                 diffs_corrected = np.diff(dates)
                 zero_timedelta = datetime.timedelta(0)
@@ -201,7 +211,7 @@ def process_forcing_variable(var_name, var_info):
                     print(f"Error! Corrected time is still not monotonic!")
                     return False
                 else:
-                    print("✓ Time coordinate check passed.")
+                    print(f"[{datetime.datetime.now()}] ✓ Time coordinate check passed.")
 
             # --- Create dataset with corrected time ---
             ds_corrected_time = ds_temporal.copy(deep=False)
@@ -214,11 +224,10 @@ def process_forcing_variable(var_name, var_info):
                 ds_corrected_time[var_name_static] = data_array
 
             final_dataset = ds_corrected_time
-            print("Final dataset:")
-            print(final_dataset)
+            print(f"[{datetime.datetime.now()}] Final dataset ready. Summary dims: {dict(final_dataset.dims)}")
 
             # --- Write to file ---
-            print(f"Writing to file: {final_output_file}")
+            print(f"[{datetime.datetime.now()}] Writing to file: {final_output_file}")
             output_encoding = {
                 var_name: {'zlib': True, 'complevel': 4, 'dtype': 'float32'},
                 'time': {'units': units, 'calendar': calendar, 'dtype': 'float64'}
@@ -232,8 +241,8 @@ def process_forcing_variable(var_name, var_info):
                 output_encoding['LATIXY'] = {'dtype': final_dataset['LATIXY'].dtype, '_FillValue': np.nan}
 
             final_dataset.to_netcdf(final_output_file, encoding=output_encoding, unlimited_dims=['time'])
-            print(f"✓ Successfully generated: {final_output_file}")
-            print(f"  File size: {os.path.getsize(final_output_file) / (1024**3):.2f} GB")
+            print(f"[{datetime.datetime.now()}] ✓ Successfully generated: {final_output_file}")
+            print(f"[{datetime.datetime.now()}]   File size: {os.path.getsize(final_output_file) / (1024**3):.2f} GB")
 
     except Exception as e:
         print(f"\nError: {e}")
