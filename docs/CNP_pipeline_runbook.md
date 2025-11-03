@@ -117,3 +117,14 @@ python ../../scripts/update_restart_with_aipredictions.py \
 Optional: `inference_map.py` can create statistics and interactive maps (currently not working well).
 
 
+### Run Inference on the TVA Dataset 
+The TVA workflow allows you to perform site-specific inference using a trained model and generate updated restart files for targeted locations. Given one or more geographic coordinates, the script extracts all required variables from the TVA dataset, runs model inference to obtain predicted values, and produces a new restart file reflecting the AI-updated state.
+
+All codes are organized under the ./TVA_1_Sample folder.
+Geographic coordinates are defined in locations.csv.
+```bash
+python ./TVA_1_Sample/run_workflow.py \
+  --restart-file /path/to/20year_restart_file.nc \
+  --model-path /path/to/trained_model_TVA.pt \
+  --dataset-root /path/to/TVA_dataset
+```
