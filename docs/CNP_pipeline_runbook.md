@@ -16,6 +16,30 @@ Notes:
 - This launches training in the background and redirects logs to stdout/stderr.
 - The run output directory will be created under `cnp_results/run_YYYYMMDD_HHMMSS`.
 
+### 2a) Fine-tune a pretrained model (optional)
+If you already have a trained checkpoint and want to continue training on a TVA-style dataset, use the fine-tuning helper. Populate the necessary paths in your CNP_IO file (e.g. `CNP_IO_updated9_dev_gao.txt`):
+
+```
+fine_tuning_dataset_path: /path/to/TVA_dataset_root
+pretrained_model_path: /path/to/base_run/cnp_predictions/model.pth
+output_finetuned_model_dir: ./cnp_results/
+finetuned_model_filename: model.pth   
+num_epochs: 150                              
+```
+
+Then launch fine-tuning:
+
+```bash
+python scripts/run_finetuning.py 
+```
+
+What happens:
+- The script reuses the original training pipeline (same preprocessing, normalization, ModelTrainer).
+- `fine_tuning_dataset_path` + `FILE_PATTERN` point to the TVA batches to load.
+- `pretrained_model_path` is loaded before training begins so weights pick up where the base run ended.
+- Outputs are written to `cnp_results/run_YYYYMMDD_HHMMSS/` (same layout as full training).  
+  Check `cnp_predictions/model.pth`, `cnp_config.json`, `cnp_metrics.json`, and the refreshed prediction CSVs.
+
 ### 3) Navigate to the run directory
 
 ```bash
