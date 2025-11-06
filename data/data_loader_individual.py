@@ -517,9 +517,13 @@ class DataLoaderIndividual:
         assert scalar_data.shape[1] == len(self.data_config.x_list_scalar_columns), 'Mismatch in scalar feature count!'
         assert variables_2d_soil.shape[1] == len(self.data_config.x_list_columns_2d), 'Mismatch in 2D soil feature count!'
         assert pft_param_data.shape[1] == len(self.data_config.pft_param_columns), 'Mismatch in PFT param feature count!'
-        assert y_scalar_data.shape[1] == len(self.data_config.y_list_scalar_columns), 'Mismatch in y_scalar feature count!'
-        assert y_pft_1d_data.shape[1] == len(self.data_config.y_list_columns_1d), 'Mismatch in y_pft_1d variable count!'
-        assert y_soil_2d.shape[1] == len(self.data_config.y_list_columns_2d), 'Mismatch in y_soil_2d feature count!'
+        # Only assert Y variables if they were normalized (training mode)
+        if y_scalar_data is not None:
+            assert y_scalar_data.shape[1] == len(self.data_config.y_list_scalar_columns), 'Mismatch in y_scalar feature count!'
+        if y_pft_1d_data is not None:
+            assert y_pft_1d_data.shape[1] == len(self.data_config.y_list_columns_1d), 'Mismatch in y_pft_1d variable count!'
+        if y_soil_2d is not None:
+            assert y_soil_2d.shape[1] == len(self.data_config.y_list_columns_2d), 'Mismatch in y_soil_2d feature count!'
 
         # Store all scalers
         self.scalers = {
@@ -550,13 +554,19 @@ class DataLoaderIndividual:
             'scalar_data': scalar_data,
             'variables_1d_pft': pft_1d_data,
             'variables_2d_soil': variables_2d_soil,
-            'y_scalar': y_scalar_data,
-            'y_pft_1d': y_pft_1d_data,
-            'y_soil_2d': y_soil_2d,
             'water': water_tensor,
             'y_water': y_water_tensor,
             'scalers': self.scalers
         }
+        
+        # Only add Y variables if they were normalized (training mode) or exist (inference mode)
+        if y_scalar_data is not None:
+            ret['y_scalar'] = y_scalar_data
+        if y_pft_1d_data is not None:
+            ret['y_pft_1d'] = y_pft_1d_data
+        if y_soil_2d is not None:
+            ret['y_soil_2d'] = y_soil_2d
+        
         # Add per-sample PFT mask derived from raw PCT_NAT_PFT_1..16 (1 where >0, else 0)
         try:
             pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
@@ -961,6 +971,13 @@ class DataLoaderIndividual:
         y_scalar_columns = self.data_config.y_list_scalar_columns
         logger.info(f"Normalizing y_scalar data with columns: {y_scalar_columns}")
         
+        # For inference mode, skip if columns don't exist
+        if transform_only:
+            missing_cols = [col for col in y_scalar_columns if col not in self.df.columns]
+            if missing_cols:
+                logger.info(f"Inference mode: Y_scalar columns {missing_cols} missing in DataFrame. Skipping normalization.")
+                return None, None
+        
         for i, col in enumerate(y_scalar_columns):
             assert col in self.df.columns, f"y_scalar column '{col}' missing in DataFrame!"
         
@@ -978,6 +995,14 @@ class DataLoaderIndividual:
     def _normalize_list_1d_individual(self, columns: List[str], transform_only: bool = False) -> Tuple[torch.Tensor, Any]:
         """Normalize 1D list data individually using IndividualScalerManager."""
         logger.info(f"Normalizing 1D list data with columns: {columns}")
+        
+        # For inference mode with Y variables, skip if columns don't exist
+        is_y = columns == self.data_config.y_list_columns_1d
+        if transform_only and is_y:
+            missing_cols = [col for col in columns if col not in self.df.columns]
+            if missing_cols:
+                logger.info(f"Inference mode: Y_pft_1d columns {missing_cols} missing in DataFrame. Skipping normalization.")
+                return None, None
         
         for i, col in enumerate(columns):
             assert col in self.df.columns, f"1D column '{col}' missing in DataFrame!"
@@ -1138,6 +1163,14 @@ class DataLoaderIndividual:
     def _normalize_list_2d_individual(self, columns: List[str], transform_only: bool = False) -> Tuple[torch.Tensor, Any]:
         """Normalize 2D list data individually using IndividualScalerManager."""
         logger.info(f"Normalizing 2D list data with columns: {columns}")
+        
+        # For inference mode with Y variables, skip if columns don't exist
+        is_y = columns == self.data_config.y_list_columns_2d
+        if transform_only and is_y:
+            missing_cols = [col for col in columns if col not in self.df.columns]
+            if missing_cols:
+                logger.info(f"Inference mode: Y_soil_2d columns {missing_cols} missing in DataFrame. Skipping normalization.")
+                return None, None
         
         for i, col in enumerate(columns):
             assert col in self.df.columns, f"2D column '{col}' missing in DataFrame!"
@@ -1525,25 +1558,28 @@ class DataLoaderIndividual:
         train_data['scalar'] = train_list_scalar
         test_data['scalar'] = test_list_scalar 
 
-        # Split y_scalar (target)
-        y_scalar = normalized_data['y_scalar']
-        train_data['y_scalar'] = y_scalar[:train_size]
-        test_data['y_scalar'] = y_scalar[train_size:]
+        # Split y_scalar (target) - skip if not present (inference mode)
+        if 'y_scalar' in normalized_data and normalized_data['y_scalar'] is not None:
+            y_scalar = normalized_data['y_scalar']
+            train_data['y_scalar'] = y_scalar[:train_size]
+            test_data['y_scalar'] = y_scalar[train_size:]
 
         # Split variables_1d_pft (input)
         variables_1d_pft = normalized_data['variables_1d_pft']
         train_data['variables_1d_pft'] = variables_1d_pft[:train_size]
         test_data['variables_1d_pft'] = variables_1d_pft[train_size:]
         
-        # Split y_pft_1d (target)
-        y_pft_1d = normalized_data['y_pft_1d']
-        train_data['y_pft_1d'] = y_pft_1d[:train_size]
-        test_data['y_pft_1d'] = y_pft_1d[train_size:]
+        # Split y_pft_1d (target) - skip if not present (inference mode)
+        if 'y_pft_1d' in normalized_data and normalized_data['y_pft_1d'] is not None:
+            y_pft_1d = normalized_data['y_pft_1d']
+            train_data['y_pft_1d'] = y_pft_1d[:train_size]
+            test_data['y_pft_1d'] = y_pft_1d[train_size:]
 
-        # Split y_soil_2d (target)
-        y_soil_2d = normalized_data['y_soil_2d']
-        train_data['y_soil_2d'] = y_soil_2d[:train_size]
-        test_data['y_soil_2d'] = y_soil_2d[train_size:]
+        # Split y_soil_2d (target) - skip if not present (inference mode)
+        if 'y_soil_2d' in normalized_data and normalized_data['y_soil_2d'] is not None:
+            y_soil_2d = normalized_data['y_soil_2d']
+            train_data['y_soil_2d'] = y_soil_2d[:train_size]
+            test_data['y_soil_2d'] = y_soil_2d[train_size:]
 
         # Split variables_2d_soil (input)
         variables_2d_soil = normalized_data['variables_2d_soil']
