@@ -1,14 +1,22 @@
-# Dataset roots (any absolute paths)
-TRENDY1_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP
-TRENDY05_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP
-TVA4KM_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData/TVA_4km_data_CNP
+AI_PREDICTIONS_DEFAULT: ./comparison_results/ai_predictions_for_plotting.nc
+MODEL_DEFAULT: /global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc
+COMPARISON_OUTPUT_DIR: ./ai_model_comparison_plots
+CSV_PREDICTIONS_DEFAULT: ./cnp_inference_entire_dataset/cnp_predictions
+AI_RESTART_DEFAULT: ./updated_restart_CNP_IO_updated9_dev_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc
+FALLBACK_DATA_DIR: /global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/
+FALLBACK_REFERENCE_FILENAME: 20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc
+fine_tuning_dataset_path: /global/cfs/cdirs/m4814/daweigao/14_Code/TVA_training_dataset_all/
+pretrained_model_path: /global/cfs/cdirs/m4814/daweigao/15_code_Landsim/LandSim/cnp_results/run_20251030_192921/cnp_predictions/model.pth
+output_finetuned_model_dir: ./cnp_results/
+finetuned_model_filename: model.pth
+num_epochs: 150
 
-# Optional extra roots (comma-separated)
-DATA_PATHS: /another/path1, /another/path2
+TRENDY1_PATH:
+TRENDY05_PATH = 
+DATA_PATHS: /global/cfs/cdirs/m4814/daweigao/14_Code/TVA_training_dataset_all/
+FILE_PATTERN: enhanced_monthly_training_data_batch_*.pkl
 
-# Global fallback pattern if a dataset-specific one isn't set
-FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
-
+TVA4KM_PATH: /global/cfs/cdirs/m4814/daweigao/14_Code/TVA_training_dataset_all/
 # Per-dataset patterns (overrides FILE_PATTERN for that path only)
 TVA4KM_FILE_PATTERN: enhanced_monthly_training_data_batch_*.pkl
 
