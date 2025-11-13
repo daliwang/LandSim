@@ -152,7 +152,7 @@ class DataLoaderIndividual:
         logger.info(f"Successfully loaded {len(self.df)} samples")
         
         return self.df
-    
+
     def preprocess_data(self):
         """Preprocess the loaded data."""
         logger.info("Starting data preprocessing...")
@@ -547,6 +547,22 @@ class DataLoaderIndividual:
             'individual_y_soil_2d': self.individual_scalers['y_soil_2d'],
         }
         
+        # debug
+        # logger.info(" Debug data stats after normalization:")
+        # _print_stats("time_series_data", time_series_data)
+        # _print_stats("static_data", static_data)
+        # _print_stats("pft_param_data", pft_param_data)
+        # _print_stats("scalar_data", scalar_data)
+        # _print_stats("variables_1d_pft", pft_1d_data)
+        # _print_stats("variables_2d_soil", variables_2d_soil)
+        # _print_stats("y_scalar", y_scalar_data)
+        # _print_stats("y_pft_1d", y_pft_1d_data)
+        # _print_stats("y_soil_2d", y_soil_2d)
+        # _print_stats("water", water_tensor)
+        # _print_stats("y_water", y_water_tensor)
+        # logger.info(" Debug checking soil 2D stats after normalization:")
+        # _check_soil_2d_stats("variables_2d_soil", variables_2d_soil)
+        # _check_soil_2d_stats("y_soil_2d", y_soil_2d)
         ret = {
             'time_series_data': time_series_data,
             'static_data': static_data,
@@ -1316,11 +1332,17 @@ class DataLoaderIndividual:
             param_matrix.append(row_matrix)
         param_matrix = np.stack(param_matrix, axis=0)  # [batch, 44, 17]
         assert param_matrix.shape[1:] == (num_params, num_pfts), f"pft_param_data shape {param_matrix.shape} does not match [batch, 44, 17]"
-        # Flatten for normalization
-        flat_param_matrix = param_matrix.reshape(param_matrix.shape[0], -1)
+
         scaler = self._get_scaler(self.preprocessing_config.list_1d_normalization)
-        flat_param_matrix_norm = scaler.fit_transform(flat_param_matrix)
-        param_matrix_norm = flat_param_matrix_norm.reshape(param_matrix.shape)
+        param_matrix_norm = np.empty_like(param_matrix)
+
+        for i in range(num_params):
+            X = param_matrix[:, i, :]
+            X_norm = scaler.fit_transform(X.T)
+            if np.all(X_norm == 0):
+                logger.warning(f"{pft_param_columns[i]}: After normalization, the value is all zeros\n")
+            param_matrix_norm[:, i, :] = X_norm.T
+
         pft_param_data = torch.tensor(param_matrix_norm, dtype=self.preprocessing_config.data_type)
         return pft_param_data, scaler
 
@@ -1634,72 +1656,6 @@ class DataLoaderIndividual:
             'test_size': test_size
         }
 
-    def _normalize_list_1d(self, columns: List[str]) -> Tuple[torch.Tensor, Any]:
-        """Normalize 1D list data in the order defined by columns."""
-        logger.info(f"Normalizing 1D list data with columns: {columns}")
-        for i, col in enumerate(columns):
-            assert col in self.df.columns, f"1D column '{col}' missing in DataFrame!"
-        col_data = [np.vstack(self.df[col].values) for col in columns]
-        data = np.stack(col_data, axis=1)  # shape: (samples, features, length)
-        n_samples, n_features, n_length = data.shape
-        data_reshaped = data.reshape(n_samples, -1)
-        scaler = self._get_scaler(self.preprocessing_config.list_1d_normalization)
-        data_normalized = scaler.fit_transform(data_reshaped)
-        data_normalized = data_normalized.reshape(n_samples, n_features, n_length)
-        return torch.tensor(data_normalized, dtype=self.preprocessing_config.data_type), scaler
-
-    def _normalize_list_2d(self, columns: List[str]) -> Tuple[torch.Tensor, Any]:
-        """Normalize 2D list data in the order defined by columns (group path).
-
-        Extract FIRST GROUP (column) -> top 10 layers for consistency with inspector/individual.
-        """
-        logger.info(f"Normalizing 2D list data with columns: {columns}")
-        for i, col in enumerate(columns):
-            assert col in self.df.columns, f"2D column '{col}' missing in DataFrame!"
-        
-        # Extract first column and top 10 layers directly for consistent shapes
-        col_data = []
-        for col in columns:
-            values = self.df[col].values
-            standardized_samples = []
-            
-            for val in values:
-                try:
-                    if isinstance(val, (list, tuple)) and len(val) > 0 and isinstance(val[0], (list, tuple, np.ndarray)):
-                        arr = np.array(val[0], dtype=float).reshape(1, -1)
-                    else:
-                        arr = np.array(val, dtype=object)
-                        if getattr(arr, 'ndim', 1) == 2 and arr.shape[0] >= 1:
-                            arr = np.array(arr[0, :], dtype=float).reshape(1, -1)
-                        elif getattr(arr, 'ndim', 1) == 1 and len(arr) >= 1 and not isinstance(arr[0], (list, tuple, np.ndarray)):
-                            arr = np.array(arr, dtype=float).reshape(1, -1)
-                        else:
-                            arr = None
-                    if arr is None:
-                        standardized_samples.append(np.zeros((1, 10)))
-                    else:
-                        # take top 10 layers
-                        out = np.zeros((1, 10), dtype=float)
-                        take = min(10, arr.shape[1])
-                        if take > 0:
-                            out[:, :take] = arr[:, :take]
-                        standardized_samples.append(out)
-                except Exception:
-                    standardized_samples.append(np.zeros((1, 10)))
-            
-            col_data.append(np.stack(standardized_samples))
-        
-        data = np.stack(col_data, axis=1)  # shape: (samples, features, 1, 10)
-        
-        # Data is already in the correct shape: (samples, variables, 1, 10)
-        # No need for additional extraction since we did it during loading
-        
-        n_samples, n_features, n_rows, n_cols = data.shape
-        data_reshaped = data.reshape(n_samples, -1)
-        scaler = self._get_scaler(self.preprocessing_config.list_2d_normalization)
-        data_normalized = scaler.fit_transform(data_reshaped)
-        data_normalized = data_normalized.reshape(n_samples, n_features, n_rows, n_cols)
-        return torch.tensor(data_normalized, dtype=self.preprocessing_config.data_type), scaler
 
     def get_data_info(self) -> Dict[str, Any]:
         """Get information about the loaded data for configuration and logging."""
@@ -1717,3 +1673,30 @@ class DataLoaderIndividual:
             'data_shape': self.df.shape if hasattr(self, 'df') else None
         }
         return data_info
+
+def _print_stats(name, tensor):
+    if tensor is None:
+        logger.info(f"{name}: None")
+        return
+    # 对 PyTorch Tensor
+    if hasattr(tensor, "max"):
+        logger.info(f"{name} -> min: {tensor.min().item():.6f}, max: {tensor.max().item():.6f}, mean: {tensor.mean().item():.6f}, shape={tuple(tensor.shape)}")
+    else:
+        # 对 numpy
+        arr = np.asarray(tensor)
+        logger.info(f"{name} -> min: {arr.min():.6f}, max: {arr.max():.6f}, mean: {arr.mean():.6f}, shape={arr.shape}")
+
+def _check_soil_2d_stats(name, tensor):
+    if tensor is None:
+        logger.info(f"{name}: None")
+        return
+    x = tensor.squeeze(2)
+    grid_cells, n_vars, n_layers = x.shape
+    nonzero_mask = (x != 0).float()          # [1000, 3, 10]
+    nonzero_ratio = nonzero_mask.mean(dim=0) # [3, 10]
+    max_vals = x.max(dim=0).values
+    min_vals = x.min(dim=0).values 
+    mean_vals = x.mean(dim=0)
+    q25_vals = torch.quantile(x, 0.25, dim=0) 
+    q75_vals = torch.quantile(x, 0.75, dim=0)
+    logger.info(f"{name} -> grid_cells: {grid_cells}, n_vars: {n_vars}, n_layers: {n_layers}, nonzero_ratio: {nonzero_ratio}, max_vals: {max_vals}, min_vals: {min_vals}, mean_vals: {mean_vals}, q25_vals: {q25_vals}, q75_vals: {q75_vals}")
