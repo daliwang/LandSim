@@ -17,6 +17,7 @@ import traceback
 import datetime
 import argparse
 from pathlib import Path
+import re
 
 # Import configuration
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -50,27 +51,27 @@ end_year = args.end_year
 # Define all forcing variables and their file patterns
 forcing_variables = {
     'FLDS': {
-        'file_pattern': 'clmforc.Daymet.km.1d.TPQWL.{year}-{month:02d}.nc',
+        'token': 'TPQWL',
         'description': 'Downward longwave radiation'
     },
     'FSDS': {
-        'file_pattern': 'clmforc.Daymet.km.1d.Solr.{year}-{month:02d}.nc',
+        'token': 'Solr',
         'description': 'Downward shortwave radiation'
     },
     'PRECTmms': {
-        'file_pattern': 'clmforc.Daymet.km.1d.Prec.{year}-{month:02d}.nc',
+        'token': 'Prec',
         'description': 'Precipitation rate'
     },
     'PSRF': {
-        'file_pattern': 'clmforc.Daymet.km.1d.TPQWL.{year}-{month:02d}.nc',
+        'token': 'TPQWL',
         'description': 'Surface pressure'
     },
     'QBOT': {
-        'file_pattern': 'clmforc.Daymet.km.1d.TPQWL.{year}-{month:02d}.nc',
+        'token': 'TPQWL',
         'description': 'Specific humidity'
     },
     'TBOT': {
-        'file_pattern': 'clmforc.Daymet.km.1d.TPQWL.{year}-{month:02d}.nc',
+        'token': 'TPQWL',
         'description': 'Air temperature'
     }
 }
@@ -105,20 +106,34 @@ def process_forcing_variable(var_name, var_info):
     all_monthly_files = []
     
     # Pre-scan directory for efficiency (especially important for TES_NORTH with 4000+ files)
-    print(f"[{datetime.datetime.now()}] Pre-scanning directory for available files...")
-    available_files = set(os.listdir(data_dir))
-    print(f"[{datetime.datetime.now()}] Found {len(available_files)} files in directory")
+    print(f"[{datetime.datetime.now()}] Pre-scanning directory for available files (recursive)...")
+    files_by_token = {}  # {(token, year, month): [paths]}
+    total_files = 0
+    pattern = re.compile(r'(?:.*_)?clmforc\..*\.(Prec|Solr|TPQWL)\.(\d{4})-(\d{2})\.nc$')
+    for root, _, files in os.walk(data_dir):
+        for fname in files:
+            total_files += 1
+            match = pattern.search(fname)
+            if match:
+                token, year_s, month_s = match.groups()
+                key = (token, int(year_s), int(month_s))
+                files_by_token.setdefault(key, []).append(os.path.join(root, fname))
+    print(f"[{datetime.datetime.now()}] Found {total_files} files across {len(files_by_token)} token-year-month combinations")
     
+    token = var_info['token']
     for year in range(start_year, end_year + 1):
         year_found = 0
         for month in range(1, 13):
-            file_name = var_info['file_pattern'].format(year=year, month=month)
-            if file_name in available_files:
-                file_path = os.path.join(data_dir, file_name)
+            key = (token, year, month)
+            if key in files_by_token:
+                file_paths = files_by_token[key]
+                if len(file_paths) > 1:
+                    print(f"   Warning: Multiple matches for {token} {year}-{month:02d}; using {file_paths[0]}")
+                file_path = file_paths[0]
                 all_monthly_files.append(file_path)
                 year_found += 1
             else:
-                print(f"   Warning: File {file_name} does not exist, skipping.")
+                print(f"   Warning: File with token {token} for {year}-{month:02d} does not exist, skipping.")
         print(f"[{datetime.datetime.now()}] {var_name}: year {year} -> found {year_found}/12 monthly files")
     
     if not all_monthly_files:
