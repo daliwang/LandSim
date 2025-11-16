@@ -1128,6 +1128,10 @@ def generate_enhanced_dataset(base_output_dir, variable_definitions, initial_onl
     if not base_files:
         print("❌ No base PKL files found")
         return base_output_dir
+
+    if initial_only_mode and (not config.final_spinup_history_files or not config.final_spinup_restart_files):
+        print("⚠️ Initial-only mode detected with no final spinup files; skipping enhanced dataset generation.")
+        return base_output_dir
     
     # Load restart files for enhancement
     file_path10 = config.ad_spinup_restart_files[0]
