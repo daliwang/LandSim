@@ -144,7 +144,8 @@ def auto_detect_variable_list(ai_predictions_path: Path) -> list:
 
 def create_updated_restart_file(restart_file_path: Path, output_path: Path, 
                                ai_predictions_path: Path, cnp_io_variables: List[str],
-                               model_to_ai_mapping: np.ndarray, variable_mapping: Dict[str, Any]) -> None:
+                               model_to_ai_mapping: np.ndarray, variable_mapping: Dict[str, Any],
+                               strict_dims: bool = False) -> None:
     print(f"Saving updated restart file to: {output_path}")
     
     # Create output directory if it doesn't exist
@@ -156,8 +157,65 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
     
     # Open the output file for direct modification
     with nc.Dataset(output_path, 'r+') as ds_out:
+        # Verify and adjust spinup_state
+        try:
+            if 'spinup_state' in ds_out.variables:
+                spin_var = ds_out.variables['spinup_state']
+                try:
+                    orig_val = np.array(spin_var[:]).item() if spin_var.size == 1 else None
+                except Exception:
+                    orig_val = None
+                if orig_val is not None:
+                    print(f"spinup_state in original restart (copied): {orig_val}")
+                    if orig_val != 1:
+                        print("Warning: Expected spinup_state==1 for adspinup; proceeding to set final_spinup (0) anyway")
+                else:
+                    print("Warning: Could not read scalar value of spinup_state; proceeding to set to 0")
+                # Set to final_spinup mode (0)
+                try:
+                    spin_var[...] = 0
+                    print("Set spinup_state to 0 (final_spinup) in updated restart")
+                except Exception as e:
+                    print(f"Warning: Failed to set spinup_state to 0: {e}")
+            else:
+                print("Warning: 'spinup_state' variable not found in restart; skipping spinup flag update")
+        except Exception as e:
+            print(f"Warning: spinup_state check/update failed: {e}")
         # Load AI predictions
         with nc.Dataset(ai_predictions_path, 'r') as ds_ai:
+            # Helpers for shape/dimension checks
+            def _fail_or_warn(msg: str) -> bool:
+                if strict_dims:
+                    raise ValueError(msg)
+                print(f"Warning: {msg} — skipping this variable")
+                return False
+            
+            def _check_pft_compat(ai_var: nc.Variable, model_var: nc.Variable) -> bool:
+                # Expect AI dims to include pft and gridcell
+                ai_dims = list(ai_var.dimensions)
+                if not ('pft' in ai_dims and 'gridcell' in ai_dims):
+                    return _fail_or_warn(f"PFT var '{ai_var.name}' missing required dims (has {ai_dims}, need ['pft','gridcell'])")
+                # Model var should be 1D over pfts1d (or equivalent)
+                if len(model_var.shape) < 1:
+                    return _fail_or_warn(f"Model PFT var '{model_var.name}' has invalid shape {model_var.shape}")
+                # Require at least 16 PFT slots (PFT1..PFT16). We skip PFT0 by design.
+                if model_var.shape[0] < 16:
+                    return _fail_or_warn(f"Model PFT var '{model_var.name}' has insufficient length {model_var.shape[0]} (<16)")
+                return True
+            
+            def _check_soil_compat(ai_var: nc.Variable, model_var: nc.Variable) -> bool:
+                # Expect AI dims: (column, levgrnd, gridcell)
+                ai_dims = list(ai_var.dimensions)
+                required = {'column','levgrnd','gridcell'}
+                if not required.issubset(set(ai_dims)):
+                    return _fail_or_warn(f"Soil var '{ai_var.name}' missing required dims (has {ai_dims}, need {sorted(required)})")
+                if len(model_var.shape) < 2:
+                    return _fail_or_warn(f"Model soil var '{model_var.name}' has invalid shape {model_var.shape}")
+                # Need at least 10 layers in model to write top 10
+                if model_var.shape[1] < 10:
+                    return _fail_or_warn(f"Model soil var '{model_var.name}' has insufficient levgrnd={model_var.shape[1]} (<10)")
+                return True
+            
             # Update PFT variables
             for var_name in ds_ai.variables:
                 if (var_name in ds_out.variables and 
@@ -168,6 +226,10 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                     model_var = ds_out.variables[var_name]
                     print(f"    AI data shape: {ai_data.shape}")
                     print(f"    Model variable shape: {model_var.shape}")
+                    
+                    # Dimension compatibility check
+                    if not _check_pft_compat(ds_ai.variables[var_name], model_var):
+                        continue
                     
                     # Get the grid-to-pfts mapping
                     if 'grid_to_pfts' in variable_mapping:
@@ -200,6 +262,10 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                     model_var = ds_out.variables[var_name]
                     print(f"    AI data shape: {ai_data.shape}")
                     print(f"    Model variable shape: {model_var.shape}")
+                    
+                    # Dimension compatibility check
+                    if not _check_soil_compat(ds_ai.variables[var_name], model_var):
+                        continue
                     
                     # Get the grid-to-cols mapping
                     if 'grid_to_cols' in variable_mapping:
@@ -302,6 +368,8 @@ Examples:
                        help='Preview changes without saving updated restart file')
     parser.add_argument('--backup', action='store_true',
                        help='Create backup of original restart file before updating')
+    parser.add_argument('--strict-dims', action='store_true',
+                       help='Abort on any dimension mismatch instead of skipping')
     
     args = parser.parse_args()
     
@@ -420,7 +488,8 @@ Examples:
         
         # Save updated restart file using direct NetCDF manipulation
         create_updated_restart_file(restart_file_path, output_path, ai_predictions_path, 
-                                   cnp_io_variables, ai_to_model_mapping, variable_mapping)
+                                   cnp_io_variables, ai_to_model_mapping, variable_mapping,
+                                   strict_dims=args.strict_dims)
         
         print(f"\nRestart file updated successfully!")
         print(f"Original: {restart_file_path}")
