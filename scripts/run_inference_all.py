@@ -1183,11 +1183,17 @@ def run_inference_all(
                     lat_idx = maybe_static_cols.index(lat_name)
                     longitude_values = maybe_static[:, lon_idx]
                     latitude_values = maybe_static[:, lat_idx]
-            # Fallback: use loader DataFrame if available
-            if (longitude_values is None or latitude_values is None) and hasattr(_loader, 'df') and isinstance(_loader.df, pd.DataFrame):
+            # Stronger preference: if the loader DataFrame has explicit coordinates, use those.
+            # This ensures we respect the exact site(s) selected for inference, even if static inverse lacks or mislabels coords.
+            if hasattr(_loader, 'df') and isinstance(_loader.df, pd.DataFrame):
                 if 'Longitude' in _loader.df.columns and 'Latitude' in _loader.df.columns:
-                    longitude_values = _loader.df['Longitude'].values[-len(test_data['static']):] if isinstance(test_data, dict) and 'static' in test_data else _loader.df['Longitude'].values
-                    latitude_values = _loader.df['Latitude'].values[-len(test_data['static']):] if isinstance(test_data, dict) and 'static' in test_data else _loader.df['Latitude'].values
+                    if isinstance(test_data, dict) and 'static' in test_data:
+                        n = len(test_data['static'])
+                        longitude_values = _loader.df['Longitude'].values[-n:]
+                        latitude_values = _loader.df['Latitude'].values[-n:]
+                    else:
+                        longitude_values = _loader.df['Longitude'].values
+                        latitude_values = _loader.df['Latitude'].values
         except Exception as _e_loc:
             logging.warning(f"Failed to prepare location vectors: {_e_loc}")
 
