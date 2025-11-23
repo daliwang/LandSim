@@ -55,6 +55,9 @@ def main():
                         help='Generate plots for top-bad variables (default: enabled)')
     parser.add_argument('--no-top-bad-plots', dest='top_bad_plots', action='store_false',
                         help='Disable generating top-bad plots')
+    # Plot only variables listed in "Variables with Worst Predictions"
+    parser.add_argument('--worst-only', dest='worst_only', action='store_true', default=False,
+                        help='Plot only variables in the "Variables with Worst Predictions" section')
     args = parser.parse_args()
     
     # Set up input and output paths
@@ -326,14 +329,32 @@ def main():
     plt.tight_layout()
     plt.savefig(output_dir / "r2_vs_rmse.png", dpi=300)
     
-    # 4. Optionally generate top-bad-only plots into a subfolder using the validation plotting utility
+    # 4. Optionally generate restricted plots (top-bad or worst-only) into a subfolder using the validation plotting utility
     top_bad_plot_count = 0
     if args.top_bad_plots:
         try:
             results_dir = str(input_path.parent)
             top_bad_out = str((output_dir / 'top_bad_plots').resolve())
             (output_dir / 'top_bad_plots').mkdir(parents=True, exist_ok=True)
-            
+
+            # If worst-only requested, pre-write a minimal 'Variables with Worst Predictions' section
+            if args.worst_only:
+                try:
+                    tmp_report_path = output_dir / 'quality_summary_report.txt'
+                    with open(tmp_report_path, 'w') as _pref:
+                        _pref.write("# Prediction Quality Summary Report\n\n")
+                        _pref.write("## Variables with Worst Predictions\n")
+                        _vw = variable_summary.copy()
+                        if 'good_pct' in _vw.columns:
+                            _vw['good_pct'] = _vw['good_pct'].fillna(0)
+                        _worst = _vw.nsmallest(15, 'good_pct')
+                        for _var_name, _row in _worst.iterrows():
+                            _pref.write(f"{_var_name}: {_row.get('good_pct', 0):.1f}% good, {_row.get('ok_pct', 0):.1f}% ok, {_row.get('bad_pct', 0):.1f}% bad\n")
+                        _pref.write("\n")
+                    print(f"Wrote minimal worst-variables section for selection: {tmp_report_path}")
+                except Exception as _e:
+                    print(f"Warning: Failed to pre-write worst-variables section for plotting selection: {_e}")
+
             # Protect the input validation_stats.csv from being overwritten by the plotting utility
             original_bytes = None
             try:
@@ -354,9 +375,10 @@ def main():
                 spec.loader.exec_module(mod)
                 if hasattr(mod, 'main_with_flag'):
                     mod.main_with_flag(results_dir, plot_scatter=True, plot_loss=False,
-                                       top_bad_only=True,
+                                       top_bad_only=not args.worst_only,
                                        top_bad_report=str(output_dir / 'quality_summary_report.txt'),
-                                       plots_dir_override=top_bad_out)
+                                       plots_dir_override=top_bad_out,
+                                       worst_only=args.worst_only)
                     print(f"Top-bad plots saved to: {top_bad_out}")
                     try:
                         # Count the number of PNGs generated for quick reporting

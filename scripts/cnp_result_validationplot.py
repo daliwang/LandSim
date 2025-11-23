@@ -79,7 +79,40 @@ def _parse_top_bad_report(report_path):
         return {}
     return selection
 
-def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top_bad_report=None, plots_dir_override=None):
+def _parse_worst_vars_report(report_path):
+    """Parse quality_summary_report.txt to extract variables from
+    the '## Variables with Worst Predictions' section.
+    Returns a mapping { variable: { 'pfts': set(), 'layers': set() } }
+    """
+    selection = {}
+    if not os.path.exists(report_path):
+        print(f"Worst-variables report not found: {report_path}")
+        return selection
+    in_section = False
+    try:
+        with open(report_path, 'r') as f:
+            for line in f:
+                stripped = line.strip('\n')
+                header = stripped.strip()
+                if header.startswith('## Variables with Worst Predictions'):
+                    in_section = True
+                    continue
+                # Section ends at next heading
+                if in_section and header.startswith('## '):
+                    break
+                if in_section and stripped and not stripped.startswith('#'):
+                    # Expected line format: "<var>: <good>% good, <ok>% ok, <bad>% bad"
+                    m = re.match(r"\s*([A-Za-z0-9_]+):\s*", stripped)
+                    if not m:
+                        continue
+                    var = m.group(1)
+                    selection[var] = { 'pfts': set(), 'layers': set() }
+    except Exception as e:
+        print(f"Failed to parse worst variables section {report_path}: {e}")
+        return {}
+    return selection
+
+def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top_bad_report=None, plots_dir_override=None, worst_only=False):
     # Create plots subdirectory
     plots_dir = plots_dir_override or os.path.join(results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
@@ -88,16 +121,21 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
     stats_path = os.path.join(results_dir, "validation_stats.csv")
     stats_data = []
 
-    # Optional: restrict plotting to top-bad variables (and selected PFTs/layers)
+    # Optional: restrict plotting to selected variables (top-bad or worst list)
     selection = None
-    if top_bad_only:
+    if top_bad_only or worst_only:
         report_path = top_bad_report or os.path.join(results_dir, 'analysis', 'quality_summary_report.txt')
-        selection = _parse_top_bad_report(report_path)
-        if selection:
-            print(f"Plotting restricted to top-bad variables from: {report_path}")
-        else:
-            print("No selections parsed from top-bad report; proceeding without restriction.")
-            # IMPORTANT: ensure unrestricted plotting by clearing selection
+        if worst_only:
+            selection = _parse_worst_vars_report(report_path)
+            if selection:
+                print(f"Plotting restricted to worst variables from: {report_path}")
+        if (not selection) and top_bad_only:
+            selection = _parse_top_bad_report(report_path)
+            if selection:
+                print(f"Plotting restricted to top-bad variables from: {report_path}")
+        # If neither parser returned a selection, proceed unrestricted
+        if not selection:
+            print("No selections parsed from report; proceeding without restriction.")
             selection = None
     
     # Check for new directory structure first
@@ -695,8 +733,9 @@ if __name__ == '__main__':
     parser.add_argument('--no-plot-loss', action='store_false', dest='plot_loss', help='Do not plot train/val loss curve')
     # NEW: Stats-only mode disables all plots but still computes and saves statistics
     parser.add_argument('--stats-only', action='store_true', help='Only compute and save statistics CSV; do not generate any plots')
-    # NEW: Restrict plotting to top-bad variables from summary report
+    # NEW: Restrict plotting to top-bad or worst variables from summary report
     parser.add_argument('--top-bad-only', action='store_true', help='Plot only variables listed in the quality summary top-bad section')
+    parser.add_argument('--worst-only', action='store_true', help='Plot only variables listed under \"Variables with Worst Predictions\"')
     parser.add_argument('--top-bad-report', type=str, default=None, help='Path to quality_summary_report.txt (defaults to results_dir/analysis/quality_summary_report.txt)')
     
     parser.set_defaults(plot_scatter=True, plot_loss=True)
@@ -710,4 +749,4 @@ if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Using current directory as results directory")
     
-    main_with_flag(args.results_dir, args.plot_scatter, args.plot_loss, args.top_bad_only, args.top_bad_report)
+    main_with_flag(args.results_dir, args.plot_scatter, args.plot_loss, args.top_bad_only, args.top_bad_report, worst_only=getattr(args, 'worst_only', False))

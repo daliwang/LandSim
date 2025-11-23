@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
     project_root = script_dir.parent
     default_locations = script_dir / "locations.csv"
-    default_variable_list = project_root / "CNP_IO_updated9_dev.txt"
+    default_variable_list = project_root / "CNP_IO_updated9_dev_dw.txt"
     default_model_config = project_root / "CNP_model_config_v01.txt"
     default_output_root = project_root / "final_restartfile"
     default_work_root = script_dir / "workflow_runs"
