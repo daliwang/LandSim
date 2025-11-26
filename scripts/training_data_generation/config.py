@@ -22,7 +22,8 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 output_dir = os.path.join(base_dir, 'output')
 
 # Processed forcing NetCDF files output directory
-forcing_netcdf_output_dir = os.path.join(output_dir, 'forcing_netcdf', 'TES_SE')
+# Updated to point to the actual location of processed forcing files
+forcing_netcdf_output_dir = '/gpfs/wolf2/cades/cli185/proj-shared/guzhuowei0407/Dataset_test/TVA/TVA_Forcing_netcdf'
 
 # Forcing PKL files output directory
 forcing_pkl_output_dir = os.path.join(output_dir, 'forcing_hourly_pkl')
@@ -31,7 +32,7 @@ forcing_pkl_output_dir = os.path.join(output_dir, 'forcing_hourly_pkl')
 training_dataset_pkl_output_dir = os.path.join(output_dir, 'training_dataset_pkl')
 
 # CLM parameters NetCDF file path
-clm_params_nc_path = '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/domain_surfdata/clm_params_c211124.nc'
+clm_params_nc_path = '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/clm_params_c211124.nc'
 
 # =============================================================================
 # INPUT FILES CONFIGURATION
@@ -39,25 +40,25 @@ clm_params_nc_path = '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_
 
 # Surface data files
 surface_data_files = [
-    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/domain_surfdata/SEBOX1_surfdata.TES_SE.4km.1d.NLCD.c250202.nc'
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/domain_surfdata/TVA_surfdata.TES_SE.4km.1d.NLCD.c241219.nc'
 ]
 
 # AD-SPINUP files (initial spinup)
 ad_spinup_history_files = [
-    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/history_restart_files/uELM_SEBOX1_I1850CNPRDCTCBC.elm.h0.0021-01-01-00000.nc'
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_adspinref.elm.h0.0021-01-01-00000.nc'
 ]
 
 ad_spinup_restart_files = [
-    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/entire_domain/history_restart_files/uELM_SEBOX1_I1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc'
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_adspinref.elm.r.0021-01-01-00000.nc'
 ]
 
 # FINAL-SPINUP files (final spinup)
 final_spinup_history_files = [
-    #'/gpfs/wolf2/cades/cli185/proj-shared/wangd/kmELM/e3sm_runs/uELM_TVA_finalspinref/run/uELM_TVA_finalspinref.elm.h0.0781-01.nc'
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/kmELM/e3sm_runs/uELM_TVA_finalspinref/run/uELM_TVA_finalspinref.elm.h0.0781-01.nc'
 ]
 
 final_spinup_restart_files = [
-    #'/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_finalspinref.elm.r.0781-01-01-00000.nc'
+    '/gpfs/wolf2/cades/cli185/proj-shared/wangd/AI_data/TES_SE_dataset/TVA/history_restart_files/uELM_TVA_finalspinref.elm.r.0781-01-01-00000.nc'
 ]
 
 # Special P input NetCDF file
