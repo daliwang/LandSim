@@ -13,9 +13,11 @@ without modifying the script.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import logging
 import math
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -75,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path("/global/cfs/cdirs/m4814/daweigao/14_Code/TVA_training_dataset_all"),
+        default=Path("/global/cfs/cdirs/m4814/daweigao/14_Code/TVA_enhanced_dataset_solutionp"),
         help="Directory containing TVA training dataset pickle batches.",
     )
     parser.add_argument(
@@ -86,9 +88,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
+        # default=Path(
+        #     "/global/cfs/cdirs/m4814/daweigao/15_code_Landsim/0_test/run_20251117_081732/cnp_predictions/model.pth"
+        # ),
         default=Path(
             "/global/cfs/cdirs/m4814/daweigao/15_code_Landsim/LandSim/"
-            "cnp_results/run_20251030_192921/cnp_predictions/model.pth"
+            "cnp_results/run_20251125_142005/cnp_predictions/model.pth"
         ),
         help="Path to the trained model checkpoint (.pth).",
     )
@@ -109,7 +114,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path(
             "/global/cfs/cdirs/m4814/daweigao/14_Code/TVA_restart/"
-            "uELM_knox_I1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc"
+            "uELM_15sites4val_I1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc"
         ),
         help="Original restart NetCDF file that will be updated with AI predictions.",
     )
@@ -118,6 +123,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=default_output_root,
         help="Directory where updated restart files will be written.",
+    )
+    parser.add_argument(
+        "--final-restart",
+        type=Path,
+        default=None,
+        help=(
+            "Path for the combined updated restart file. "
+            "Defaults to <output-root>/<restart-name>_updated.nc."
+        ),
     )
     parser.add_argument(
         "--work-root",
@@ -134,7 +148,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-existing",
         action="store_true",
-        help="Skip processing a location if the final restart file already exists.",
+        help="Skip the workflow if the combined restart file already exists.",
     )
     parser.add_argument(
         "--log-level",
@@ -376,11 +390,54 @@ def update_restart_file(
     return output_restart
 
 
+def update_spinup_state(restart_file: Path) -> None:
+    """
+    Check and update spinup_state variable in restart file.
+    If spinup_state is 1, change it to 0; if already 0, leave unchanged.
+    """
+    try:
+        import netCDF4 as nc
+        
+        # Open file and check if spinup_state exists
+        with nc.Dataset(restart_file, 'r') as ncfile:
+            if 'spinup_state' not in ncfile.variables:
+                LOGGER.warning("Variable 'spinup_state' not found in file")
+                return
+            
+            current_value = ncfile.variables['spinup_state'][:]
+            LOGGER.info("Current spinup_state value: %s", current_value)
+        
+        # Check if modification is needed
+        if np.any(current_value == 1):
+            LOGGER.info("Detected spinup_state = 1, changing to 0...")
+            
+            # Modify the file
+            with nc.Dataset(restart_file, 'r+') as ncfile:
+                old_value = ncfile.variables['spinup_state'][:]
+                new_value = np.where(old_value == 1, 0, old_value)
+                ncfile.variables['spinup_state'][:] = new_value
+                LOGGER.info("Changed spinup_state from %s to %s", old_value, new_value)
+            
+            # Verify the change
+            with nc.Dataset(restart_file, 'r') as ncfile:
+                final_value = ncfile.variables['spinup_state'][:]
+                LOGGER.info("Final spinup_state value: %s", final_value)
+        else:
+            LOGGER.info("spinup_state is already 0, no modification needed")
+            
+    except ImportError:
+        LOGGER.error("netCDF4 library is required. Install it with: pip install netCDF4")
+    except Exception as e:
+        LOGGER.error("Error processing spinup_state: %s", e)
+
+
 def process_location(
     location_row: pd.Series,
     args: argparse.Namespace,
     variable_map: Dict[str, List[str]],
     cnp_variables: List[str],
+    restart_source: Path,
+    restart_destination: Path,
 ) -> Optional[Path]:
     """Execute the full workflow for a single row in the locations CSV."""
     latitude = float(location_row["latitude"])
@@ -394,11 +451,6 @@ def process_location(
     predictions_root = location_work_root / "inference"
     predictions_dir = predictions_root / "cnp_predictions"
     predictions_nc = location_work_root / f"{slug}_ai_predictions.nc"
-    restart_output = args.output_root / f"{args.restart_file.stem}_{slug}.nc"
-
-    if args.skip_existing and restart_output.exists():
-        LOGGER.info("Skipping location %s because %s already exists", location_label, restart_output)
-        return restart_output
 
     dataset_path = extract_location_dataset(
         dataset_root=args.dataset_root,
@@ -458,25 +510,52 @@ def process_location(
         except Exception:
             pass
 
+    needs_temp_copy = restart_source.resolve() == restart_destination.resolve()
+    temp_output = (
+        restart_destination
+        if not needs_temp_copy
+        else restart_destination.with_name(restart_destination.name + ".tmp")
+    )
+
     updated_restart = update_restart_file(
-        restart_file=args.restart_file,
+        restart_file=restart_source,
         ai_predictions_nc=predictions_nc,
-        output_restart=restart_output,
+        output_restart=temp_output,
         cnp_variables=cnp_variables,
     )
-    if updated_restart.exists():
-        size_mb = updated_restart.stat().st_size / (1024 * 1024)
-        LOGGER.info("  [Stage 4] Restart file created at %s (%.2f MB)", updated_restart, size_mb)
+    final_restart = updated_restart
+    if needs_temp_copy:
+        shutil.move(temp_output, restart_destination)
+        final_restart = restart_destination
+        LOGGER.info(
+            "  [Stage 4] Applied updates in-place to %s (via temporary %s)",
+            restart_destination,
+            temp_output,
+        )
+
+    if final_restart.exists():
+        size_mb = final_restart.stat().st_size / (1024 * 1024)
+        LOGGER.info("  [Stage 4] Restart file created at %s (%.2f MB)", final_restart, size_mb)
     else:
-        LOGGER.warning("  [Stage 4] Restart file expected but not found: %s", updated_restart)
-    return updated_restart
+        LOGGER.warning("  [Stage 4] Restart file expected but not found: %s", final_restart)
+    return final_restart
 
 
 def main() -> None:
     args = parse_args()
     configure_logging(args.log_level)
 
+    # Generate timestamp for this run
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Add timestamp to output and work directories
+    args.output_root = args.output_root / f"run_{timestamp}"
+    args.work_root = args.work_root / f"run_{timestamp}"
+    
     LOGGER.info("Starting TVA workflow with locations file: %s", args.locations)
+    LOGGER.info("Output directory: %s", args.output_root)
+    LOGGER.info("Work directory: %s", args.work_root)
+    
     variable_map = determine_variable_map(args.variable_list)
     cnp_variables = collect_cnp_variables(variable_map)
     LOGGER.debug("Variable groups loaded: %s", variable_map)
@@ -485,12 +564,33 @@ def main() -> None:
     args.output_root.mkdir(parents=True, exist_ok=True)
     args.work_root.mkdir(parents=True, exist_ok=True)
 
+    combined_restart = args.final_restart
+    if combined_restart is None:
+        combined_restart = args.output_root / f"{args.restart_file.stem}_updated.nc"
+    combined_restart = combined_restart.resolve()
+    combined_restart.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.skip_existing and combined_restart.exists():
+        LOGGER.info("Combined restart file already exists at %s. Skipping workflow.", combined_restart)
+        return
+
+    current_restart_source = args.restart_file.resolve()
+
     results: List[Tuple[str, Optional[Path]]] = []
     for _, row in locations_df.iterrows():
         try:
-            updated_restart = process_location(row, args, variable_map, cnp_variables)
+            updated_restart = process_location(
+                row,
+                args,
+                variable_map,
+                cnp_variables,
+                restart_source=current_restart_source,
+                restart_destination=combined_restart,
+            )
             coord_label = f"{row['latitude']:.4f}_{row['longitude']:.4f}"
             results.append((coord_label, updated_restart))
+            if updated_restart:
+                current_restart_source = combined_restart
         except Exception as exc:  # pragma: no cover - logging safety
             LOGGER.exception("Failed to process location row %s: %s", row.to_dict(), exc)
             coord_label = f"{row['latitude']:.4f}_{row['longitude']:.4f}"
@@ -503,6 +603,19 @@ def main() -> None:
             LOGGER.warning("  %s: failed (no restart generated)", name)
         else:
             LOGGER.info("  %s: %s", name, path)
+    
+    # Update spinup_state in final restart file
+    if combined_restart.exists():
+        LOGGER.info("")
+        LOGGER.info("=" * 80)
+        LOGGER.info("Checking and updating spinup_state variable...")
+        LOGGER.info("=" * 80)
+        update_spinup_state(combined_restart)
+        LOGGER.info("=" * 80)
+        LOGGER.info("spinup_state check/update complete")
+        LOGGER.info("=" * 80)
+    else:
+        LOGGER.warning("Final restart file does not exist, skipping spinup_state update")
 
 
 if __name__ == "__main__":

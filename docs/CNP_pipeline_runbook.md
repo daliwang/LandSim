@@ -150,5 +150,6 @@ Geographic coordinates are defined in locations.csv.
 python ./TVA_1_Sample/run_workflow.py \
   --restart-file /path/to/20year_restart_file.nc \
   --model-path /path/to/trained_model_TVA.pt \
-  --dataset-root /path/to/TVA_dataset
+  --dataset-root /path/to/TVA_dataset \
+  --variable-list ../CNP_IO_updated9_dev.txt
 ```
