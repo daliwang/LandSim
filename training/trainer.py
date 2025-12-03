@@ -295,15 +295,13 @@ class ModelTrainer:
             self.train_data['time_series'],
             self.train_data['static'],
             self.train_data['pft_param'],
-            self.train_data['scalar'],
             self.train_data['variables_1d_pft'],
             self.train_data['variables_2d_soil'],
-            self.train_data['y_scalar'],
             self.train_data['y_pft_1d'],
             self.train_data['y_soil_2d']
         ]
         
-        tensor_names = ['time_series', 'static', 'pft_param', 'scalar', 'variables_1d_pft', 'variables_2d_soil', 'y_scalar', 'y_pft_1d', 'y_soil_2d']
+        tensor_names = ['time_series', 'static', 'pft_param', 'variables_1d_pft', 'variables_2d_soil', 'y_pft_1d', 'y_soil_2d']
         batch_sizes = [t.shape[0] for t in tensors_to_check]
         
         logger.info(f"Training tensor batch sizes: {dict(zip(tensor_names, batch_sizes))}")
@@ -312,6 +310,13 @@ class ModelTrainer:
             logger.error(f"Tensor batch sizes are inconsistent: {dict(zip(tensor_names, batch_sizes))}")
             raise ValueError(f"Tensor batch sizes must be consistent. Found: {dict(zip(tensor_names, batch_sizes))}")
         
+        # Add scalar to tensors_to_check and tensor_names if present
+        if 'scalar' in self.train_data:
+            tensors_to_check.append(self.train_data['scalar'])
+            tensor_names.append('scalar')
+        if 'y_scalar' in self.train_data:
+            tensors_to_check.append(self.train_data['y_scalar'])
+            tensor_names.append('y_scalar')
         # Add water to tensors_to_check and tensor_names if present
         if 'water' in self.train_data:
             tensors_to_check.append(self.train_data['water'])
@@ -321,35 +326,32 @@ class ModelTrainer:
             tensor_names.append('y_water')
         
         # Create data loader with GPU optimizations
+        # Build dataset based on presence of scalar and water
+        dataset_tensors = [
+            self.train_data['time_series'],
+            self.train_data['static'],
+            self.train_data['pft_param'],
+        ]
+        if 'scalar' in self.train_data:
+            dataset_tensors.append(self.train_data['scalar'])
+        dataset_tensors.extend([
+            self.train_data['variables_1d_pft'],
+            self.train_data['variables_2d_soil'],
+        ])
+        if 'y_scalar' in self.train_data:
+            dataset_tensors.append(self.train_data['y_scalar'])
+        dataset_tensors.extend([
+            self.train_data['y_pft_1d'],
+            self.train_data['y_soil_2d'],
+        ])
         if 'water' in self.train_data and 'y_water' in self.train_data:
-            train_dataset = TensorDataset(
-                self.train_data['time_series'],
-                self.train_data['static'],
-                self.train_data['pft_param'],
-                self.train_data['scalar'],
-                self.train_data['variables_1d_pft'],
-                self.train_data['variables_2d_soil'],
-                self.train_data['y_pft_1d'],
-                self.train_data['y_scalar'],
-                self.train_data['y_soil_2d'],
+            dataset_tensors.extend([
                 self.train_data['water'],
                 self.train_data['y_water'],
-                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
-            )
-        else:
-            train_dataset = TensorDataset(
-                self.train_data['time_series'],
-                self.train_data['static'],
-                self.train_data['pft_param'],
-                self.train_data['scalar'],
-                self.train_data['variables_1d_pft'],
-                self.train_data['variables_2d_soil'],
-                self.train_data['y_scalar'],
-                self.train_data['y_pft_1d'],
-                self.train_data['y_soil_2d'],
-                # Optional mask as final feature; if absent, a placeholder will be injected in-loop
-                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
-            )
+            ])
+        if 'pft_presence_mask' in self.train_data:
+            dataset_tensors.append(self.train_data['pft_presence_mask'])
+        train_dataset = TensorDataset(*dataset_tensors)
         
         train_loader = DataLoader(
             train_dataset,
@@ -367,16 +369,20 @@ class ModelTrainer:
             return loss.item() if hasattr(loss, 'item') else loss
 
         for batch_idx, batch in enumerate(progress_bar):
-            if 'water' in self.train_data and 'y_water' in self.train_data:
-                if 'pft_presence_mask' in self.train_data:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water, pft_presence_mask) = batch
-                else:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
-            else:
-                if 'pft_presence_mask' in self.train_data:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
-                else:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
+            # Unpack batch based on presence of scalar, water, and pft_presence_mask
+            idx = 0
+            time_series = batch[idx]; idx += 1
+            static = batch[idx]; idx += 1
+            pft_param = batch[idx]; idx += 1
+            scalar = batch[idx] if 'scalar' in self.train_data else None; idx += 1 if 'scalar' in self.train_data else 0
+            variables_1d_pft = batch[idx]; idx += 1
+            variables_2d_soil = batch[idx]; idx += 1
+            y_scalar = batch[idx] if 'y_scalar' in self.train_data else None; idx += 1 if 'y_scalar' in self.train_data else 0
+            y_pft_1d = batch[idx]; idx += 1
+            y_soil_2d = batch[idx]; idx += 1
+            water = batch[idx] if 'water' in self.train_data and 'y_water' in self.train_data else None; idx += 1 if 'water' in self.train_data and 'y_water' in self.train_data else 0
+            y_water = batch[idx] if 'water' in self.train_data and 'y_water' in self.train_data else None; idx += 1 if 'water' in self.train_data and 'y_water' in self.train_data else 0
+            pft_presence_mask = batch[idx] if 'pft_presence_mask' in self.train_data else None
             # --- DEBUG: Print tensor shapes and device before model call ---
             # print(f"[DEBUG] Batch {batch_idx} tensor shapes and device:")
             # print(f"  time_series: {time_series.shape}, device: {time_series.device}")
@@ -397,8 +403,10 @@ class ModelTrainer:
             variables_1d_pft = variables_1d_pft.to(self.device, non_blocking=True).contiguous()
             variables_2d_soil = variables_2d_soil.to(self.device, non_blocking=True).contiguous()
             pft_param = pft_param.to(self.device, non_blocking=True).contiguous()
-            scalar = scalar.to(self.device, non_blocking=True).contiguous()
-            y_scalar = y_scalar.to(self.device, non_blocking=True).contiguous()   
+            if scalar is not None:
+                scalar = scalar.to(self.device, non_blocking=True).contiguous()
+            if y_scalar is not None:
+                y_scalar = y_scalar.to(self.device, non_blocking=True).contiguous()
             y_pft_1d = y_pft_1d.to(self.device, non_blocking=True).contiguous()                     
             y_soil_2d = y_soil_2d.to(self.device, non_blocking=True).contiguous()
             if 'water' in self.train_data and 'y_water' in self.train_data:
@@ -418,12 +426,12 @@ class ModelTrainer:
             # Forward pass (with or without mixed precision)
             if self.use_amp and self.scaler is not None:
                 with torch.cuda.amp.autocast():
-                    if 'water' in self.train_data and 'y_water' in self.train_data:
+                    if water is not None:
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, water)
                     else:
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
             else:
-                if 'water' in self.train_data and 'y_water' in self.train_data:
+                if water is not None:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, water)
                 else:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
@@ -445,26 +453,28 @@ class ModelTrainer:
                     pass
 
             # Compute loss with variable-specific weights for scalar variables
-            if self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
-                # Apply variable-specific weights to scalar variables
-                scalar_loss = 0.0
-                scalar_pred = outputs['scalar']
-                
-                # Get variable names
-                scalar_vars = self.data_info.get('x_list_scalar_columns', [])
-                
-                for i, var_name in enumerate(scalar_vars):
-                    if i < scalar_pred.size(1):  # Ensure index is within bounds
-                        var_weight = self.scalar_var_weights.get(var_name, 1.0)
-                        var_loss = self._compute_loss(scalar_pred[:, i:i+1], y_scalar[:, i:i+1])
-                        scalar_loss += var_weight * var_loss
-                        
-                # Normalize by number of variables to maintain scale
-                scalar_loss = scalar_loss / max(1, len(scalar_vars))
-                loss = self.scalar_loss_weight * scalar_loss
-            else:
-                # Use standard loss calculation
-                loss = self.scalar_loss_weight * self._compute_loss(outputs['scalar'], y_scalar)
+            loss = 0.0
+            if 'scalar' in outputs and y_scalar is not None:
+                if self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
+                    # Apply variable-specific weights to scalar variables
+                    scalar_loss = 0.0
+                    scalar_pred = outputs['scalar']
+                    
+                    # Get variable names
+                    scalar_vars = self.data_info.get('x_list_scalar_columns', [])
+                    
+                    for i, var_name in enumerate(scalar_vars):
+                        if i < scalar_pred.size(1):  # Ensure index is within bounds
+                            var_weight = self.scalar_var_weights.get(var_name, 1.0)
+                            var_loss = self._compute_loss(scalar_pred[:, i:i+1], y_scalar[:, i:i+1])
+                            scalar_loss += var_weight * var_loss
+                            
+                    # Normalize by number of variables to maintain scale
+                    scalar_loss = scalar_loss / max(1, len(scalar_vars))
+                    loss = self.scalar_loss_weight * scalar_loss
+                else:
+                    # Use standard loss calculation
+                    loss = self.scalar_loss_weight * self._compute_loss(outputs['scalar'], y_scalar)
 
             # Vector (PFT1D): Apply differential weighting specifically to xsmrpool
             vector_pred = outputs['pft_1d']  # shape: [batch, n_vars*n_pfts] or [batch, n_vars, n_pfts]
@@ -668,12 +678,10 @@ class ModelTrainer:
             self.test_data['variables_2d_soil'],
             self.test_data['y_soil_2d'],
             self.test_data['pft_param'],
-            self.test_data['scalar'],
-            self.test_data['y_pft_1d'],
-            self.test_data['y_scalar']
+            self.test_data['y_pft_1d']
         ]
         
-        tensor_names = ['time_series', 'static', 'variables_1d_pft', 'variables_2d_soil', 'y_soil_2d', 'pft_param', 'scalar', 'y_pft_1d', 'y_scalar']
+        tensor_names = ['time_series', 'static', 'variables_1d_pft', 'variables_2d_soil', 'y_soil_2d', 'pft_param', 'y_pft_1d']
         batch_sizes = [t.shape[0] for t in tensors_to_check]
         
         logger.info(f"Validation tensor batch sizes: {dict(zip(tensor_names, batch_sizes))}")
@@ -687,6 +695,13 @@ class ModelTrainer:
             logger.error(f"Validation tensor batch sizes are inconsistent: {dict(zip(tensor_names, batch_sizes))}")
             raise ValueError(f"Validation tensor batch sizes must be consistent. Found: {dict(zip(tensor_names, batch_sizes))}")
         
+        # Add scalar to tensors_to_check and tensor_names if present
+        if 'scalar' in self.test_data:
+            tensors_to_check.append(self.test_data['scalar'])
+            tensor_names.append('scalar')
+        if 'y_scalar' in self.test_data:
+            tensors_to_check.append(self.test_data['y_scalar'])
+            tensor_names.append('y_scalar')
         # Add water to tensors_to_check and tensor_names if present
         if 'water' in self.test_data:
             tensors_to_check.append(self.test_data['water'])
@@ -696,34 +711,32 @@ class ModelTrainer:
             tensor_names.append('y_water')
         
         # Create data loader with GPU optimizations
+        # Build dataset based on presence of scalar and water
+        dataset_tensors = [
+            self.test_data['time_series'],
+            self.test_data['static'],
+            self.test_data['pft_param'],
+        ]
+        if 'scalar' in self.test_data:
+            dataset_tensors.append(self.test_data['scalar'])
+        dataset_tensors.extend([
+            self.test_data['variables_1d_pft'],
+            self.test_data['variables_2d_soil'],
+        ])
+        if 'y_scalar' in self.test_data:
+            dataset_tensors.append(self.test_data['y_scalar'])
+        dataset_tensors.extend([
+            self.test_data['y_pft_1d'],
+            self.test_data['y_soil_2d'],
+        ])
         if 'water' in self.test_data and 'y_water' in self.test_data:
-            val_dataset = TensorDataset(
-                self.test_data['time_series'],
-                self.test_data['static'],
-                self.test_data['pft_param'],
-                self.test_data['scalar'],
-                self.test_data['variables_1d_pft'],
-                self.test_data['variables_2d_soil'],
-                self.test_data['y_scalar'],
-                self.test_data['y_pft_1d'],
-                self.test_data['y_soil_2d'],
+            dataset_tensors.extend([
                 self.test_data['water'],
                 self.test_data['y_water'],
-                *( (self.test_data['pft_presence_mask'],) if 'pft_presence_mask' in self.test_data else () )
-            )
-        else:
-            val_dataset = TensorDataset(
-                self.test_data['time_series'],
-                self.test_data['static'],
-                self.test_data['pft_param'],
-                self.test_data['scalar'],
-                self.test_data['variables_1d_pft'],
-                self.test_data['variables_2d_soil'],
-                self.test_data['y_scalar'],
-                self.test_data['y_pft_1d'],
-                self.test_data['y_soil_2d'],
-                *( (self.test_data['pft_presence_mask'],) if 'pft_presence_mask' in self.test_data else () )
-        )
+            ])
+        if 'pft_presence_mask' in self.test_data:
+            dataset_tensors.append(self.test_data['pft_presence_mask'])
+        val_dataset = TensorDataset(*dataset_tensors)
         
         val_loader = DataLoader(
             val_dataset,
@@ -741,30 +754,37 @@ class ModelTrainer:
             def get_loss_value(loss):
                 return loss.item() if hasattr(loss, 'item') else loss
             for batch_idx, batch in enumerate(progress_bar):
-                if 'water' in self.test_data and 'y_water' in self.test_data:
-                    if 'pft_presence_mask' in self.test_data:
-                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water, pft_presence_mask) = batch
-                    else:
-                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
-                else:
-                    if 'pft_presence_mask' in self.test_data:
-                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
-                    else:
-                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
+                # Unpack batch based on presence of scalar, water, and pft_presence_mask
+                idx = 0
+                time_series = batch[idx]; idx += 1
+                static = batch[idx]; idx += 1
+                pft_param = batch[idx]; idx += 1
+                scalar = batch[idx] if 'scalar' in self.test_data else None; idx += 1 if 'scalar' in self.test_data else 0
+                variables_1d_pft = batch[idx]; idx += 1
+                variables_2d_soil = batch[idx]; idx += 1
+                y_scalar = batch[idx] if 'y_scalar' in self.test_data else None; idx += 1 if 'y_scalar' in self.test_data else 0
+                y_pft_1d = batch[idx]; idx += 1
+                y_soil_2d = batch[idx]; idx += 1
+                water = batch[idx] if 'water' in self.test_data and 'y_water' in self.test_data else None; idx += 1 if 'water' in self.test_data and 'y_water' in self.test_data else 0
+                y_water = batch[idx] if 'water' in self.test_data and 'y_water' in self.test_data else None; idx += 1 if 'water' in self.test_data and 'y_water' in self.test_data else 0
+                pft_presence_mask = batch[idx] if 'pft_presence_mask' in self.test_data else None
                 # Move data to device and ensure contiguous
                 time_series = time_series.to(self.device, non_blocking=True).contiguous()
                 static = static.to(self.device, non_blocking=True).contiguous()
                 variables_1d_pft = variables_1d_pft.to(self.device, non_blocking=True).contiguous()
                 variables_2d_soil = variables_2d_soil.to(self.device, non_blocking=True).contiguous()
                 pft_param = pft_param.to(self.device, non_blocking=True).contiguous()
-                scalar = scalar.to(self.device, non_blocking=True).contiguous()
-                y_scalar = y_scalar.to(self.device, non_blocking=True).contiguous()
+                if scalar is not None:
+                    scalar = scalar.to(self.device, non_blocking=True).contiguous()
+                if y_scalar is not None:
+                    y_scalar = y_scalar.to(self.device, non_blocking=True).contiguous()
                 y_pft_1d = y_pft_1d.to(self.device, non_blocking=True).contiguous()
                 y_soil_2d = y_soil_2d.to(self.device, non_blocking=True).contiguous()
-                if 'water' in self.test_data and 'y_water' in self.test_data:
+                if water is not None:
                     water = water.to(self.device, non_blocking=True).contiguous()
+                if y_water is not None:
                     y_water = y_water.to(self.device, non_blocking=True).contiguous()
-                if 'pft_presence_mask' in self.test_data:
+                if pft_presence_mask is not None:
                     pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True).contiguous()
 
                 # print(f"[DEBUG] variables_1d_pft shape before model (val): {variables_1d_pft.shape}")
@@ -802,7 +822,9 @@ class ModelTrainer:
                         pass
 
                 # Compute loss
-                loss = self._compute_loss(outputs['scalar'], y_scalar)
+                loss = 0.0
+                if 'scalar' in outputs and y_scalar is not None:
+                    loss = self._compute_loss(outputs['scalar'], y_scalar)
                 # Vector (PFT1D): base MSE
                 vector_pred = outputs['pft_1d']
                 vector_targ = y_pft_1d
@@ -848,10 +870,12 @@ class ModelTrainer:
         batch_data['time_series'] = data['time_series'][start_idx:end_idx]
         batch_data['static'] = data['static'][start_idx:end_idx]
         batch_data['pft_param'] = data['pft_param'][start_idx:end_idx]
-        batch_data['scalar'] = data['scalar'][start_idx:end_idx]
+        if 'scalar' in data:
+            batch_data['scalar'] = data['scalar'][start_idx:end_idx]
         batch_data['variables_1d_pft'] = data['variables_1d_pft'][start_idx:end_idx]
         batch_data['variables_2d_soil'] = data['variables_2d_soil'][start_idx:end_idx]
-        batch_data['y_scalar'] = data['y_scalar'][start_idx:end_idx]
+        if 'y_scalar' in data:
+            batch_data['y_scalar'] = data['y_scalar'][start_idx:end_idx]
         batch_data['y_pft_1d'] = data['y_pft_1d'][start_idx:end_idx]
         batch_data['y_soil_2d'] = data['y_soil_2d'][start_idx:end_idx]
 
@@ -1078,10 +1102,8 @@ class ModelTrainer:
             self.test_data['time_series'].shape[0],
             self.test_data['static'].shape[0],
             self.test_data['pft_param'].shape[0],
-            self.test_data['scalar'].shape[0],
             self.test_data['variables_1d_pft'].shape[0],
             self.test_data['variables_2d_soil'].shape[0],
-            self.test_data['y_scalar'].shape[0],
             self.test_data['y_pft_1d'].shape[0],
             self.test_data['y_soil_2d'].shape[0]
         ]
@@ -1103,31 +1125,27 @@ class ModelTrainer:
             return empty_predictions, default_metrics
         
         # Create evaluation data loader (optionally include presence mask)
+        # Build dataset based on presence of scalar
+        dataset_tensors = [
+            self.test_data['time_series'],
+            self.test_data['static'],
+            self.test_data['pft_param'],
+        ]
+        if 'scalar' in self.test_data:
+            dataset_tensors.append(self.test_data['scalar'])
+        dataset_tensors.extend([
+            self.test_data['variables_1d_pft'],
+            self.test_data['variables_2d_soil'],
+        ])
+        if 'y_scalar' in self.test_data:
+            dataset_tensors.append(self.test_data['y_scalar'])
+        dataset_tensors.extend([
+            self.test_data['y_pft_1d'],
+            self.test_data['y_soil_2d'],
+        ])
         if 'pft_presence_mask' in self.test_data:
-            eval_dataset = TensorDataset(
-                self.test_data['time_series'],
-                self.test_data['static'],
-                self.test_data['pft_param'],
-                self.test_data['scalar'],
-                self.test_data['variables_1d_pft'],
-                self.test_data['variables_2d_soil'],
-                self.test_data['y_scalar'],
-                self.test_data['y_pft_1d'],
-                self.test_data['y_soil_2d'],
-                self.test_data['pft_presence_mask']
-            )
-        else:
-            eval_dataset = TensorDataset(
-                self.test_data['time_series'],
-                self.test_data['static'],
-                self.test_data['pft_param'],
-                self.test_data['scalar'],
-                self.test_data['variables_1d_pft'],
-                self.test_data['variables_2d_soil'],
-                self.test_data['y_scalar'],
-                self.test_data['y_pft_1d'],
-                self.test_data['y_soil_2d']
-            )
+            dataset_tensors.append(self.test_data['pft_presence_mask'])
+        eval_dataset = TensorDataset(*dataset_tensors)
         eval_loader = DataLoader(
             eval_dataset,
             batch_size=self.config.batch_size,
@@ -1137,41 +1155,58 @@ class ModelTrainer:
             num_workers=self.config.num_workers
         )
         all_predictions = {
-            'scalar': [],
             'pft_1d': [],
             'soil_2d': []
         }
         all_targets = {
-            'y_scalar': [],
             'y_pft_1d': [],
             'y_soil_2d': []
         }
+        if 'scalar' in self.test_data:
+            all_predictions['scalar'] = []
+        if 'y_scalar' in self.test_data:
+            all_targets['y_scalar'] = []
         with torch.no_grad():
             for batch in eval_loader:
-                if 'pft_presence_mask' in self.test_data:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
-                else:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
+                idx = 0
+                time_series = batch[idx]; idx += 1
+                static = batch[idx]; idx += 1
+                pft_param = batch[idx]; idx += 1
+                scalar = batch[idx] if 'scalar' in self.test_data else None; idx += 1 if 'scalar' in self.test_data else 0
+                variables_1d_pft = batch[idx]; idx += 1
+                variables_2d_soil = batch[idx]; idx += 1
+                y_scalar = batch[idx] if 'y_scalar' in self.test_data else None; idx += 1 if 'y_scalar' in self.test_data else 0
+                y_pft_1d = batch[idx]; idx += 1
+                y_soil_2d = batch[idx]; idx += 1
+                pft_presence_mask = batch[idx] if 'pft_presence_mask' in self.test_data else None; idx += 1 if 'pft_presence_mask' in self.test_data else 0
                 # Move to device
                 time_series = time_series.to(self.device, non_blocking=True)
                 static = static.to(self.device, non_blocking=True)
                 pft_param = pft_param.to(self.device, non_blocking=True)
-                scalar = scalar.to(self.device, non_blocking=True)
+                if scalar is not None:
+                    scalar = scalar.to(self.device, non_blocking=True)
                 variables_1d_pft = variables_1d_pft.to(self.device, non_blocking=True)
                 variables_2d_soil = variables_2d_soil.to(self.device, non_blocking=True)
-                y_scalar = y_scalar.to(self.device, non_blocking=True)
+                if y_scalar is not None:
+                    y_scalar = y_scalar.to(self.device, non_blocking=True)
                 y_pft_1d = y_pft_1d.to(self.device, non_blocking=True)
                 y_soil_2d = y_soil_2d.to(self.device, non_blocking=True)
-                if 'pft_presence_mask' in self.test_data:
+                if pft_presence_mask is not None:
                     pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True)
                 # Forward pass
                 if self.use_amp and self.scaler is not None:
                     with torch.amp.autocast('cuda'):
-                        outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+                        if scalar is not None:
+                            outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+                        else:
+                            outputs = self.model(time_series, static, pft_param, variables_1d_pft, variables_2d_soil)
                 else:
-                    outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+                    if scalar is not None:
+                        outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+                    else:
+                        outputs = self.model(time_series, static, pft_param, variables_1d_pft, variables_2d_soil)
                 # Apply presence mask to predictions if enabled
-                if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.test_data:
+                if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and pft_presence_mask is not None:
                     try:
                         vec = outputs['pft_1d']
                         # Determine n_vars and reshape
@@ -1186,15 +1221,24 @@ class ModelTrainer:
                             outputs['pft_1d'] = vec.view(vec.size(0), -1)
                     except Exception:
                         pass
-                all_predictions['scalar'].append(outputs['scalar'].cpu())
+                if 'scalar' in outputs:
+                    all_predictions['scalar'].append(outputs['scalar'].cpu())
                 all_predictions['pft_1d'].append(outputs['pft_1d'].cpu())
                 all_predictions['soil_2d'].append(outputs['soil_2d'].cpu())
-                all_targets['y_scalar'].append(y_scalar.cpu())
+                if y_scalar is not None:
+                    all_targets['y_scalar'].append(y_scalar.cpu())
                 all_targets['y_pft_1d'].append(y_pft_1d.cpu())
                 all_targets['y_soil_2d'].append(y_soil_2d.cpu())
-        # Concatenate all batches
-        predictions = {k: torch.cat(v, dim=0) for k, v in all_predictions.items()}
-        targets = {k: torch.cat(v, dim=0) for k, v in all_targets.items()}
+        # Concatenate all batches (only if list is not empty)
+        predictions = {}
+        targets = {}
+        for k, v in all_predictions.items():
+            if v:
+                predictions[k] = torch.cat(v, dim=0)
+            # Don't add empty tensors to predictions/targets - they will be handled in _calculate_metrics
+        for k, v in all_targets.items():
+            if v:
+                targets[k] = torch.cat(v, dim=0)
         
         # Debug: Print shapes to identify the issue
         print(f"[DEBUG] Evaluation - predictions shapes:")
@@ -1211,99 +1255,129 @@ class ModelTrainer:
     def _calculate_metrics(self, predictions: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Calculate evaluation metrics."""
         metrics = {}
-        # Scalar
-        pred_scalar_full = predictions['scalar'].cpu().numpy()
-        target_scalar_full = targets['y_scalar'].cpu().numpy()
-        # Overall scalar metrics
-        mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
-        # Ensure arrays have the same shape before flattening
-        if pred_scalar_full.shape != target_scalar_full.shape:
-            print(f"Warning: Shape mismatch - pred: {pred_scalar_full.shape}, target: {target_scalar_full.shape}")
-            # Use the minimum shape to avoid indexing errors
-            min_shape = (min(pred_scalar_full.shape[0], target_scalar_full.shape[0]), 
-                        min(pred_scalar_full.shape[1], target_scalar_full.shape[1]))
-            pred_scalar_full = pred_scalar_full[:min_shape[0], :min_shape[1]]
-            target_scalar_full = target_scalar_full[:min_shape[0], :min_shape[1]]
-            mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
-        
-        # Flatten arrays and mask for overall metrics
-        pred_flat = pred_scalar_full.flatten()
-        target_flat = target_scalar_full.flatten()
-        mask_flat = mask_all.flatten()
-        mse_scalar_all = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
-        metrics['scalar_rmse'] = np.sqrt(mse_scalar_all)
-        metrics['scalar_mse'] = mse_scalar_all
-        # Per-scalar metrics with names
-        num_scalar = pred_scalar_full.shape[1]
-        scalar_names = self.data_info.get('y_list_scalar_columns', [f'scalar_{i}' for i in range(num_scalar)])
-        if len(scalar_names) != num_scalar:
-            scalar_names = [f'scalar_{i}' for i in range(num_scalar)]
-        for s in range(num_scalar):
-            pred_s = pred_scalar_full[:, s]
-            targ_s = target_scalar_full[:, s]
-            mask_s = ~np.isnan(pred_s) & ~np.isnan(targ_s)
-            if np.sum(mask_s) > 0:
-                mse_s = mean_squared_error(targ_s[mask_s], pred_s[mask_s])
-                rmse_s = np.sqrt(mse_s)
-                mean_s = np.mean(targ_s[mask_s])
-                nrmse_s = rmse_s / mean_s if mean_s != 0 else float('inf')
-                r2_s = r2_score(targ_s[mask_s], pred_s[mask_s])
-                name_s = scalar_names[s]
-                metrics[f'{name_s}_mse'] = mse_s
-                metrics[f'{name_s}_rmse'] = rmse_s
-                metrics[f'{name_s}_nrmse'] = nrmse_s
-                metrics[f'{name_s}_r2'] = r2_s
+        # Scalar (only if present and has valid shape)
+        if 'scalar' in predictions and 'y_scalar' in targets:
+            pred_scalar = predictions['scalar']
+            target_scalar = targets['y_scalar']
+            # Check if tensors are not empty and have correct dimensions
+            if pred_scalar.numel() > 0 and target_scalar.numel() > 0 and pred_scalar.ndim >= 2 and target_scalar.ndim >= 2:
+                pred_scalar_full = pred_scalar.cpu().numpy()
+                target_scalar_full = target_scalar.cpu().numpy()
+                # Overall scalar metrics
+                mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
+                # Ensure arrays have the same shape before flattening
+                if pred_scalar_full.shape != target_scalar_full.shape:
+                    print(f"Warning: Shape mismatch - pred: {pred_scalar_full.shape}, target: {target_scalar_full.shape}")
+                    # Use the minimum shape to avoid indexing errors
+                    if len(pred_scalar_full.shape) >= 2 and len(target_scalar_full.shape) >= 2:
+                        min_shape = (min(pred_scalar_full.shape[0], target_scalar_full.shape[0]), 
+                                    min(pred_scalar_full.shape[1], target_scalar_full.shape[1]))
+                        pred_scalar_full = pred_scalar_full[:min_shape[0], :min_shape[1]]
+                        target_scalar_full = target_scalar_full[:min_shape[0], :min_shape[1]]
+                        mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
+                
+                # Flatten arrays and mask for overall metrics
+                pred_flat = pred_scalar_full.flatten()
+                target_flat = target_scalar_full.flatten()
+                mask_flat = mask_all.flatten()
+                if np.sum(mask_flat) > 0:
+                    mse_scalar_all = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
+                    metrics['scalar_rmse'] = np.sqrt(mse_scalar_all)
+                    metrics['scalar_mse'] = mse_scalar_all
+                    # Per-scalar metrics with names
+                    if len(pred_scalar_full.shape) >= 2:
+                        num_scalar = pred_scalar_full.shape[1]
+                        scalar_names = self.data_info.get('y_list_scalar_columns', [f'scalar_{i}' for i in range(num_scalar)])
+                        if len(scalar_names) != num_scalar:
+                            scalar_names = [f'scalar_{i}' for i in range(num_scalar)]
+                        for s in range(num_scalar):
+                            pred_s = pred_scalar_full[:, s]
+                            targ_s = target_scalar_full[:, s]
+                            mask_s = ~np.isnan(pred_s) & ~np.isnan(targ_s)
+                            if np.sum(mask_s) > 0:
+                                mse_s = mean_squared_error(targ_s[mask_s], pred_s[mask_s])
+                                rmse_s = np.sqrt(mse_s)
+                                mean_s = np.mean(targ_s[mask_s])
+                                nrmse_s = rmse_s / mean_s if mean_s != 0 else float('inf')
+                                r2_s = r2_score(targ_s[mask_s], pred_s[mask_s])
+                                name_s = scalar_names[s]
+                                metrics[f'{name_s}_mse'] = mse_s
+                                metrics[f'{name_s}_rmse'] = rmse_s
+                                metrics[f'{name_s}_nrmse'] = nrmse_s
+                                metrics[f'{name_s}_r2'] = r2_s
+                else:
+                    metrics['scalar_rmse'] = 0.0
+                    metrics['scalar_mse'] = 0.0
+            else:
+                metrics['scalar_rmse'] = 0.0
+                metrics['scalar_mse'] = 0.0
+        else:
+            metrics['scalar_rmse'] = 0.0
+            metrics['scalar_mse'] = 0.0
         # PFT 1D - Detailed metrics per variable and PFT
         pred_pft_1d = predictions['pft_1d'].cpu().numpy()
         target_pft_1d = targets['y_pft_1d'].cpu().numpy()
-        # Ensure shapes are (samples, num_variables, num_pfts)
-        if pred_pft_1d.ndim == 2:
-            pred_pft_1d = pred_pft_1d.reshape(pred_pft_1d.shape[0], -1, 16)
-            target_pft_1d = target_pft_1d.reshape(target_pft_1d.shape[0], -1, 16)
-        num_variables = pred_pft_1d.shape[1]
-        num_pfts = pred_pft_1d.shape[2]
-        # Get variable names from data_info if available
-        var_names = self.data_info.get('y_list_columns_1d', [f'pft_1d_var_{i}' for i in range(num_variables)])
-        if len(var_names) != num_variables:
-            var_names = [f'pft_1d_var_{i}' for i in range(num_variables)]
-        # Overall metrics for pft_1d
-        mask = ~np.isnan(pred_pft_1d) & ~np.isnan(target_pft_1d)
-        # Ensure arrays have the same shape before flattening
-        if pred_pft_1d.shape != target_pft_1d.shape:
-            print(f"Warning: PFT 1D shape mismatch - pred: {pred_pft_1d.shape}, target: {target_pft_1d.shape}")
-            # Use the minimum shape to avoid indexing errors
-            min_shape = tuple(min(pred_pft_1d.shape[i], target_pft_1d.shape[i]) for i in range(len(pred_pft_1d.shape)))
-            pred_pft_1d = pred_pft_1d[:min_shape[0], :min_shape[1], :min_shape[2]]
-            target_pft_1d = target_pft_1d[:min_shape[0], :min_shape[1], :min_shape[2]]
-            mask = ~np.isnan(pred_pft_1d) & ~np.isnan(target_pft_1d)
-        
-        # Flatten arrays and mask for overall metrics
-        pred_flat = pred_pft_1d.flatten()
-        target_flat = target_pft_1d.flatten()
-        mask_flat = mask.flatten()
-        mse_pft_1d = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
-        metrics['pft_1d_rmse'] = np.sqrt(mse_pft_1d)
-        metrics['pft_1d_mse'] = mse_pft_1d
-        # Detailed metrics per variable and PFT
-        for v in range(num_variables):
-            var_name = var_names[v]
-            for p in range(num_pfts):
-                mask_vp = ~np.isnan(pred_pft_1d[:, v, p]) & ~np.isnan(target_pft_1d[:, v, p])
-                if np.sum(mask_vp) > 0:
-                    mse_vp = mean_squared_error(target_pft_1d[:, v, p][mask_vp], pred_pft_1d[:, v, p][mask_vp])
-                    rmse_vp = np.sqrt(mse_vp)
-                    target_mean = np.mean(target_pft_1d[:, v, p][mask_vp])
-                    nrmse_vp = rmse_vp / target_mean if target_mean != 0 else float('inf')
-                    r2_vp = r2_score(target_pft_1d[:, v, p][mask_vp], pred_pft_1d[:, v, p][mask_vp])
-                    pft_idx = p + 1  # Use 1..16 in keys
-                    metrics[f'{var_name}_pft{pft_idx}_mse'] = mse_vp
-                    metrics[f'{var_name}_pft{pft_idx}_rmse'] = rmse_vp
-                    metrics[f'{var_name}_pft{pft_idx}_nrmse'] = nrmse_vp
-                    metrics[f'{var_name}_pft{pft_idx}_r2'] = r2_vp
+        # Check if tensors are valid
+        if pred_pft_1d.ndim == 0 or pred_pft_1d.shape[0] == 0:
+            metrics['pft_1d_rmse'] = 0.0
+            metrics['pft_1d_mse'] = 0.0
+        else:
+            # Ensure shapes are (samples, num_variables, num_pfts)
+            if pred_pft_1d.ndim == 2:
+                pred_pft_1d = pred_pft_1d.reshape(pred_pft_1d.shape[0], -1, 16)
+                target_pft_1d = target_pft_1d.reshape(target_pft_1d.shape[0], -1, 16)
+            if pred_pft_1d.ndim < 3:
+                metrics['pft_1d_rmse'] = 0.0
+                metrics['pft_1d_mse'] = 0.0
+            else:
+                num_variables = pred_pft_1d.shape[1]
+                num_pfts = pred_pft_1d.shape[2]
+                # Get variable names from data_info if available
+                var_names = self.data_info.get('y_list_columns_1d', [f'pft_1d_var_{i}' for i in range(num_variables)])
+                if len(var_names) != num_variables:
+                    var_names = [f'pft_1d_var_{i}' for i in range(num_variables)]
+                # Overall metrics for pft_1d
+                mask = ~np.isnan(pred_pft_1d) & ~np.isnan(target_pft_1d)
+                # Ensure arrays have the same shape before flattening
+                if pred_pft_1d.shape != target_pft_1d.shape:
+                    print(f"Warning: PFT 1D shape mismatch - pred: {pred_pft_1d.shape}, target: {target_pft_1d.shape}")
+                    # Use the minimum shape to avoid indexing errors
+                    min_shape = tuple(min(pred_pft_1d.shape[i], target_pft_1d.shape[i]) for i in range(len(pred_pft_1d.shape)))
+                    pred_pft_1d = pred_pft_1d[:min_shape[0], :min_shape[1], :min_shape[2]]
+                    target_pft_1d = target_pft_1d[:min_shape[0], :min_shape[1], :min_shape[2]]
+                    mask = ~np.isnan(pred_pft_1d) & ~np.isnan(target_pft_1d)
+                
+                # Flatten arrays and mask for overall metrics
+                pred_flat = pred_pft_1d.flatten()
+                target_flat = target_pft_1d.flatten()
+                mask_flat = mask.flatten()
+                mse_pft_1d = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
+                metrics['pft_1d_rmse'] = np.sqrt(mse_pft_1d)
+                metrics['pft_1d_mse'] = mse_pft_1d
+                # Detailed metrics per variable and PFT
+                for v in range(num_variables):
+                    var_name = var_names[v]
+                    for p in range(num_pfts):
+                        mask_vp = ~np.isnan(pred_pft_1d[:, v, p]) & ~np.isnan(target_pft_1d[:, v, p])
+                        if np.sum(mask_vp) > 0:
+                            mse_vp = mean_squared_error(target_pft_1d[:, v, p][mask_vp], pred_pft_1d[:, v, p][mask_vp])
+                            rmse_vp = np.sqrt(mse_vp)
+                            target_mean = np.mean(target_pft_1d[:, v, p][mask_vp])
+                            nrmse_vp = rmse_vp / target_mean if target_mean != 0 else float('inf')
+                            r2_vp = r2_score(target_pft_1d[:, v, p][mask_vp], pred_pft_1d[:, v, p][mask_vp])
+                            pft_idx = p + 1  # Use 1..16 in keys
+                            metrics[f'{var_name}_pft{pft_idx}_mse'] = mse_vp
+                            metrics[f'{var_name}_pft{pft_idx}_rmse'] = rmse_vp
+                            metrics[f'{var_name}_pft{pft_idx}_nrmse'] = nrmse_vp
+                            metrics[f'{var_name}_pft{pft_idx}_r2'] = r2_vp
         # Soil 2D
         pred_soil_2d = predictions['soil_2d'].cpu().numpy()
         target_soil_2d = targets['y_soil_2d'].cpu().numpy()
         # Ensure shapes match (samples, variables, columns, layers)
+        if pred_soil_2d.ndim == 0 or pred_soil_2d.shape[0] == 0:
+            metrics['soil_2d_rmse'] = 0.0
+            metrics['soil_2d_mse'] = 0.0
+            return metrics
         n_samples = pred_soil_2d.shape[0]
         if pred_soil_2d.ndim == 2:
             # If 2D, assume it's flattened and reshape to match target dimensions
@@ -1339,6 +1413,10 @@ class ModelTrainer:
         metrics['soil_2d_rmse'] = np.sqrt(mse_soil_2d)
         metrics['soil_2d_mse'] = mse_soil_2d
         # Per-variable per-layer metrics (aggregated across columns)
+        if pred_soil_2d.ndim < 2:
+            metrics['soil_2d_rmse'] = 0.0
+            metrics['soil_2d_mse'] = 0.0
+            return metrics
         num_variables_soil = pred_soil_2d.shape[1]
         num_layers_soil = pred_soil_2d.shape[3] if pred_soil_2d.ndim == 4 else 1
         soil_var_names = self.data_info.get('y_list_columns_2d', [f'soil_2d_var_{i}' for i in range(num_variables_soil)])
@@ -1447,43 +1525,57 @@ class ModelTrainer:
         except Exception as _e_loc:
             logger.warning(f"Failed to prepare location vectors: {_e_loc}")
 
-        # Save scalar predictions with inverse transformation
-        predictions_scalar_np = predictions['scalar'].cpu().numpy()
+        # Prepare scalar column names (used by both predictions and ground truth)
+        num_expected_scalars = len(self.data_info.get('y_list_scalar_columns', []))
         
-        # Handle shape mismatch - only use the first scalar output if model outputs more than expected
-        num_expected_scalars = len(self.data_info['y_list_scalar_columns'])
-        if predictions_scalar_np.shape[1] > num_expected_scalars:
-            print(f"Warning: Model outputs {predictions_scalar_np.shape[1]} scalars but only {num_expected_scalars} expected. Using first {num_expected_scalars}.")
-            predictions_scalar_np = predictions_scalar_np[:, :num_expected_scalars]
-        
-        scalar_cols = self.data_info['y_list_scalar_columns']
-        
-        # Apply inverse transformation to convert from normalized to original units
-        try:
-            if 'y_scalar' in self.scalers and self.scalers['y_scalar'] is not None:
-                predictions_scalar_original = self.scalers['y_scalar'].inverse_transform(predictions_scalar_np)
-                logger.info("Applied inverse transformation to scalar predictions")
-            else:
+        # Save scalar predictions with inverse transformation (only if available)
+        if 'scalar' in predictions and predictions['scalar'].numel() > 0:
+            predictions_scalar_np = predictions['scalar'].cpu().numpy()
+            
+            # Handle shape mismatch - only use the first scalar output if model outputs more than expected
+            if num_expected_scalars > 0 and predictions_scalar_np.shape[1] > num_expected_scalars:
+                print(f"Warning: Model outputs {predictions_scalar_np.shape[1]} scalars but only {num_expected_scalars} expected. Using first {num_expected_scalars}.")
+                predictions_scalar_np = predictions_scalar_np[:, :num_expected_scalars]
+            
+            scalar_cols = self.data_info.get('y_list_scalar_columns', [f'scalar_{i}' for i in range(predictions_scalar_np.shape[1])])
+            if len(scalar_cols) != predictions_scalar_np.shape[1]:
+                scalar_cols = [f'scalar_{i}' for i in range(predictions_scalar_np.shape[1])]
+            
+            # Apply inverse transformation to convert from normalized to original units
+            try:
+                if 'y_scalar' in self.scalers and self.scalers['y_scalar'] is not None:
+                    predictions_scalar_original = self.scalers['y_scalar'].inverse_transform(predictions_scalar_np)
+                    logger.info("Applied inverse transformation to scalar predictions")
+                else:
+                    predictions_scalar_original = predictions_scalar_np
+                    logger.warning("No scalar scaler found, saving normalized values")
+            except Exception as e:
+                logger.warning(f"Failed to apply inverse transformation to scalar predictions: {e}")
                 predictions_scalar_original = predictions_scalar_np
-                logger.warning("No scalar scaler found, saving normalized values")
-        except Exception as e:
-            logger.warning(f"Failed to apply inverse transformation to scalar predictions: {e}")
-            predictions_scalar_original = predictions_scalar_np
-        
-        predictions_df = pd.DataFrame(predictions_scalar_original, columns=scalar_cols)
-        if longitude_values is not None and latitude_values is not None and len(longitude_values) == len(predictions_df):
-            predictions_df.insert(0, 'Longitude', longitude_values)
-            predictions_df.insert(1, 'Latitude', latitude_values)
-        predictions_df.to_csv(os.path.join(predictions_dir, 'predictions_scalar.csv'), index=False)
+            
+            predictions_df = pd.DataFrame(predictions_scalar_original, columns=scalar_cols)
+            if longitude_values is not None and latitude_values is not None and len(longitude_values) == len(predictions_df):
+                predictions_df.insert(0, 'Longitude', longitude_values)
+                predictions_df.insert(1, 'Latitude', latitude_values)
+            predictions_df.to_csv(os.path.join(predictions_dir, 'predictions_scalar.csv'), index=False)
+            logger.info("Scalar predictions saved successfully")
+        else:
+            logger.warning("Scalar predictions not available, skipping scalar prediction save")
         
         # Save ground truth scalar with inverse transformation if available
         if 'y_scalar' in self.test_data:
             ground_truth_scalar_np = self.test_data['y_scalar'].cpu().numpy()
             
+            # Get scalar column names for ground truth
+            scalar_cols = self.data_info.get('y_list_scalar_columns', [f'scalar_{i}' for i in range(ground_truth_scalar_np.shape[1])])
+            if len(scalar_cols) != ground_truth_scalar_np.shape[1]:
+                scalar_cols = [f'scalar_{i}' for i in range(ground_truth_scalar_np.shape[1])]
+            
             # Handle shape mismatch - ensure ground truth matches expected scalar count
-            if ground_truth_scalar_np.shape[1] > num_expected_scalars:
+            if num_expected_scalars > 0 and ground_truth_scalar_np.shape[1] > num_expected_scalars:
                 print(f"Warning: Ground truth has {ground_truth_scalar_np.shape[1]} scalars but only {num_expected_scalars} expected. Using first {num_expected_scalars}.")
                 ground_truth_scalar_np = ground_truth_scalar_np[:, :num_expected_scalars]
+                scalar_cols = scalar_cols[:num_expected_scalars]
             
             # Apply inverse transformation to ground truth as well
             try:

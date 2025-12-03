@@ -269,6 +269,12 @@ def main():
         help='Disable masking of absent PFTs'
     )
     parser.set_defaults(mask_absent_pfts=True)
+    parser.add_argument(
+        '--drop-scalar-variables',
+        dest='drop_scalar_variables',
+        action='store_true',
+        help='Drop scalar variables from both input and output (default: include scalar variables)'
+    )
     
     args = parser.parse_args()
     
@@ -300,6 +306,10 @@ def main():
         # include_water = args.with_water
         logger.info(f"Water variables included: {include_water}")
         
+        # Scalar variables inclusion
+        include_scalar = not args.drop_scalar_variables
+        logger.info(f"Scalar variables included: {include_scalar}")
+        
         # Get configuration (support variable list and optional model-config overrides)
         from config.training_config import get_cnp_combined_config
         config = get_cnp_combined_config(
@@ -308,6 +318,7 @@ def main():
             use_tva4km=args.use_tva4km,
             max_files=args.max_files,
             include_water=include_water,
+            include_scalar=include_scalar,
             variable_list_path=args.variable_list,
             model_config_path=args.model_config
         )
@@ -609,6 +620,7 @@ def main():
             config.model_config,
             data_info,
             include_water=include_water,
+            include_scalar=include_scalar,
             use_learnable_loss_weights=config.training_config.use_learnable_loss_weights
         )
         
@@ -694,6 +706,7 @@ def main():
 
             config_dict = {
                 'include_water': include_water,
+                'include_scalar': include_scalar,
                 'normalization_method': args.normalization,
                 'data_info': data_info,
                 'data_counts': group_counts,

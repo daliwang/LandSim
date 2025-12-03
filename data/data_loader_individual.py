@@ -384,9 +384,15 @@ class DataLoaderIndividual:
         # Static (keep group normalization for now)
         static_data, static_scaler = self._normalize_static(self.data_config.static_columns)
 
-        # Scalar - Use group normalization
-        scalar_data, scalar_scaler = self._normalize_scalar()
-        y_scalar_data, y_scalar_scaler = self._normalize_y_scalar()
+        # Scalar - Use group normalization (if present)
+        scalar_data = None
+        scalar_scaler = None
+        y_scalar_data = None
+        y_scalar_scaler = None
+        if hasattr(self.data_config, 'x_list_scalar_columns') and self.data_config.x_list_scalar_columns:
+            scalar_data, scalar_scaler = self._normalize_scalar()
+        if hasattr(self.data_config, 'y_list_scalar_columns') and self.data_config.y_list_scalar_columns:
+            y_scalar_data, y_scalar_scaler = self._normalize_y_scalar()
 
         # 1D PFT - Use group normalization
         pft_1d_data, pft_1d_scaler = self._normalize_list_1d(self.data_config.x_list_columns_1d)
@@ -421,13 +427,13 @@ class DataLoaderIndividual:
         self.scalers = {
             'time_series': time_series_scaler,
             'static': static_scaler,
-            'scalar': scalar_scaler,
-            'y_scalar': y_scalar_scaler,
             'pft_1d': pft_1d_scaler,
             'y_pft_1d': y_pft_1d_scaler,
             'variables_2d_soil': variables_2d_soil_scaler,
             'y_soil_2d': y_soil_2d_scaler,
             'pft_param': pft_param_scaler,
+            'scalar': scalar_scaler if scalar_scaler is not None else None,
+            'y_scalar': y_scalar_scaler if y_scalar_scaler is not None else None,
             'water': water_scaler if 'water_scaler' in locals() else None,
             'y_water': y_water_scaler if 'y_water_scaler' in locals() else None,
         }
@@ -436,16 +442,18 @@ class DataLoaderIndividual:
             'time_series_data': time_series_data,
             'static_data': static_data,
             'pft_param_data': pft_param_data,
-            'scalar_data': scalar_data,
             'variables_1d_pft': pft_1d_data,
             'variables_2d_soil': variables_2d_soil,
-            'y_scalar': y_scalar_data,
             'y_pft_1d': y_pft_1d_data,
             'y_soil_2d': y_soil_2d,
             'water': water_tensor,
             'y_water': y_water_tensor,
             'scalers': self.scalers
         }
+        if scalar_data is not None:
+            ret['scalar_data'] = scalar_data
+        if y_scalar_data is not None:
+            ret['y_scalar'] = y_scalar_data
         # Add per-sample PFT mask derived from raw PCT_NAT_PFT_1..16 (1 where >0, else 0)
         try:
             pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
@@ -488,9 +496,15 @@ class DataLoaderIndividual:
         # Static (keep group normalization for now)
         static_data, static_scaler = self._normalize_static(self.data_config.static_columns)
 
-        # Scalar - Use individual normalization
-        scalar_data, scalar_scaler = self._normalize_scalar_individual(transform_only)
-        y_scalar_data, y_scalar_scaler = self._normalize_y_scalar_individual(transform_only)
+        # Scalar - Use individual normalization (if present)
+        scalar_data = None
+        scalar_scaler = None
+        y_scalar_data = None
+        y_scalar_scaler = None
+        if hasattr(self.data_config, 'x_list_scalar_columns') and self.data_config.x_list_scalar_columns:
+            scalar_data, scalar_scaler = self._normalize_scalar_individual(transform_only)
+        if hasattr(self.data_config, 'y_list_scalar_columns') and self.data_config.y_list_scalar_columns:
+            y_scalar_data, y_scalar_scaler = self._normalize_y_scalar_individual(transform_only)
 
         # 1D PFT - Use individual normalization
         pft_1d_data, pft_1d_scaler = self._normalize_list_1d_individual(self.data_config.x_list_columns_1d, transform_only)
@@ -519,7 +533,8 @@ class DataLoaderIndividual:
         assert pft_param_data.shape[1] == len(self.data_config.pft_param_columns), 'Mismatch in PFT param feature count!'
         # Only assert Y variables if they were normalized (training mode)
         if y_scalar_data is not None:
-            assert y_scalar_data.shape[1] == len(self.data_config.y_list_scalar_columns), 'Mismatch in y_scalar feature count!'
+            if y_scalar_data is not None:
+                assert y_scalar_data.shape[1] == len(self.data_config.y_list_scalar_columns), 'Mismatch in y_scalar feature count!'
         if y_pft_1d_data is not None:
             assert y_pft_1d_data.shape[1] == len(self.data_config.y_list_columns_1d), 'Mismatch in y_pft_1d variable count!'
         if y_soil_2d is not None:
@@ -567,13 +582,14 @@ class DataLoaderIndividual:
             'time_series_data': time_series_data,
             'static_data': static_data,
             'pft_param_data': pft_param_data,
-            'scalar_data': scalar_data,
             'variables_1d_pft': pft_1d_data,
             'variables_2d_soil': variables_2d_soil,
             'water': water_tensor,
             'y_water': y_water_tensor,
             'scalers': self.scalers
         }
+        if scalar_data is not None:
+            ret['scalar_data'] = scalar_data
         
         # Only add Y variables if they were normalized (training mode) or exist (inference mode)
         if y_scalar_data is not None:
@@ -1574,11 +1590,12 @@ class DataLoaderIndividual:
         train_data['pft_param'] = train_pft_param
         test_data['pft_param'] = test_pft_param
 
-        # Split scalar data (input)
-        train_list_scalar = normalized_data['scalar_data'][:train_size]
-        test_list_scalar = normalized_data['scalar_data'][train_size:]
-        train_data['scalar'] = train_list_scalar
-        test_data['scalar'] = test_list_scalar 
+        # Split scalar data (input) - skip if not present
+        if 'scalar_data' in normalized_data and normalized_data['scalar_data'] is not None:
+            train_list_scalar = normalized_data['scalar_data'][:train_size]
+            test_list_scalar = normalized_data['scalar_data'][train_size:]
+            train_data['scalar'] = train_list_scalar
+            test_data['scalar'] = test_list_scalar 
 
         # Split y_scalar (target) - skip if not present (inference mode)
         if 'y_scalar' in normalized_data and normalized_data['y_scalar'] is not None:
@@ -1602,6 +1619,18 @@ class DataLoaderIndividual:
             y_soil_2d = normalized_data['y_soil_2d']
             train_data['y_soil_2d'] = y_soil_2d[:train_size]
             test_data['y_soil_2d'] = y_soil_2d[train_size:]
+        
+        # Split scalar (input) - skip if not present
+        if 'scalar_data' in normalized_data and normalized_data['scalar_data'] is not None:
+            scalar = normalized_data['scalar_data']
+            train_data['scalar'] = scalar[:train_size]
+            test_data['scalar'] = scalar[train_size:]
+        
+        # Split y_scalar (target) - skip if not present
+        if 'y_scalar' in normalized_data and normalized_data['y_scalar'] is not None:
+            y_scalar = normalized_data['y_scalar']
+            train_data['y_scalar'] = y_scalar[:train_size]
+            test_data['y_scalar'] = y_scalar[train_size:]
 
         # Split variables_2d_soil (input)
         variables_2d_soil = normalized_data['variables_2d_soil']
