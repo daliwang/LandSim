@@ -43,7 +43,7 @@ class CNPCombinedModel(nn.Module):
     """
     
     def __init__(self, model_config: ModelConfig, data_info: Dict[str, Any], 
-                 include_water: bool = True, use_learnable_loss_weights: bool = False):
+                 include_water: bool = True, include_scalar: bool = True, use_learnable_loss_weights: bool = False):
         """
         Initialize the CNP combined model.
         """
@@ -52,6 +52,7 @@ class CNPCombinedModel(nn.Module):
         self.model_config = model_config
         self.data_info = data_info
         self.include_water = include_water
+        self.include_scalar = include_scalar
         self.use_learnable_loss_weights = use_learnable_loss_weights
         self.token_dim = self.model_config.token_dim  # <-- Fix: set token_dim before feature fusion
         # Centralized dropout probability (allows disabling for strict determinism)
@@ -77,7 +78,10 @@ class CNPCombinedModel(nn.Module):
         
         # Learnable log_sigma parameters for loss weighting (optional)
         if self.use_learnable_loss_weights:
-            self.log_sigma_scalar = nn.Parameter(torch.zeros(1))
+            if self.include_scalar:
+                self.log_sigma_scalar = nn.Parameter(torch.zeros(1))
+            else:
+                self.log_sigma_scalar = None
             self.log_sigma_soil_2d = nn.Parameter(torch.zeros(1))
             if self.include_water:
                 self.log_sigma_water = nn.Parameter(torch.zeros(1))
@@ -122,8 +126,11 @@ class CNPCombinedModel(nn.Module):
         else:
             self.water_input_size = 0
         
-        # Scalar variables input size (4 variables)
-        self.scalar_input_size = len(self.data_info.get('x_list_scalar_columns', []))
+        # Scalar variables input size (4 variables, optional)
+        if self.include_scalar:
+            self.scalar_input_size = len(self.data_info.get('x_list_scalar_columns', []))
+        else:
+            self.scalar_input_size = 0
         # print(f"[DEBUG] scalar_input_size at model init: {self.scalar_input_size}")
         
         # 2D input size
@@ -190,8 +197,8 @@ class CNPCombinedModel(nn.Module):
             self.fc_water = None
     
     def _build_scalar_encoder(self):
-        """Build encoder for scalar variables (4 variables)."""
-        if self.scalar_input_size > 0:
+        """Build encoder for scalar variables (4 variables, optional)."""
+        if self.include_scalar and self.scalar_input_size > 0:
             self.fc_scalar = nn.Sequential(
                 nn.Linear(self.scalar_input_size, 32),
                 nn.ReLU(),
@@ -396,14 +403,17 @@ class CNPCombinedModel(nn.Module):
             )
         else:
             self.water_head = None
-        # Scalar output head (6 variables)
-        self.scalar_head = nn.Sequential(
-            nn.Linear(self.token_dim, 64),
-            nn.BatchNorm1d(64),  # Add BatchNorm
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(64, self.model_config.scalar_output_size)  # 6 scalar variables
-        )
+        # Scalar output head (6 variables, optional)
+        if self.include_scalar and self.model_config.scalar_output_size > 0:
+            self.scalar_head = nn.Sequential(
+                nn.Linear(self.token_dim, 64),
+                nn.BatchNorm1d(64),  # Add BatchNorm
+                nn.ReLU(),
+                nn.Dropout(self.dropout_p),
+                nn.Linear(64, self.model_config.scalar_output_size)  # 6 scalar variables
+            )
+        else:
+            self.scalar_head = None
         # 2D output head (dynamic number of 2D soil variables)
         n_2d_vars = len(self.data_info.get('y_list_columns_2d', []))
         self.matrix_head = nn.Sequential(
@@ -559,7 +569,7 @@ class CNPCombinedModel(nn.Module):
             pft_param_features = self.cnn_pft_param(x)
             features.append(pft_param_features)
         # Scalar encoder
-        if self.fc_scalar is not None:
+        if self.include_scalar and self.fc_scalar is not None:
             scalar_features = self.fc_scalar(scalar)
             # print("NaNs in scalar_features:", torch.isnan(scalar_features).sum().item(), "shape:", scalar_features.shape)
             features.append(scalar_features)
@@ -593,9 +603,10 @@ class CNPCombinedModel(nn.Module):
         # print("Max/Min/Mean fused_features:", fused_features.max().item(), fused_features.min().item(), fused_features.mean().item())
         # Output heads
         outputs = {}
-        scalar_pred = self.scalar_head(fused_features)
-        # Apply non-negativity constraint to all outputs (all are pools)
-        outputs['scalar'] = torch.relu(scalar_pred)
+        if self.include_scalar and self.scalar_head is not None:
+            scalar_pred = self.scalar_head(fused_features)
+            # Apply non-negativity constraint to all outputs (all are pools)
+            outputs['scalar'] = torch.relu(scalar_pred)
 
         # Process PFT 1D outputs to apply specific constraints per variable
         pft_1d_raw_output = self.pft_1d_head(fused_features)
@@ -634,7 +645,7 @@ class CNPCombinedModel(nn.Module):
         """Get loss weights for different output types."""
         if self.use_learnable_loss_weights:
             weights = {}
-            if self.log_sigma_scalar is not None:
+            if self.include_scalar and self.log_sigma_scalar is not None:
                 weights['scalar'] = (1 / (2 * torch.exp(self.log_sigma_scalar) ** 2)).item()
             if self.log_sigma_matrix is not None:
                 weights['matrix'] = (1 / (2 * torch.exp(self.log_sigma_matrix) ** 2)).item()
@@ -645,9 +656,10 @@ class CNPCombinedModel(nn.Module):
             return weights
         else:
             weights = {
-                'scalar': 1.0,
                 'matrix': 1.0
             }
+            if self.include_scalar:
+                weights['scalar'] = 1.0
             if self.include_water:
                 weights['water'] = 1.0
             # Optionally add pft_1d if used in loss

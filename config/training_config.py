@@ -644,6 +644,7 @@ def get_cnp_combined_config(
     use_tva4km: bool = False,
     max_files: Optional[int] = None,
     include_water: bool = False,
+    include_scalar: bool = True,
     variable_list_path: Optional[str] = None,
     model_config_path: Optional[str] = None
 ) -> TrainingConfigManager:
@@ -692,7 +693,7 @@ def get_cnp_combined_config(
     # Fallback to defaults if none provided via CNP_IO
     if not data_paths:
         if use_trendy1:
-            data_paths.append("/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree")
+            data_paths.append("/gpfs/wolf2/cades/cli185/proj-shared/guzhuowei0407/Dataset_test/TVA/old_TVA_enhanced_dataset")
         if use_trendy05:
             data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
         if use_tva4km:
@@ -704,7 +705,7 @@ def get_cnp_combined_config(
                 if env_pat:
                     dataset_file_patterns[env_tva] = env_pat
     if file_pattern is None:
-        file_pattern = "enhanced_1_training_data_batch_*.pkl"
+        file_pattern = "enhanced_monthly_training_data_batch_*.pkl"
 
     config.update_data_config(
         data_paths=data_paths,
@@ -803,26 +804,30 @@ def get_cnp_combined_config(
         time_series_columns=time_series_columns,
         static_columns=surface_properties,
         pft_param_columns=pft_parameters,
-        x_list_scalar_columns=scalar_variables,
         x_list_columns_1d=pft_1d_variables,
         x_list_columns_2d=variables_2d_soil,
         longitudes_to_drop=longitudes_to_drop
     )
+    if include_scalar:
+        data_config_kwargs['x_list_scalar_columns'] = scalar_variables
     if include_water:
         data_config_kwargs['x_list_water_columns'] = water_variables
 
     config.update_data_config(**data_config_kwargs)
 
     # Outputs
-    output_scalar = ['Y_' + v for v in scalar_variables]
     output_1d_pft = ['Y_' + v for v in pft_1d_variables]
     output_2d = ['Y_' + v for v in variables_2d_soil]
-
-    config.update_data_config(
-        y_list_scalar_columns=output_scalar,
+    
+    output_config_kwargs = dict(
         y_list_columns_1d=output_1d_pft,
         y_list_columns_2d=output_2d
     )
+    if include_scalar:
+        output_scalar = ['Y_' + v for v in scalar_variables]
+        output_config_kwargs['y_list_scalar_columns'] = output_scalar
+
+    config.update_data_config(**output_config_kwargs)
     
     # Model configuration for CNP architecture (defaults)
     config.update_model_config(
@@ -842,7 +847,7 @@ def get_cnp_combined_config(
         water_fc_size=64 if include_water else 0,  # Reduced from 128
 
         # FC for scalar variables (4 variables) - separate from surface properties
-        scalar_fc_size=64,  # Reduced from 128
+        scalar_fc_size=64 if include_scalar else 0,  # Reduced from 128
 
         # FC for 1D PFT variables (14 variables) - separate from surface properties
         pft_1d_fc_size=64,  # Reduced from 128
