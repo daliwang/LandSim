@@ -153,3 +153,22 @@ python ./TVA_1_Sample/run_workflow.py \
   --dataset-root /path/to/TVA_dataset \
   --variable-list ../CNP_IO_updated9_dev.txt
 ```
+
+### Extract Single Point Data from ELM Restart File
+The `extract_elm_restart_point.py` script extracts all data for specified geographic coordinates from a global ELM restart NetCDF file. It correctly handles ELM's multi-level hierarchical structure (gridcell → topounit → landunit → column → pft) and creates a subset NetCDF file containing only the data for the target location.
+
+**Key Features**:
+- Extracts data at all hierarchical levels for a single geographic point
+- Automatically finds the nearest neighbor gridcell to target coordinates
+- Preserves all metadata and encoding information from the original file
+- Supports both 0-360° and -180 to 180° longitude formats
+- Can be used via command-line arguments or with hardcoded defaults
+
+**Usage**:
+```bash
+python scripts/extract_elm_restart_point.py \
+  --restart-file /path/to/input_restart_file.nc \
+  --lat 35.833332(Target latitude coordinate) \
+  --lon -84.208336(Target longitude coordinate) \
+  --output-file single_point_extracted.nc
+```
