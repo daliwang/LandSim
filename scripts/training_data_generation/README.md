@@ -121,7 +121,7 @@ output/
 2. **Choose your dataset mode**:
    ```bash
    # For complete ecosystem data (291 variables)
-   python python_scripts/enhanced_training_dataset.py --enhanced_dataset
+   python python_scripts/enhanced_training_dataset.py --enhanced_dataset --use_monthly_forcing --forcing_year_range "2004-2023"
    
    # For initial conditions only (195 variables)
    python python_scripts/enhanced_training_dataset.py --initial_only

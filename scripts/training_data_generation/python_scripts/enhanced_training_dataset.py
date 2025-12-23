@@ -219,11 +219,66 @@ def calculate_monthly_avg(time_series, time_series_length=58400):
     
     return monthly_averages
 
-def generate_base_dataset(variable_definitions):
+def detect_grid_format(ds):
+    """Detect if dataset uses 1D (gridcell-based) or 2D (lat/lon grid) format"""
+    if 'landfrac' not in ds.variables:
+        return None, None, None
+    
+    landfrac_var = ds.variables['landfrac']
+    landfrac_dims = landfrac_var.dimensions
+    
+    if len(landfrac_dims) == 1:
+        return '1d', landfrac_dims[0], None
+    elif len(landfrac_dims) == 2:
+        return '2d', landfrac_dims[0], landfrac_dims[1]
+    else:
+        return None, None, None
+
+def get_gridcell_value(var, var_dims, gridcell_idx, grid_format, grid_info, dim1=None, dim2=None, lat_idx=None, lon_idx=None):
+    """Get a scalar value from a variable, handling both 1D and 2D grid formats"""
+    val = None
+    
+    if grid_format == '2d' and len(var_dims) == 2 and var_dims[0] == dim1 and var_dims[1] == dim2:
+        # Variable is 2D (lat, lon) format
+        if lat_idx is not None and lon_idx is not None:
+            val = var[lat_idx, lon_idx]
+        else:
+            # Fallback: flatten and index
+            val = var[:].flatten()[gridcell_idx]
+    elif len(var_dims) == 1:
+        # Variable is 1D, use direct indexing
+        val = var[gridcell_idx]
+    else:
+        # Try direct indexing as fallback
+        try:
+            val = var[gridcell_idx]
+        except:
+            # Last resort: flatten and index
+            val = var[:].flatten()[gridcell_idx]
+    
+    # Convert MaskedArray to regular array if needed
+    if hasattr(val, 'data'):  # MaskedArray
+        val = val.data
+    
+    # Ensure scalar value
+    if isinstance(val, np.ndarray):
+        if val.size == 1:
+            val = val.item()
+        elif val.size > 1:
+            # Take first element if array
+            val = val.flatten()[0]
+    
+    return val
+
+def generate_base_dataset(variable_definitions, use_monthly_forcing=False, forcing_year_range="1980-1999"):
     """Generate base training dataset (72_dataset_construction.py logic)"""
     print(f"\n{'='*80}")
     print("STEP 1: Base Dataset Generation (72_dataset_construction.py)")
     print(f"{'='*80}")
+    
+    if use_monthly_forcing:
+        print("Using pre-computed monthly average forcing data")
+        print(f"   Year range: {forcing_year_range}")
     
     # File paths from config
     surface_data_files = config.surface_data_files
@@ -236,13 +291,18 @@ def generate_base_dataset(variable_definitions):
     forcing_files = {}
     for var_name in variable_definitions['time_series_vars']:
         # Look for files containing the variable name in forcing_netcdf directory
-        pattern = os.path.join(config.forcing_netcdf_output_dir, f'*{var_name}*1980-1999.nc')
+        # Support both old format (*VAR*1980-1999.nc) and new format (*VAR*2004-2023.nc)
+        pattern = os.path.join(config.forcing_netcdf_output_dir, f'*{var_name}*{forcing_year_range}.nc')
         matching_files = glob.glob(pattern)
+        if not matching_files:
+            # Try alternative pattern without year range in filename
+            pattern_alt = os.path.join(config.forcing_netcdf_output_dir, f'{var_name}_*.nc')
+            matching_files = glob.glob(pattern_alt)
         if matching_files:
             forcing_files[var_name] = matching_files[0]  # Use first match
-            print(f"✅ Found forcing file: {os.path.basename(matching_files[0])}")
+            print(f"Found forcing file: {os.path.basename(matching_files[0])}")
         else:
-            print(f"⚠️  Forcing file not found for {var_name}: {pattern}")
+            print(f"Forcing file not found for {var_name}: {pattern}")
     
     print(f"Found {len(forcing_files)} forcing files")
     
@@ -262,7 +322,7 @@ def generate_base_dataset(variable_definitions):
     ds_forcing = {}
     for var_name, file_path in forcing_files.items():
         ds_forcing[var_name] = nc.Dataset(file_path)
-        print(f"✅ Forcing data loaded: {var_name}")
+        print(f"Forcing data loaded: {var_name}")
     
     # Load future files for Y variables
     ds_h0_list = [nc.Dataset(fp) for fp in final_spinup_history_files]
@@ -270,27 +330,140 @@ def generate_base_dataset(variable_definitions):
     
     print(f"All files loaded in {time.time() - start_time:.2f} seconds")
     
+    # Detect grid format for history file (ds2)
+    # Detect grid format for both ds1 (surface) and ds2 (history) files
+    grid_format_ds1, dim1_ds1, dim2_ds1 = detect_grid_format(ds1)
+    grid_format_ds2, dim1_ds2, dim2_ds2 = detect_grid_format(ds2)
+    print(f"Surface file (ds1) grid format: {grid_format_ds1} (dims: {dim1_ds1}, {dim2_ds1})")
+    print(f"History file (ds2) grid format: {grid_format_ds2} (dims: {dim1_ds2}, {dim2_ds2})")
+    
+    # For backward compatibility, grid_format refers to ds2 format (used for history variables)
+    grid_format = grid_format_ds2
+    dim1 = dim1_ds2
+    dim2 = dim2_ds2
+    
     # Get coordinates and build spatial filtering
-    lats = ds2.variables['lat'][:]
-    lons = ds2.variables['lon'][:]
-    landmask = ds2.variables['landfrac'][:]
+    landmask_var = ds2.variables['landfrac']
+    landmask = landmask_var[:]
     
-    # Filter for land gridcells
-    valid_mask = (landmask > 0)
-    valid_gridcells = np.where(valid_mask)[0]
+    # Store grid format info and conversion mappings for both ds1 and ds2
+    grid_info = {
+        'format': grid_format,  # ds2 format (for backward compatibility)
+        'format_ds1': grid_format_ds1,  # ds1 format
+        'format_ds2': grid_format_ds2,  # ds2 format
+        'dim1_ds1': dim1_ds1,
+        'dim2_ds1': dim2_ds1,
+        'dim1_ds2': dim1_ds2,
+        'dim2_ds2': dim2_ds2,
+        'lat_idx_map': {},  # flat_idx -> lat_idx for 2D format (ds2)
+        'lon_idx_map': {},  # flat_idx -> lon_idx for 2D format (ds2)
+        'lat_idx_map_ds1': {},  # flat_idx -> lat_idx for 2D format (ds1)
+        'lon_idx_map_ds1': {},  # flat_idx -> lon_idx for 2D format (ds1)
+        'n_lon': None,
+        'n_lon_ds1': None
+    }
     
-    print(f"Total land gridcells: {len(valid_gridcells)}")
+    # Build mappings for ds2 (history file)
+    if grid_format_ds2 == '1d':
+        # 1D format: (gridcell) or (lndgrid)
+        lats = ds2.variables['lat'][:]
+        lons = ds2.variables['lon'][:]
+        
+        # Filter for land gridcells
+        valid_mask = (landmask > 0)
+        valid_gridcells = np.where(valid_mask)[0]
+        
+        # Get coordinates for valid gridcells (direct indexing)
+        query_coords = np.array([(lats[i], lons[i]) for i in valid_gridcells])
+        
+    elif grid_format_ds2 == '2d':
+        # 2D format: (lat, lon)
+        lat_coords = ds2.variables['lat'][:]
+        lon_coords = ds2.variables['lon'][:]
+        grid_info['n_lon'] = len(lon_coords)
+        
+        # Filter for land gridcells (2D mask)
+        valid_mask = (landmask > 0)
+        valid_lat_indices, valid_lon_indices = np.where(valid_mask)
+        
+        # Convert 2D indices to flat gridcell indices
+        valid_gridcells_2d = valid_lat_indices * grid_info['n_lon'] + valid_lon_indices
+        
+        # Get coordinates for valid gridcells
+        query_coords_2d = np.array([(lat_coords[i], lon_coords[j]) 
+                                    for i, j in zip(valid_lat_indices, valid_lon_indices)])
+        
+        # Create mapping from flat index to 2D indices for ds2
+        for i, flat_idx in enumerate(valid_gridcells_2d):
+            grid_info['lat_idx_map'][i] = valid_lat_indices[i]
+            grid_info['lon_idx_map'][i] = valid_lon_indices[i]
+    
+        # For compatibility with later code
+        lats = np.array([lat_coords[i] for i in valid_lat_indices])
+        lons = np.array([lon_coords[j] for j in valid_lon_indices])
+        query_coords = query_coords_2d
+        valid_gridcells = valid_gridcells_2d
+    else:
+        raise ValueError(f"Unsupported grid format: {grid_format}")
+    
+    # Build mappings for ds1 (surface file) if it's 2D format
+    # This needs to be done after we have gridcell coordinates from ds10
+    if grid_format_ds1 == '2d' and 'landfrac' in ds1.variables:
+        print("Building ds1 (surface file) 2D index mappings...")
+        landmask_ds1 = ds1.variables['landfrac'][:]
+        lat_coords_ds1 = ds1.variables[dim1_ds1][:]
+        lon_coords_ds1 = ds1.variables[dim2_ds1][:]
+        grid_info['n_lon_ds1'] = len(lon_coords_ds1)
+        
+        # Filter for land gridcells in ds1 (2D mask)
+        valid_mask_ds1 = (landmask_ds1 > 0)
+        valid_lat_indices_ds1, valid_lon_indices_ds1 = np.where(valid_mask_ds1)
+        
+        # Get restart file coordinates (these are defined later, so we'll build mapping in the main loop if needed)
+        # For now, we'll build it after restart coordinates are available
+        print("  ds1 2D mapping will be built dynamically during processing")
+    
+    print(f"Total land gridcells (before deduplication): {len(valid_gridcells)}")
     print(f"Latitude range: [{lats.min():.2f}, {lats.max():.2f}]")
     print(f"Longitude range: [{lons.min():.2f}, {lons.max():.2f}]")
     
     # Build KDTree indices
     print("Building KDTree indices...")
     
-    # Restart file coordinates
+    # Restart file coordinates (these are the unique gridcells we want - 20975 total)
     gridcell_lat = ds10.variables['grid1d_lat'][:]
     gridcell_lon = ds10.variables['grid1d_lon'][:]
     restart_grid_coords = np.vstack((gridcell_lat, gridcell_lon)).T
     restart_tree = cKDTree(restart_grid_coords)
+    
+    # Build mappings for ds1 (surface file) if it's 2D format
+    # Now that we have restart coordinates, we can build the mapping
+    if grid_format_ds1 == '2d' and 'landfrac' in ds1.variables and len(grid_info['lat_idx_map_ds1']) == 0:
+        print("Building ds1 (surface file) 2D index mappings from restart coordinates...")
+        landmask_ds1 = ds1.variables['landfrac'][:]
+        lat_coords_ds1 = ds1.variables[dim1_ds1][:]
+        lon_coords_ds1 = ds1.variables[dim2_ds1][:]
+        grid_info['n_lon_ds1'] = len(lon_coords_ds1)
+        
+        # Filter for land gridcells in ds1 (2D mask)
+        valid_mask_ds1 = (landmask_ds1 > 0)
+        valid_lat_indices_ds1, valid_lon_indices_ds1 = np.where(valid_mask_ds1)
+        
+        # Build KDTree for ds1 coordinates
+        ds1_coords = np.vstack((lat_coords_ds1[valid_lat_indices_ds1], 
+                                 lon_coords_ds1[valid_lon_indices_ds1])).T
+        ds1_tree = cKDTree(ds1_coords)
+        
+        # Query restart coordinates to find closest ds1 gridcell
+        _, ds1_matched_indices = ds1_tree.query(restart_grid_coords, k=1)
+        
+        # Create mapping: restart_idx -> (lat_idx_ds1, lon_idx_ds1)
+        for restart_idx in range(len(gridcell_lat)):
+            if ds1_matched_indices[restart_idx] < len(valid_lat_indices_ds1):
+                matched_flat_idx = ds1_matched_indices[restart_idx]
+                grid_info['lat_idx_map_ds1'][restart_idx] = valid_lat_indices_ds1[matched_flat_idx]
+                grid_info['lon_idx_map_ds1'][restart_idx] = valid_lon_indices_ds1[matched_flat_idx]
+        print(f"  Built {len(grid_info['lat_idx_map_ds1'])} ds1 2D mappings")
     
     # Forcing file coordinates
     forcing_lats = list(ds_forcing.values())[0].variables['LATIXY'][0, :]
@@ -299,14 +472,43 @@ def generate_base_dataset(variable_definitions):
     forcing_tree = cKDTree(forcing_grid_coords)
     
     # Query coordinates for valid gridcells
-    query_coords = np.array([(lats[i], lons[i]) for i in valid_gridcells])
     _, all_restart_indices = restart_tree.query(query_coords, k=1)
     _, all_forcing_indices = forcing_tree.query(query_coords, k=1)
     
-    print("✅ KDTree indices built")
+    # Deduplicate: ensure each unique restart gridcell is only processed once
+    # Multiple (lat,lon) pairs may map to the same restart gridcell
+    seen_restart_indices = {}
+    unique_indices = []
+    for i, restart_idx in enumerate(all_restart_indices):
+        if restart_idx not in seen_restart_indices:
+            unique_indices.append(i)
+            seen_restart_indices[restart_idx] = i
+    
+    # Filter to unique gridcells
+    valid_gridcells = valid_gridcells[unique_indices]
+    all_restart_indices = all_restart_indices[unique_indices]
+    all_forcing_indices = all_forcing_indices[unique_indices]
+    lats = lats[unique_indices]
+    lons = lons[unique_indices]
+    
+    # Update grid_info mappings to reflect deduplication
+    if grid_format == '2d':
+        old_lat_idx_map = grid_info['lat_idx_map'].copy()
+        old_lon_idx_map = grid_info['lon_idx_map'].copy()
+        grid_info['lat_idx_map'] = {new_idx: old_lat_idx_map[old_idx] 
+                                    for new_idx, old_idx in enumerate(unique_indices)}
+        grid_info['lon_idx_map'] = {new_idx: old_lon_idx_map[old_idx] 
+                                    for new_idx, old_idx in enumerate(unique_indices)}
+    
+    print(f"Total unique gridcells (after deduplication): {len(valid_gridcells)}")
+    print(f"Expected: 20975 gridcells")
+    if len(valid_gridcells) != 20975:
+        print(f"⚠️  Warning: Expected 20975 gridcells but got {len(valid_gridcells)}")
+    
+    print("KDTree indices built and deduplication completed")
     
     # Pre-load forcing data into memory for optimization
-    print("🚀 Pre-loading forcing data into memory...")
+    print("Pre-loading forcing data into memory...")
     forcing_data = {}
     for var_name, ds in ds_forcing.items():
         forcing_data[var_name] = ds.variables[var_name][:, 0, :]  # (time, 1, grid_cells)
@@ -327,7 +529,7 @@ def generate_base_dataset(variable_definitions):
         pft_map[grid_id] = np.where(pft_gridcell_index == grid_id)[0]
         column_map[grid_id] = np.where(column_gridcell_index == grid_id)[0]
     
-    print("✅ Index mappings built")
+    print("Index mappings built")
     
     # Process data in batches
     batch_size = 1000
@@ -347,7 +549,7 @@ def generate_base_dataset(variable_definitions):
         print(f"  batch_gridcells range: {batch_gridcells[0]} to {batch_gridcells[-1]}")
         print(f"  Unique gridcells in batch: {len(set(batch_gridcells))}")
         if len(set(batch_gridcells)) != len(batch_gridcells):
-            print(f"  ⚠️ WARNING: Duplicate gridcells detected in batch!")
+            print(f"WARNING: Duplicate gridcells detected in batch!")
         batch_start_time = time.time()
         
         # Initialize data dictionary dynamically - completely from CNP_IO file
@@ -387,13 +589,14 @@ def generate_base_dataset(variable_definitions):
             data_dict[f'Y_{var_name}'] = []
         
         # Process each gridcell in the batch
-        for k, gridcell_idx in enumerate(batch_gridcells):
+        for k in range(len(batch_gridcells)):
             if k % 100 == 0:
-                print(f"  Processing gridcell {k}/{len(batch_gridcells)} (idx={gridcell_idx})")
+                print(f"  Processing gridcell {k}/{len(batch_gridcells)}")
             
             # Get indices
-            restart_idx = batch_restart_indices[k]
-            forcing_idx = batch_forcing_indices[k]
+            restart_idx = int(batch_restart_indices[k])  # Index for ds1 (surface) and ds10 (restart) files
+            forcing_idx = int(batch_forcing_indices[k])  # Index for forcing files
+            gridcell_idx_history = batch_gridcells[k]  # Index for ds2 (history) file - may be 2D flattened
             gridcell_id = restart_idx + 1
             
             pft_indices_for_cell = pft_map.get(gridcell_id, [])
@@ -409,63 +612,213 @@ def generate_base_dataset(variable_definitions):
             if k == 999:
                 print(f"    After 1000th gridcell: Latitude={len(data_dict['Latitude'])}, FLDS={len(data_dict.get('FLDS', []))}")
             
-            # Process forcing data (time series variables) - store raw data like original script
+            # Process forcing data (time series variables)
             for var_name in variable_definitions['time_series_vars']:
                 if var_name in forcing_data:
                     time_series = forcing_data[var_name][:, forcing_idx]
-                    # Store raw time series like original script (will be processed later)
-                    data_dict[var_name].append(time_series)
+                    # If using monthly forcing, data is already monthly average, store as-is
+                    # Otherwise, store raw time series (will be processed later in post-processing)
+                    if use_monthly_forcing:
+                        # Data is already monthly average, convert to list of floats
+                        data_dict[var_name].append(time_series.tolist() if isinstance(time_series, np.ndarray) else list(time_series))
+                    else:
+                        # Store raw time series (will be processed later)
+                        data_dict[var_name].append(time_series)
                 else:
                     data_dict[var_name].append([])  # Add empty list if variable not found
             
             # Process surface properties
             for var_name in variable_definitions['surface_vars']:
                 if var_name == 'Latitude':
-                    data_dict[var_name].append(lats[gridcell_idx])
+                    # Use global index (start_idx + k) since lats array is already filtered for valid gridcells
+                    global_idx = start_idx + k
+                    data_dict[var_name].append(lats[global_idx])
                 elif var_name == 'Longitude':
-                    data_dict[var_name].append(lons[gridcell_idx])
+                    # Use global index (start_idx + k) since lons array is already filtered for valid gridcells
+                    global_idx = start_idx + k
+                    data_dict[var_name].append(lons[global_idx])
                 elif var_name == 'landfrac':
                     # landfrac comes from history file (ds2), not surface file (ds1)
                     # Convert to float64 to match reference file
-                    landfrac_val = ds2.variables['landfrac'][gridcell_idx]
+                    global_idx = start_idx + k
+                    if grid_format == '1d':
+                        landfrac_val = ds2.variables['landfrac'][gridcell_idx_history]
+                    elif grid_format == '2d':
+                        lat_idx = grid_info['lat_idx_map'].get(global_idx, None)
+                        lon_idx = grid_info['lon_idx_map'].get(global_idx, None)
+                        if lat_idx is not None and lon_idx is not None:
+                            landfrac_val = ds2.variables['landfrac'][lat_idx, lon_idx]
+                        else:
+                            # Fallback: use flat index
+                            landfrac_val = ds2.variables['landfrac'].flatten()[gridcell_idx_history]
+                    else:
+                        landfrac_val = ds2.variables['landfrac'][gridcell_idx_history]
+                    
                     if hasattr(landfrac_val, 'data'):  # MaskedArray
                         landfrac_val = landfrac_val.data
+                    # Ensure scalar value
+                    if isinstance(landfrac_val, np.ndarray) and landfrac_val.size > 1:
+                        landfrac_val = landfrac_val.item() if landfrac_val.size == 1 else landfrac_val[0]
                     data_dict[var_name].append(float(landfrac_val))
                 elif var_name == 'PCT_CLAY':
                     # Store PCT_CLAY as a list (all levels)
-                    pct_clay_data = ds1.variables['PCT_CLAY'][:, gridcell_idx]
-                    # Convert MaskedArray to regular array and ensure float64
-                    if hasattr(pct_clay_data, 'data'):  # MaskedArray
-                        pct_clay_data = pct_clay_data.data
-                    data_dict[var_name].append(pct_clay_data.astype(np.float64).tolist())
+                    # PCT_CLAY is from ds1, check ds1's grid format and variable dimensions
+                    var_obj = ds1.variables['PCT_CLAY']
+                    var_dims = var_obj.dimensions
+                    grid_format_ds1 = grid_info['format_ds1']
+                    dim1_ds1 = grid_info['dim1_ds1']
+                    dim2_ds1 = grid_info['dim2_ds1']
+                    
+                    try:
+                        if grid_format_ds1 == '2d' and len(var_dims) == 3 and var_dims[1] == dim1_ds1 and var_dims[2] == dim2_ds1:
+                            # Variable is (level, lat, lon) in ds1 - use 2D indexing
+                            lat_idx = grid_info['lat_idx_map_ds1'].get(restart_idx, None)
+                            lon_idx = grid_info['lon_idx_map_ds1'].get(restart_idx, None)
+                            if lat_idx is not None and lon_idx is not None:
+                                pct_clay_data = var_obj[:, lat_idx, lon_idx]
+                            else:
+                                # Fallback: use 1D indexing if mapping not available
+                                pct_clay_data = var_obj[:, restart_idx] if restart_idx < var_obj.shape[-1] else var_obj[:, 0]
+                        else:
+                            # Variable is (level, gridcell) or 1D format - use 1D indexing with restart_idx
+                            if len(var_dims) >= 2 and restart_idx < var_obj.shape[-1]:
+                                pct_clay_data = var_obj[:, restart_idx]
+                            else:
+                                print(f"  Warning: restart_idx {restart_idx} out of bounds for PCT_CLAY (shape: {var_obj.shape})")
+                                pct_clay_data = np.zeros(var_obj.shape[0])
+                        
+                        # Convert to numpy array
+                        pct_clay_data = np.asarray(pct_clay_data)
+                        # Convert MaskedArray to regular array and ensure float64
+                        if hasattr(pct_clay_data, 'data'):  # MaskedArray
+                            pct_clay_data = pct_clay_data.data
+                        data_dict[var_name].append(pct_clay_data.astype(np.float64).tolist())
+                    except (IndexError, ValueError, TypeError) as e:
+                        print(f"  Error processing PCT_CLAY: {e}")
+                        data_dict[var_name].append([])
                 elif var_name == 'PCT_SAND':
                     # Store PCT_SAND as a list (all levels)
-                    pct_sand_data = ds1.variables['PCT_SAND'][:, gridcell_idx]
-                    # Convert MaskedArray to regular array and ensure float64
-                    if hasattr(pct_sand_data, 'data'):  # MaskedArray
-                        pct_sand_data = pct_sand_data.data
-                    data_dict[var_name].append(pct_sand_data.astype(np.float64).tolist())
+                    # PCT_SAND is from ds1, check ds1's grid format and variable dimensions
+                    var_obj = ds1.variables['PCT_SAND']
+                    var_dims = var_obj.dimensions
+                    grid_format_ds1 = grid_info['format_ds1']
+                    dim1_ds1 = grid_info['dim1_ds1']
+                    dim2_ds1 = grid_info['dim2_ds1']
+                    
+                    try:
+                        if grid_format_ds1 == '2d' and len(var_dims) == 3 and var_dims[1] == dim1_ds1 and var_dims[2] == dim2_ds1:
+                            # Variable is (level, lat, lon) in ds1 - use 2D indexing
+                            lat_idx = grid_info['lat_idx_map_ds1'].get(restart_idx, None)
+                            lon_idx = grid_info['lon_idx_map_ds1'].get(restart_idx, None)
+                            if lat_idx is not None and lon_idx is not None:
+                                pct_sand_data = var_obj[:, lat_idx, lon_idx]
+                            else:
+                                # Fallback: use 1D indexing if mapping not available
+                                pct_sand_data = var_obj[:, restart_idx] if restart_idx < var_obj.shape[-1] else var_obj[:, 0]
+                        else:
+                            # Variable is (level, gridcell) or 1D format - use 1D indexing with restart_idx
+                            if len(var_dims) >= 2 and restart_idx < var_obj.shape[-1]:
+                                pct_sand_data = var_obj[:, restart_idx]
+                            else:
+                                print(f"  Warning: restart_idx {restart_idx} out of bounds for PCT_SAND (shape: {var_obj.shape})")
+                                pct_sand_data = np.zeros(var_obj.shape[0])
+                        
+                        # Convert to numpy array
+                        pct_sand_data = np.asarray(pct_sand_data)
+                        # Convert MaskedArray to regular array and ensure float64
+                        if hasattr(pct_sand_data, 'data'):  # MaskedArray
+                            pct_sand_data = pct_sand_data.data
+                        data_dict[var_name].append(pct_sand_data.astype(np.float64).tolist())
+                    except (IndexError, ValueError, TypeError) as e:
+                        print(f"  Error processing PCT_SAND: {e}")
+                        data_dict[var_name].append([])
                 elif var_name.startswith('PCT_NAT_PFT_') or var_name.startswith('PCT_CLAY_') or var_name.startswith('PCT_SAND_'):
                     # Handle 2D variables with level indices
                     if '_' in var_name:
                         level_idx = int(var_name.split('_')[-1])
                         base_var = '_'.join(var_name.split('_')[:-1])  # e.g., 'PCT_CLAY'
                         if base_var in ds1.variables:
-                            pct_val = ds1.variables[base_var][level_idx, gridcell_idx]
-                            # Convert MaskedArray to regular array and ensure float64
-                            if hasattr(pct_val, 'data'):  # MaskedArray
-                                pct_val = pct_val.data
-                            data_dict[var_name].append(float(pct_val))
+                            var_obj = ds1.variables[base_var]
+                            var_dims = var_obj.dimensions
+                            var_shape = var_obj.shape
+                            grid_format_ds1 = grid_info['format_ds1']
+                            dim1_ds1 = grid_info['dim1_ds1']
+                            dim2_ds1 = grid_info['dim2_ds1']
+                            
+                            try:
+                                if grid_format_ds1 == '2d' and len(var_dims) == 3 and var_dims[1] == dim1_ds1 and var_dims[2] == dim2_ds1:
+                                    # Variable is (level, lat, lon) in ds1 - use 2D indexing
+                                    lat_idx = grid_info['lat_idx_map_ds1'].get(restart_idx, None)
+                                    lon_idx = grid_info['lon_idx_map_ds1'].get(restart_idx, None)
+                                    if lat_idx is not None and lon_idx is not None and level_idx < var_shape[0]:
+                                        pct_val_raw = var_obj[level_idx, lat_idx, lon_idx]
+                                        pct_val = np.asarray(pct_val_raw).item()
+                                    else:
+                                        # Fallback: use 1D indexing if mapping not available
+                                        if level_idx < var_shape[0] and restart_idx < var_shape[1]:
+                                            pct_val_raw = var_obj[level_idx, restart_idx]
+                                            pct_val = np.asarray(pct_val_raw).item()
+                                        else:
+                                            pct_val = 0.0
+                                else:
+                                    # Variable is (level, gridcell) or 1D format - use 1D indexing with restart_idx
+                                    if level_idx < var_shape[0] and restart_idx < var_shape[1]:
+                                        pct_val_raw = var_obj[level_idx, restart_idx]
+                                        pct_val = np.asarray(pct_val_raw).item()
+                                    else:
+                                        print(f"  Warning: Index out of bounds for {var_name} (level_idx={level_idx}, restart_idx={restart_idx}, shape={var_shape})")
+                                        pct_val = 0.0
+                                
+                                # Final check: ensure we have a numeric value
+                                if not isinstance(pct_val, (int, float, np.integer, np.floating)):
+                                    pct_val = float(pct_val)
+                                
+                                data_dict[var_name].append(float(pct_val))
+                            except (IndexError, ValueError, TypeError, AttributeError) as e:
+                                print(f"  Error processing {var_name}: {e}")
+                                data_dict[var_name].append(0.0)
                         else:
                             data_dict[var_name].append(0.0)
                     else:
                         data_dict[var_name].append(0.0)
                 elif var_name in ds1.variables:
-                    # 1D variables
-                    val = ds1.variables[var_name][gridcell_idx]
-                    # Convert MaskedArray to regular array
-                    if hasattr(val, 'data'):  # MaskedArray
-                        val = val.data
+                    # ds1 variables are indexed by restart_idx (gridcell index), not gridcell_idx_history
+                    var_obj = ds1.variables[var_name]
+                    var_dims = var_obj.dimensions
+                    var_shape = var_obj.shape
+                    
+                    try:
+                        if len(var_dims) == 1:
+                            # Variable is 1D (gridcell) - typical for surface scalar variables
+                            if restart_idx < var_shape[0]:
+                                # Read value and immediately convert to scalar using np.asarray().item()
+                                # This handles memoryview, MaskedArray, and other netCDF types
+                                val = np.asarray(var_obj[restart_idx]).item()
+                            else:
+                                print(f"  Error: restart_idx {restart_idx} out of bounds for {var_name} (shape: {var_shape})")
+                                val = 0.0
+                        else:
+                            # Multi-dimensional variable - surface variables should typically be 1D
+                            # This might be incorrectly classified, but try to handle it
+                            print(f"  Warning: {var_name} has {len(var_dims)} dimensions but is in surface_vars")
+                            # For multi-dim, assume last dimension is gridcell, take first element of other dims
+                            if restart_idx < var_shape[-1]:
+                                indices = [0] * (len(var_shape) - 1) + [restart_idx]
+                                val = np.asarray(var_obj[tuple(indices)]).item()
+                            else:
+                                val = 0.0
+                    except (IndexError, ValueError, TypeError, AttributeError) as e:
+                        print(f"  Error indexing {var_name} (dims: {var_dims}, shape: {var_shape}, restart_idx: {restart_idx}): {e}")
+                        val = 0.0
+                    
+                    # Final check: ensure we have a numeric value
+                    if not isinstance(val, (int, float, np.integer, np.floating)):
+                        try:
+                            val = float(val)
+                        except (ValueError, TypeError) as e:
+                            print(f"  Error: Could not convert {var_name} to float: {val}, type: {type(val)}, error: {e}")
+                            val = 0.0
+                    
                     # Handle integer variables
                     if var_name in ['SOIL_COLOR', 'SOIL_ORDER']:
                         data_dict[var_name].append(int(val))
@@ -477,10 +830,72 @@ def generate_base_dataset(variable_definitions):
             # Process scalar variables from history file
             for var_name in variable_definitions['scalar_vars']:
                 if var_name in ds2.variables:
-                    val = ds2.variables[var_name][0, gridcell_idx]
-                    # Convert MaskedArray to regular array
-                    if hasattr(val, 'data'):  # MaskedArray
-                        val = val.data
+                    var_obj = ds2.variables[var_name]
+                    var_dims = var_obj.dimensions
+                    
+                    try:
+                        # Check if variable has time dimension
+                        if len(var_dims) >= 2 and var_dims[0] == 'time':
+                            # Variable has (time, ...) dimensions
+                            if grid_format == '2d' and len(var_dims) == 3 and var_dims[1] == dim1 and var_dims[2] == dim2:
+                                # Variable is (time, lat, lon)
+                                global_idx = start_idx + k
+                                lat_idx = grid_info['lat_idx_map'].get(global_idx, None)
+                                lon_idx = grid_info['lon_idx_map'].get(global_idx, None)
+                                if lat_idx is not None and lon_idx is not None:
+                                    val_raw = var_obj[0, lat_idx, lon_idx]
+                                    val = np.asarray(val_raw).item()
+                                else:
+                                    val_raw = var_obj[0, :, :].flatten()[gridcell_idx_history]
+                                    val = np.asarray(val_raw).item()
+                            else:
+                                # Variable is (time, gridcell) or similar - use gridcell_idx_history for ds2
+                                if grid_format == '1d' and gridcell_idx_history < var_obj.shape[1]:
+                                    val_raw = var_obj[0, gridcell_idx_history]
+                                    val = np.asarray(val_raw).item()
+                                else:
+                                    # For 2D format but variable is not 2D, try using gridcell_idx_history
+                                    if gridcell_idx_history < var_obj.shape[1]:
+                                        val_raw = var_obj[0, gridcell_idx_history]
+                                    else:
+                                        val_raw = var_obj[0, 0]
+                                    val = np.asarray(val_raw).item()
+                        else:
+                            # Variable doesn't have time dimension
+                            if grid_format == '2d' and len(var_dims) == 2 and var_dims[0] == dim1 and var_dims[1] == dim2:
+                                global_idx = start_idx + k
+                                lat_idx = grid_info['lat_idx_map'].get(global_idx, None)
+                                lon_idx = grid_info['lon_idx_map'].get(global_idx, None)
+                                if lat_idx is not None and lon_idx is not None:
+                                    val_raw = var_obj[lat_idx, lon_idx]
+                                    val = np.asarray(val_raw).item()
+                                else:
+                                    val_raw = var_obj[:].flatten()[gridcell_idx_history]
+                                    val = np.asarray(val_raw).item()
+                            else:
+                                # Variable is 1D or other format - use gridcell_idx_history for ds2
+                                if grid_format == '1d' and gridcell_idx_history < var_obj.shape[0]:
+                                    val_raw = var_obj[gridcell_idx_history]
+                                    val = np.asarray(val_raw).item()
+                                else:
+                                    # Try to handle gracefully
+                                    if gridcell_idx_history < var_obj.shape[0]:
+                                        val_raw = var_obj[gridcell_idx_history]
+                                    else:
+                                        val_raw = var_obj[0]
+                                    val = np.asarray(val_raw).item()
+                        
+                        # Final check: ensure we have a numeric value (val should already be scalar from np.asarray().item())
+                        if not isinstance(val, (int, float, np.integer, np.floating)):
+                            try:
+                                val = float(val)
+                            except (ValueError, TypeError) as e:
+                                print(f"  Error: Could not convert {var_name} to float: {val}, type: {type(val)}, error: {e}")
+                                val = 0.0
+                    except (IndexError, ValueError, TypeError, AttributeError) as e:
+                        print(f"  Error processing {var_name} (dims: {var_dims}): {e}")
+                        val = 0.0
+                    
                     # Handle integer variables
                     if var_name in ['SOIL_COLOR', 'SOIL_ORDER']:
                         data_dict[var_name].append(int(val))
@@ -491,7 +906,17 @@ def generate_base_dataset(variable_definitions):
                     y_vals = []
                     for ds_h0 in ds_h0_list:
                         if var_name in ds_h0.variables:
-                            y_val = ds_h0.variables[var_name][0, gridcell_idx]
+                            # Y variables are from final_spinup history files (same format as ds2)
+                            if grid_format == '2d':
+                                global_idx = start_idx + k
+                                lat_idx = grid_info['lat_idx_map'].get(global_idx, None)
+                                lon_idx = grid_info['lon_idx_map'].get(global_idx, None)
+                                if lat_idx is not None and lon_idx is not None:
+                                    y_val = ds_h0.variables[var_name][0, lat_idx, lon_idx]
+                                else:
+                                    y_val = ds_h0.variables[var_name][0, :, :].flatten()[gridcell_idx_history]
+                            else:
+                                y_val = ds_h0.variables[var_name][0, gridcell_idx_history]
                             # Convert MaskedArray to regular array
                             if hasattr(y_val, 'data'):  # MaskedArray
                                 y_val = y_val.data
@@ -633,7 +1058,7 @@ def generate_base_dataset(variable_definitions):
         lengths = {key: len(values) for key, values in data_dict.items()}
         unique_lengths = set(lengths.values())
         if len(unique_lengths) > 1:
-            print(f"  ❌ Length mismatch detected!")
+            print(f"Length mismatch detected!")
             for length in unique_lengths:
                 vars_with_length = [k for k, v in lengths.items() if v == length]
                 print(f"    Length {length}: {len(vars_with_length)} variables")
@@ -648,7 +1073,7 @@ def generate_base_dataset(variable_definitions):
         batch_files.append(batch_save_path)  # Add to list for post-processing
         
         batch_time = time.time() - batch_start_time
-        print(f"✅ Batch {batch_number} completed: {batch_time:.2f}s")
+        print(f"    Batch {batch_number} completed: {batch_time:.2f}s")
         print(f"    Path: {batch_save_path}")
         print(f"    Shape: {df_batch.shape}")
         print(f"    Columns: {len(df_batch.columns)}")
@@ -665,14 +1090,17 @@ def generate_base_dataset(variable_definitions):
     for ds_r in ds_r_list:
         ds_r.close()
     
-    print("✅ All NetCDF files closed")
-    print(f"✅ Base dataset generation completed!")
+    print("All NetCDF files closed")
+    print(f"Base dataset generation completed!")
     print(f"Total batches: {batch_number - 1}")
     print(f"Output directory: {output_dir}")
     
     # Post-processing like original script
     print(f"\n{'='*80}")
-    print("POST-PROCESSING: Converting to monthly averages and expanding variables")
+    if use_monthly_forcing:
+        print("POST-PROCESSING: Expanding variables (skipping monthly average conversion - data already monthly)")
+    else:
+        print("POST-PROCESSING: Converting to monthly averages and expanding variables")
     print(f"{'='*80}")
     
     # Process all generated files
@@ -682,12 +1110,15 @@ def generate_base_dataset(variable_definitions):
         # Load the file
         df = pd.read_pickle(file_path)
         
-        # Process time series columns (convert to monthly averages)
-        print(f"  Processing time series columns...")
-        for col in variable_definitions['time_series_vars']:
-            if col in df.columns:
-                print(f"    Processing {col}...")
-                df[col] = df[col].apply(calculate_monthly_avg)
+        # Process time series columns (convert to monthly averages only if not using pre-computed monthly data)
+        if not use_monthly_forcing:
+            print(f"  Processing time series columns (converting to monthly averages)...")
+            for col in variable_definitions['time_series_vars']:
+                if col in df.columns:
+                    print(f"    Processing {col}...")
+                    df[col] = df[col].apply(calculate_monthly_avg)
+        else:
+            print(f"  Skipping monthly average conversion (data already monthly)")
         
         # Process list columns (expand PCT variables)
         print(f"  Processing list columns...")
@@ -703,15 +1134,19 @@ def generate_base_dataset(variable_definitions):
         
         # Save processed file
         df.to_pickle(file_path)
-        print(f"  ✅ Post-processing completed for {os.path.basename(file_path)}")
+        print(f"  Post-processing completed for {os.path.basename(file_path)}")
     
     return output_dir
 
-def generate_base_dataset_initial_only(variable_definitions):
+def generate_base_dataset_initial_only(variable_definitions, use_monthly_forcing=False, forcing_year_range="1980-1999"):
     """Generate base training dataset for initial-only mode (excludes Y_ variables from final_spinup files)"""
     print(f"\n{'='*80}")
     print("STEP 1: Base Dataset Generation (Initial-Only Mode)")
     print(f"{'='*80}")
+    
+    if use_monthly_forcing:
+        print("📊 Using pre-computed monthly average forcing data")
+        print(f"   Year range: {forcing_year_range}")
     
     # File paths from config
     surface_data_files = config.surface_data_files
@@ -723,13 +1158,18 @@ def generate_base_dataset_initial_only(variable_definitions):
     forcing_files = {}
     for var_name in variable_definitions['time_series_vars']:
         # Look for files containing the variable name in forcing_netcdf directory
-        pattern = os.path.join(config.forcing_netcdf_output_dir, f'*{var_name}*1980-1999.nc')
+        # Support both old format (*VAR*1980-1999.nc) and new format (*VAR*2004-2023.nc)
+        pattern = os.path.join(config.forcing_netcdf_output_dir, f'*{var_name}*{forcing_year_range}.nc')
         matching_files = glob.glob(pattern)
+        if not matching_files:
+            # Try alternative pattern without year range in filename
+            pattern_alt = os.path.join(config.forcing_netcdf_output_dir, f'{var_name}_*.nc')
+            matching_files = glob.glob(pattern_alt)
         if matching_files:
             forcing_files[var_name] = matching_files[0]  # Use first match
-            print(f"✅ Found forcing file: {os.path.basename(matching_files[0])}")
+            print(f"Found forcing file: {os.path.basename(matching_files[0])}")
         else:
-            print(f"⚠️  Forcing file not found for {var_name}: {pattern}")
+            print(f"Forcing file not found for {var_name}: {pattern}")
     
     print(f"Found {len(forcing_files)} forcing files")
     
@@ -749,7 +1189,7 @@ def generate_base_dataset_initial_only(variable_definitions):
     ds_forcing = {}
     for var_name, file_path in forcing_files.items():
         ds_forcing[var_name] = nc.Dataset(file_path)
-        print(f"✅ Forcing data loaded: {var_name}")
+        print(f"Forcing data loaded: {var_name}")
     
     print(f"All files loaded in {time.time() - start_time:.2f} seconds")
     
@@ -786,10 +1226,10 @@ def generate_base_dataset_initial_only(variable_definitions):
     _, all_restart_indices = restart_tree.query(query_coords, k=1)
     _, all_forcing_indices = forcing_tree.query(query_coords, k=1)
     
-    print("✅ KDTree indices built")
+    print("KDTree indices built")
     
     # Pre-load forcing data into memory for optimization
-    print("🚀 Pre-loading forcing data into memory...")
+    print("Pre-loading forcing data into memory...")
     forcing_data = {}
     for var_name, ds in ds_forcing.items():
         forcing_data[var_name] = ds.variables[var_name][:, 0, :]  # (time, 1, grid_cells)
@@ -810,7 +1250,7 @@ def generate_base_dataset_initial_only(variable_definitions):
         pft_map[grid_id] = np.where(pft_gridcell_index == grid_id)[0]
         column_map[grid_id] = np.where(column_gridcell_index == grid_id)[0]
     
-    print("✅ Index mappings built")
+    print("Index mappings built")
     
     # Process data in batches
     batch_size = 1000
@@ -869,13 +1309,14 @@ def generate_base_dataset_initial_only(variable_definitions):
             # NOTE: We do NOT add Y_ variables for initial-only mode
         
         # Process each gridcell in the batch
-        for k, gridcell_idx in enumerate(batch_gridcells):
+        for k in range(len(batch_gridcells)):
             if k % 100 == 0:
-                print(f"  Processing gridcell {k}/{len(batch_gridcells)} (idx={gridcell_idx})")
+                print(f"  Processing gridcell {k}/{len(batch_gridcells)}")
             
             # Get indices
-            restart_idx = batch_restart_indices[k]
-            forcing_idx = batch_forcing_indices[k]
+            restart_idx = int(batch_restart_indices[k])  # Index for ds1 (surface) and ds10 (restart) files
+            forcing_idx = int(batch_forcing_indices[k])  # Index for forcing files
+            gridcell_idx_history = batch_gridcells[k]  # Index for ds2 (history) file - may be 2D flattened
             gridcell_id = restart_idx + 1
             
             pft_indices_for_cell = pft_map.get(gridcell_id, [])
@@ -889,63 +1330,213 @@ def generate_base_dataset_initial_only(variable_definitions):
             if k == 999:
                 print(f"    After 1000th gridcell: Latitude={len(data_dict['Latitude'])}, FLDS={len(data_dict.get('FLDS', []))}")
             
-            # Process forcing data (time series variables) - store raw data like original script
+            # Process forcing data (time series variables)
             for var_name in variable_definitions['time_series_vars']:
                 if var_name in forcing_data:
                     time_series = forcing_data[var_name][:, forcing_idx]
-                    # Store raw time series like original script (will be processed later)
-                    data_dict[var_name].append(time_series)
+                    # If using monthly forcing, data is already monthly average, store as-is
+                    # Otherwise, store raw time series (will be processed later in post-processing)
+                    if use_monthly_forcing:
+                        # Data is already monthly average, convert to list of floats
+                        data_dict[var_name].append(time_series.tolist() if isinstance(time_series, np.ndarray) else list(time_series))
+                    else:
+                        # Store raw time series (will be processed later)
+                        data_dict[var_name].append(time_series)
                 else:
                     data_dict[var_name].append([])  # Add empty list if variable not found
             
             # Process surface properties
             for var_name in variable_definitions['surface_vars']:
                 if var_name == 'Latitude':
-                    data_dict[var_name].append(lats[gridcell_idx])
+                    # Use global index (start_idx + k) since lats array is already filtered for valid gridcells
+                    global_idx = start_idx + k
+                    data_dict[var_name].append(lats[global_idx])
                 elif var_name == 'Longitude':
-                    data_dict[var_name].append(lons[gridcell_idx])
+                    # Use global index (start_idx + k) since lons array is already filtered for valid gridcells
+                    global_idx = start_idx + k
+                    data_dict[var_name].append(lons[global_idx])
                 elif var_name == 'landfrac':
                     # landfrac comes from history file (ds2), not surface file (ds1)
                     # Convert to float64 to match reference file
-                    landfrac_val = ds2.variables['landfrac'][gridcell_idx]
+                    global_idx = start_idx + k
+                    if grid_format == '1d':
+                        landfrac_val = ds2.variables['landfrac'][gridcell_idx_history]
+                    elif grid_format == '2d':
+                        lat_idx = grid_info['lat_idx_map'].get(global_idx, None)
+                        lon_idx = grid_info['lon_idx_map'].get(global_idx, None)
+                        if lat_idx is not None and lon_idx is not None:
+                            landfrac_val = ds2.variables['landfrac'][lat_idx, lon_idx]
+                        else:
+                            # Fallback: use flat index
+                            landfrac_val = ds2.variables['landfrac'].flatten()[gridcell_idx_history]
+                    else:
+                        landfrac_val = ds2.variables['landfrac'][gridcell_idx_history]
+                    
                     if hasattr(landfrac_val, 'data'):  # MaskedArray
                         landfrac_val = landfrac_val.data
+                    # Ensure scalar value
+                    if isinstance(landfrac_val, np.ndarray) and landfrac_val.size > 1:
+                        landfrac_val = landfrac_val.item() if landfrac_val.size == 1 else landfrac_val[0]
                     data_dict[var_name].append(float(landfrac_val))
                 elif var_name == 'PCT_CLAY':
                     # Store PCT_CLAY as a list (all levels)
-                    pct_clay_data = ds1.variables['PCT_CLAY'][:, gridcell_idx]
-                    # Convert MaskedArray to regular array and ensure float64
-                    if hasattr(pct_clay_data, 'data'):  # MaskedArray
-                        pct_clay_data = pct_clay_data.data
-                    data_dict[var_name].append(pct_clay_data.astype(np.float64).tolist())
+                    # PCT_CLAY is from ds1, check ds1's grid format and variable dimensions
+                    var_obj = ds1.variables['PCT_CLAY']
+                    var_dims = var_obj.dimensions
+                    grid_format_ds1 = grid_info['format_ds1']
+                    dim1_ds1 = grid_info['dim1_ds1']
+                    dim2_ds1 = grid_info['dim2_ds1']
+                    
+                    try:
+                        if grid_format_ds1 == '2d' and len(var_dims) == 3 and var_dims[1] == dim1_ds1 and var_dims[2] == dim2_ds1:
+                            # Variable is (level, lat, lon) in ds1 - use 2D indexing
+                            lat_idx = grid_info['lat_idx_map_ds1'].get(restart_idx, None)
+                            lon_idx = grid_info['lon_idx_map_ds1'].get(restart_idx, None)
+                            if lat_idx is not None and lon_idx is not None:
+                                pct_clay_data = var_obj[:, lat_idx, lon_idx]
+                            else:
+                                # Fallback: use 1D indexing if mapping not available
+                                pct_clay_data = var_obj[:, restart_idx] if restart_idx < var_obj.shape[-1] else var_obj[:, 0]
+                        else:
+                            # Variable is (level, gridcell) or 1D format - use 1D indexing with restart_idx
+                            if len(var_dims) >= 2 and restart_idx < var_obj.shape[-1]:
+                                pct_clay_data = var_obj[:, restart_idx]
+                            else:
+                                print(f"  Warning: restart_idx {restart_idx} out of bounds for PCT_CLAY (shape: {var_obj.shape})")
+                                pct_clay_data = np.zeros(var_obj.shape[0])
+                        
+                        # Convert to numpy array
+                        pct_clay_data = np.asarray(pct_clay_data)
+                        # Convert MaskedArray to regular array and ensure float64
+                        if hasattr(pct_clay_data, 'data'):  # MaskedArray
+                            pct_clay_data = pct_clay_data.data
+                        data_dict[var_name].append(pct_clay_data.astype(np.float64).tolist())
+                    except (IndexError, ValueError, TypeError) as e:
+                        print(f"  Error processing PCT_CLAY: {e}")
+                        data_dict[var_name].append([])
                 elif var_name == 'PCT_SAND':
                     # Store PCT_SAND as a list (all levels)
-                    pct_sand_data = ds1.variables['PCT_SAND'][:, gridcell_idx]
-                    # Convert MaskedArray to regular array and ensure float64
-                    if hasattr(pct_sand_data, 'data'):  # MaskedArray
-                        pct_sand_data = pct_sand_data.data
-                    data_dict[var_name].append(pct_sand_data.astype(np.float64).tolist())
+                    # PCT_SAND is from ds1, check ds1's grid format and variable dimensions
+                    var_obj = ds1.variables['PCT_SAND']
+                    var_dims = var_obj.dimensions
+                    grid_format_ds1 = grid_info['format_ds1']
+                    dim1_ds1 = grid_info['dim1_ds1']
+                    dim2_ds1 = grid_info['dim2_ds1']
+                    
+                    try:
+                        if grid_format_ds1 == '2d' and len(var_dims) == 3 and var_dims[1] == dim1_ds1 and var_dims[2] == dim2_ds1:
+                            # Variable is (level, lat, lon) in ds1 - use 2D indexing
+                            lat_idx = grid_info['lat_idx_map_ds1'].get(restart_idx, None)
+                            lon_idx = grid_info['lon_idx_map_ds1'].get(restart_idx, None)
+                            if lat_idx is not None and lon_idx is not None:
+                                pct_sand_data = var_obj[:, lat_idx, lon_idx]
+                            else:
+                                # Fallback: use 1D indexing if mapping not available
+                                pct_sand_data = var_obj[:, restart_idx] if restart_idx < var_obj.shape[-1] else var_obj[:, 0]
+                        else:
+                            # Variable is (level, gridcell) or 1D format - use 1D indexing with restart_idx
+                            if len(var_dims) >= 2 and restart_idx < var_obj.shape[-1]:
+                                pct_sand_data = var_obj[:, restart_idx]
+                            else:
+                                print(f"  Warning: restart_idx {restart_idx} out of bounds for PCT_SAND (shape: {var_obj.shape})")
+                                pct_sand_data = np.zeros(var_obj.shape[0])
+                        
+                        # Convert to numpy array
+                        pct_sand_data = np.asarray(pct_sand_data)
+                        # Convert MaskedArray to regular array and ensure float64
+                        if hasattr(pct_sand_data, 'data'):  # MaskedArray
+                            pct_sand_data = pct_sand_data.data
+                        data_dict[var_name].append(pct_sand_data.astype(np.float64).tolist())
+                    except (IndexError, ValueError, TypeError) as e:
+                        print(f"  Error processing PCT_SAND: {e}")
+                        data_dict[var_name].append([])
                 elif var_name.startswith('PCT_NAT_PFT_') or var_name.startswith('PCT_CLAY_') or var_name.startswith('PCT_SAND_'):
                     # Handle 2D variables with level indices
                     if '_' in var_name:
                         level_idx = int(var_name.split('_')[-1])
                         base_var = '_'.join(var_name.split('_')[:-1])  # e.g., 'PCT_CLAY'
                         if base_var in ds1.variables:
-                            pct_val = ds1.variables[base_var][level_idx, gridcell_idx]
-                            # Convert MaskedArray to regular array and ensure float64
-                            if hasattr(pct_val, 'data'):  # MaskedArray
-                                pct_val = pct_val.data
-                            data_dict[var_name].append(float(pct_val))
+                            var_obj = ds1.variables[base_var]
+                            var_dims = var_obj.dimensions
+                            var_shape = var_obj.shape
+                            grid_format_ds1 = grid_info['format_ds1']
+                            dim1_ds1 = grid_info['dim1_ds1']
+                            dim2_ds1 = grid_info['dim2_ds1']
+                            
+                            try:
+                                if grid_format_ds1 == '2d' and len(var_dims) == 3 and var_dims[1] == dim1_ds1 and var_dims[2] == dim2_ds1:
+                                    # Variable is (level, lat, lon) in ds1 - use 2D indexing
+                                    lat_idx = grid_info['lat_idx_map_ds1'].get(restart_idx, None)
+                                    lon_idx = grid_info['lon_idx_map_ds1'].get(restart_idx, None)
+                                    if lat_idx is not None and lon_idx is not None and level_idx < var_shape[0]:
+                                        pct_val_raw = var_obj[level_idx, lat_idx, lon_idx]
+                                        pct_val = np.asarray(pct_val_raw).item()
+                                    else:
+                                        # Fallback: use 1D indexing if mapping not available
+                                        if level_idx < var_shape[0] and restart_idx < var_shape[1]:
+                                            pct_val_raw = var_obj[level_idx, restart_idx]
+                                            pct_val = np.asarray(pct_val_raw).item()
+                                        else:
+                                            pct_val = 0.0
+                                else:
+                                    # Variable is (level, gridcell) or 1D format - use 1D indexing with restart_idx
+                                    if level_idx < var_shape[0] and restart_idx < var_shape[1]:
+                                        pct_val_raw = var_obj[level_idx, restart_idx]
+                                        pct_val = np.asarray(pct_val_raw).item()
+                                    else:
+                                        print(f"  Warning: Index out of bounds for {var_name} (level_idx={level_idx}, restart_idx={restart_idx}, shape={var_shape})")
+                                        pct_val = 0.0
+                                
+                                # Final check: ensure we have a numeric value
+                                if not isinstance(pct_val, (int, float, np.integer, np.floating)):
+                                    pct_val = float(pct_val)
+                                
+                                data_dict[var_name].append(float(pct_val))
+                            except (IndexError, ValueError, TypeError, AttributeError) as e:
+                                print(f"  Error processing {var_name}: {e}")
+                                data_dict[var_name].append(0.0)
                         else:
                             data_dict[var_name].append(0.0)
                     else:
                         data_dict[var_name].append(0.0)
                 elif var_name in ds1.variables:
-                    # 1D variables
-                    val = ds1.variables[var_name][gridcell_idx]
-                    # Convert MaskedArray to regular array
-                    if hasattr(val, 'data'):  # MaskedArray
-                        val = val.data
+                    # ds1 variables are indexed by restart_idx (gridcell index), not gridcell_idx_history
+                    var_obj = ds1.variables[var_name]
+                    var_dims = var_obj.dimensions
+                    var_shape = var_obj.shape
+                    
+                    try:
+                        if len(var_dims) == 1:
+                            # Variable is 1D (gridcell) - typical for surface scalar variables
+                            if restart_idx < var_shape[0]:
+                                # Read value and immediately convert to scalar using np.asarray().item()
+                                # This handles memoryview, MaskedArray, and other netCDF types
+                                val = np.asarray(var_obj[restart_idx]).item()
+                            else:
+                                print(f"  Error: restart_idx {restart_idx} out of bounds for {var_name} (shape: {var_shape})")
+                                val = 0.0
+                        else:
+                            # Multi-dimensional variable - surface variables should typically be 1D
+                            # This might be incorrectly classified, but try to handle it
+                            print(f"  Warning: {var_name} has {len(var_dims)} dimensions but is in surface_vars")
+                            # For multi-dim, assume last dimension is gridcell, take first element of other dims
+                            if restart_idx < var_shape[-1]:
+                                indices = [0] * (len(var_shape) - 1) + [restart_idx]
+                                val = np.asarray(var_obj[tuple(indices)]).item()
+                            else:
+                                val = 0.0
+                    except (IndexError, ValueError, TypeError, AttributeError) as e:
+                        print(f"  Error indexing {var_name} (dims: {var_dims}, shape: {var_shape}, restart_idx: {restart_idx}): {e}")
+                        val = 0.0
+                    
+                    # Final check: ensure we have a numeric value
+                    if not isinstance(val, (int, float, np.integer, np.floating)):
+                        try:
+                            val = float(val)
+                        except (ValueError, TypeError) as e:
+                            print(f"  Error: Could not convert {var_name} to float: {val}, type: {type(val)}, error: {e}")
+                            val = 0.0
+                    
                     # Handle integer variables
                     if var_name in ['SOIL_COLOR', 'SOIL_ORDER']:
                         data_dict[var_name].append(int(val))
@@ -957,10 +1548,9 @@ def generate_base_dataset_initial_only(variable_definitions):
             # Process scalar variables from history file (X only, no Y_ variables for initial-only mode)
             for var_name in variable_definitions['scalar_vars']:
                 if var_name in ds2.variables:
-                    val = ds2.variables[var_name][0, gridcell_idx]
-                    # Convert MaskedArray to regular array
-                    if hasattr(val, 'data'):  # MaskedArray
-                        val = val.data
+                    # ds2 variables are indexed by gridcell_idx_history
+                    val_raw = ds2.variables[var_name][0, gridcell_idx_history]
+                    val = np.asarray(val_raw).item()
                     # Handle integer variables
                     if var_name in ['SOIL_COLOR', 'SOIL_ORDER']:
                         data_dict[var_name].append(int(val))
@@ -1033,7 +1623,7 @@ def generate_base_dataset_initial_only(variable_definitions):
         lengths = {key: len(values) for key, values in data_dict.items()}
         unique_lengths = set(lengths.values())
         if len(unique_lengths) > 1:
-            print(f"  ❌ Length mismatch detected!")
+            print(f"Length mismatch detected!")
             for length in unique_lengths:
                 vars_with_length = [k for k, v in lengths.items() if v == length]
                 print(f"    Length {length}: {len(vars_with_length)} variables")
@@ -1048,7 +1638,7 @@ def generate_base_dataset_initial_only(variable_definitions):
         batch_files.append(batch_save_path)  # Add to list for post-processing
         
         batch_time = time.time() - batch_start_time
-        print(f"✅ Batch {batch_number} completed: {batch_time:.2f}s")
+        print(f"    Batch {batch_number} completed: {batch_time:.2f}s")
         print(f"    Path: {batch_save_path}")
         print(f"    Shape: {df_batch.shape}")
         print(f"    Columns: {len(df_batch.columns)}")
@@ -1061,14 +1651,17 @@ def generate_base_dataset_initial_only(variable_definitions):
     ds2.close()
     ds10.close()
     
-    print("✅ All NetCDF files closed")
-    print(f"✅ Base dataset generation completed!")
+    print("All NetCDF files closed")
+    print(f"Base dataset generation completed!")
     print(f"Total batches: {batch_number - 1}")
     print(f"Output directory: {output_dir}")
     
     # Post-processing like original script
     print(f"\n{'='*80}")
-    print("POST-PROCESSING: Converting to monthly averages and expanding variables")
+    if use_monthly_forcing:
+        print("POST-PROCESSING: Expanding variables (skipping monthly average conversion - data already monthly)")
+    else:
+        print("POST-PROCESSING: Converting to monthly averages and expanding variables")
     print(f"{'='*80}")
     
     # Process all generated files
@@ -1078,12 +1671,15 @@ def generate_base_dataset_initial_only(variable_definitions):
         # Load the file
         df = pd.read_pickle(file_path)
         
-        # Process time series columns (convert to monthly averages)
-        print(f"  Processing time series columns...")
-        for col in variable_definitions['time_series_vars']:
-            if col in df.columns:
-                print(f"    Processing {col}...")
-                df[col] = df[col].apply(calculate_monthly_avg)
+        # Process time series columns (convert to monthly averages only if not using pre-computed monthly data)
+        if not use_monthly_forcing:
+            print(f"  Processing time series columns (converting to monthly averages)...")
+            for col in variable_definitions['time_series_vars']:
+                if col in df.columns:
+                    print(f"    Processing {col}...")
+                    df[col] = df[col].apply(calculate_monthly_avg)
+        else:
+            print(f"  Skipping monthly average conversion (data already monthly)")
         
         # Process list columns (expand PCT variables)
         print(f"  Processing list columns...")
@@ -1099,7 +1695,7 @@ def generate_base_dataset_initial_only(variable_definitions):
         
         # Save processed file
         df.to_pickle(file_path)
-        print(f"  ✅ Post-processing completed for {os.path.basename(file_path)}")
+        print(f"Post-processing completed for {os.path.basename(file_path)}")
     
     return output_dir
 
@@ -1126,11 +1722,11 @@ def generate_enhanced_dataset(base_output_dir, variable_definitions, initial_onl
     print(f"Found {len(base_files)} base PKL files to enhance")
     
     if not base_files:
-        print("❌ No base PKL files found")
+        print("No base PKL files found")
         return base_output_dir
 
     if initial_only_mode and (not config.final_spinup_history_files or not config.final_spinup_restart_files):
-        print("⚠️ Initial-only mode detected with no final spinup files; skipping enhanced dataset generation.")
+        print("Initial-only mode detected with no final spinup files; skipping enhanced dataset generation.")
         return base_output_dir
     
     # Load restart files for enhancement
@@ -1229,11 +1825,11 @@ def generate_enhanced_dataset(base_output_dir, variable_definitions, initial_onl
                 # Save enhanced dataset
                 enhanced_file = os.path.join(enhanced_output_dir, f"enhanced_monthly_training_data_batch_{i:02d}.pkl")
                 df_enhanced.to_pickle(enhanced_file)
-                print(f"  ✅ Enhanced dataset saved: {os.path.basename(enhanced_file)}")
-                print(f"  📐 Enhanced shape: {df_enhanced.shape}")
+                print(f"Enhanced dataset saved: {os.path.basename(enhanced_file)}")
+                print(f"Enhanced shape: {df_enhanced.shape}")
                 
             except Exception as e:
-                print(f"  ❌ Failed to process file: {e}")
+                print(f"Failed to process file: {e}")
                 continue
         
         return enhanced_output_dir
@@ -1257,7 +1853,7 @@ def add_pft_variables(enhanced_output_dir, variable_definitions):
     print(f"File path: {config.clm_params_nc_path}")
     
     if not os.path.exists(config.clm_params_nc_path):
-        print(f"❌ Error: CLM parameters file not found: {config.clm_params_nc_path}")
+        print(f"Error: CLM parameters file not found: {config.clm_params_nc_path}")
         return enhanced_output_dir
     
     ds = nc.Dataset(config.clm_params_nc_path)
@@ -1290,7 +1886,7 @@ def add_pft_variables(enhanced_output_dir, variable_definitions):
         else:
             print(f"Skipped {var}: not found in NetCDF")
     
-    print(f"\n✅ Successfully loaded {len(broadcast_feature_dict)} PFT variables from NetCDF")
+    print(f"\nSuccessfully loaded {len(broadcast_feature_dict)} PFT variables from NetCDF")
     
     # Get enhanced PKL files - handle different naming patterns
     input_files = sorted(glob.glob(os.path.join(enhanced_output_dir, "enhanced_monthly_training_data_batch_*.pkl")))
@@ -1317,7 +1913,7 @@ def add_pft_variables(enhanced_output_dir, variable_definitions):
             # Check if PFT variables already exist
             existing_pft_cols = [col for col in df.columns if col.startswith("pft_")]
             if existing_pft_cols:
-                print(f"  ⚠️  File already contains {len(existing_pft_cols)} PFT variables, skipping addition")
+                print(f"File already contains {len(existing_pft_cols)} PFT variables, skipping addition")
                 continue
             
             # Add each variable as a vector column with pft_ prefix
@@ -1326,20 +1922,20 @@ def add_pft_variables(enhanced_output_dir, variable_definitions):
                 df["pft_" + var] = [val_list] * len(df)  # Add the same list to each row
             
             new_shape = df.shape
-            print(f"  ✅ Successfully added {len(broadcast_feature_dict)} PFT variables")
-            print(f"  📐 New data shape: {original_shape} → {new_shape}")
+            print(f"Successfully added {len(broadcast_feature_dict)} PFT variables")
+            print(f"New data shape: {original_shape} → {new_shape}")
             
             # Save in-place (overwrite original file)
             df.to_pickle(file_path)
-            print(f"  ✅ File saved: {os.path.basename(file_path)}")
+            print(f"File saved: {os.path.basename(file_path)}")
             
         except Exception as e:
-            print(f"  ❌ Failed to process file: {e}")
+            print(f"Failed to process file: {e}")
             continue
     
     ds.close()
     
-    print(f"\n✅ PFT variables addition completed!")
+    print(f"\nPFT variables addition completed!")
     print(f"   - Total files: {len(input_files)}")
     print(f"   - PFT variables added: {len(broadcast_feature_dict)}")
     
@@ -1386,7 +1982,7 @@ def final_variable_cleanup(enhanced_output_dir, variable_definitions):
     print(f"\n🔍 Found {len(input_files)} enhanced PKL files to process")
     
     if len(input_files) == 0:
-        print("❌ No enhanced PKL files found.")
+        print("No enhanced PKL files found.")
         return enhanced_output_dir
     
     # Process each PKL file
@@ -1428,24 +2024,24 @@ def final_variable_cleanup(enhanced_output_dir, variable_definitions):
                 df_cleaned = df[list(vars_to_keep)]
                 
                 new_shape = df_cleaned.shape
-                print(f"  ✅ Successfully removed {len(vars_to_remove)} variables")
-                print(f"  📐 New data shape: {original_shape} → {new_shape}")
+                print(f"Successfully removed {len(vars_to_remove)} variables")
+                print(f"New data shape: {original_shape} → {new_shape}")
                 
                 # Save in-place (overwrite original file)
                 df_cleaned.to_pickle(file_path)
-                print(f"  ✅ File saved: {os.path.basename(file_path)}")
+                print(f"File saved: {os.path.basename(file_path)}")
             else:
-                print("  ℹ️  No extra variables found to remove. File already matches CNP_IO file.")
+                print("No extra variables found to remove. File already matches CNP_IO file.")
                 if len(current_vars) != len(all_expected_vars):
-                    print(f"  ⚠️  Warning: Column count mismatch. Current: {len(current_vars)}, Expected: {len(all_expected_vars)}")
+                    print(f"  Warning: Column count mismatch. Current: {len(current_vars)}, Expected: {len(all_expected_vars)}")
                     print(f"  Missing from current: {list(all_expected_vars - current_vars)[:5]}...")
                     print(f"  Extra in current: {list(current_vars - all_expected_vars)[:5]}...")
             
         except Exception as e:
-            print(f"  ❌ Failed to process file: {e}")
+            print(f"Failed to process file: {e}")
             continue
     
-    print(f"\n✅ Variable cleanup completed!")
+    print(f"\nVariable cleanup completed!")
     print(f"   - Total files: {len(input_files)}")
     print(f"   - Kept only variables defined in CNP_IO file")
     print(f"   - Target variable count: {len(all_expected_vars)}")
@@ -1472,9 +2068,9 @@ def generate_forcing_only_dataset():
         matching_files = glob.glob(pattern)
         if matching_files:
             forcing_data_files[var_name] = matching_files[0]  # Use first match
-            print(f"✅ Found forcing file: {os.path.basename(matching_files[0])}")
+            print(f"Found forcing file: {os.path.basename(matching_files[0])}")
         else:
-            print(f"⚠️  Forcing file not found for {var_name}: {pattern}")
+            print(f"Forcing file not found for {var_name}: {pattern}")
     
     print(f"Found {len(forcing_data_files)} forcing files")
     
@@ -1522,10 +2118,10 @@ def generate_forcing_only_dataset():
     forcing_tree = cKDTree(forcing_coords)
     _, all_forcing_indices = forcing_tree.query(query_coords, k=1)
     
-    print("✅ KDTree indices built")
+    print("KDTree indices built")
     
     # Pre-load forcing data into memory for optimization
-    print("🚀 Pre-loading forcing data into memory...")
+    print("Pre-loading forcing data into memory...")
     forcing_data = {}
     for var_name, ds in ds_forcing.items():
         forcing_data[var_name] = ds.variables[var_name][:, 0, :]  # (time, 1, grid_cells)
@@ -1598,7 +2194,7 @@ def generate_forcing_only_dataset():
         batch_files.append(batch_save_path)  # Add to list for tracking
         
         batch_time = time.time() - batch_start_time
-        print(f"✅ Batch {batch_number} completed: {batch_time:.2f}s")
+        print(f"    Batch {batch_number} completed: {batch_time:.2f}s")
         print(f"    Path: {batch_save_path}")
         print(f"    Shape: {df_batch.shape}")
         print(f"    Forcing data length: {len(df_batch['FLDS'].iloc[0])}")
@@ -1610,8 +2206,8 @@ def generate_forcing_only_dataset():
     ds1.close()
     ds2.close()
     
-    print("✅ All NetCDF files closed")
-    print(f"✅ Forcing-only dataset generation completed!")
+    print("All NetCDF files closed")
+    print(f"Forcing-only dataset generation completed!")
     print(f"Total batches: {batch_number - 1}")
     print(f"Output directory: {output_dir}")
     
@@ -1635,6 +2231,17 @@ def main():
         "--initial_only",
         action="store_true",
         help="Generate initial condition dataset (excludes Y_ variables from final_spinup files)"
+    )
+    parser.add_argument(
+        "--use_monthly_forcing",
+        action="store_true",
+        help="Use pre-computed monthly average forcing data (skip calculate_monthly_avg processing)"
+    )
+    parser.add_argument(
+        "--forcing_year_range",
+        type=str,
+        default="1980-1999",
+        help="Year range for forcing files (e.g., '1980-1999' or '2004-2023'). Default: 1980-1999"
     )
     args = parser.parse_args()
     
@@ -1682,7 +2289,11 @@ def main():
             variable_definitions = parse_cnp_io_variables()
             
             # Step 1: Generate base dataset
-            base_output_dir = generate_base_dataset(variable_definitions)
+            base_output_dir = generate_base_dataset(
+                variable_definitions, 
+                use_monthly_forcing=args.use_monthly_forcing,
+                forcing_year_range=args.forcing_year_range
+            )
             
             # Step 2: Generate enhanced dataset
             enhanced_output_dir = generate_enhanced_dataset(base_output_dir, variable_definitions)
@@ -1720,7 +2331,11 @@ def main():
             variable_definitions = parse_cnp_io_variables()
             
             # Step 1: Generate base dataset (without Y_ variables)
-            base_output_dir = generate_base_dataset_initial_only(variable_definitions)
+            base_output_dir = generate_base_dataset_initial_only(
+                variable_definitions,
+                use_monthly_forcing=args.use_monthly_forcing,
+                forcing_year_range=args.forcing_year_range
+            )
             
             # Step 2: Generate enhanced dataset (same as regular enhanced dataset)
             enhanced_output_dir = generate_enhanced_dataset(base_output_dir, variable_definitions, initial_only_mode=True)
