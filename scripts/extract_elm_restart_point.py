@@ -12,12 +12,12 @@ import argparse
 from datetime import datetime
 
 # ==================== Configuration Parameters (Default Values) ====================
-
 SOURCE_NC = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc'
-OUTPUT_NC = 'single_point_20_year_restart_extracted_43_56.nc'  # Output filename
+# SOURCE_NC = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+OUTPUT_NC = 'single_point_20_year_restart_extracted_303_17.nc'  # Output filename
 # Target coordinates
-TARGET_LAT = 35.833332
-TARGET_LON = -84.208336
+TARGET_LAT = -17.4246
+TARGET_LON = 303.75
 
 # ==================== Command Line Argument Parser ====================
 def parse_arguments():
@@ -109,14 +109,50 @@ def extract_single_point_elm(source_nc=None, output_nc=None, target_lat=None, ta
     lat_vals = ds['grid1d_lat'].values
     lon_vals = ds['grid1d_lon'].values
     
-    # Handle longitude format conversion (0-360° vs -180 to 180°)
-    lon_adjusted = lon_vals.copy()
-    if lon_vals.max() > 200:
-        lon_adjusted = np.where(lon_vals > 180, lon_vals - 360, lon_vals)
-        print(f"   Detected 0-360° longitude format, converted to -180 to 180° format")
+    # Print unique latitude and longitude values in dataset
+    unique_lats = np.unique(lat_vals)
+    unique_lons = np.unique(lon_vals)
+    print(f"   Dataset coordinate ranges:")
+    print(f"   - Unique latitudes: {len(unique_lats)} values, range [{unique_lats.min():.6f}, {unique_lats.max():.6f}]")
+    print(f"   - Unique longitudes (original): {len(unique_lons)} values, range [{unique_lons.min():.6f}, {unique_lons.max():.6f}]")
+    print(f"   - All unique latitudes: {unique_lats}")
+    print(f"   - All unique longitudes (original): {unique_lons}")
     
-    # Calculate Euclidean distance and find nearest neighbor
-    dist = np.sqrt((lat_vals - lat)**2 + (lon_adjusted - lon)**2)
+    # Handle longitude format conversion (0-360° vs -180 to 180°)
+    # 智能选择：如果数据集和目标都是同一格式，保持原格式；否则统一转换
+    dataset_uses_360 = lon_vals.max() > 200
+    # 判断目标经度格式：> 180 肯定是 0-360，< 0 肯定是 -180~180，0-180 之间默认认为是 0-360
+    target_uses_360 = lon > 180 or (lon >= 0 and lon <= 180 and dataset_uses_360)
+    
+    # 如果数据集和目标都是 0-360 格式，保持原格式比较（更高效）
+    if dataset_uses_360 and target_uses_360:
+        lon_adjusted = lon_vals.copy()  # 保持 0-360 格式
+        target_lon_adjusted = lon  # 保持 0-360 格式
+        print(f"   Dataset uses 0-360° format, target also in 0-360° format ({lon:.6f})")
+        print(f"   → Using 0-360° format for comparison (no conversion needed)")
+    # 如果数据集是 0-360 但目标是 -180~180，转换数据集
+    elif dataset_uses_360 and not target_uses_360:
+        lon_adjusted = np.where(lon_vals > 180, lon_vals - 360, lon_vals)
+        target_lon_adjusted = lon  # 目标已经是 -180~180 格式
+        print(f"   Dataset uses 0-360° format, target uses -180~180° format")
+        print(f"   → Converting dataset to -180~180° format for comparison")
+        unique_lons_adjusted = np.unique(lon_adjusted)
+        print(f"   - Unique longitudes (adjusted): {len(unique_lons_adjusted)} values, range [{unique_lons_adjusted.min():.6f}, {unique_lons_adjusted.max():.6f}]")
+        print(f"   - All unique longitudes (adjusted): {unique_lons_adjusted}")
+    # 如果数据集是 -180~180 但目标是 0-360，转换目标
+    elif not dataset_uses_360 and target_uses_360:
+        lon_adjusted = lon_vals.copy()  # 数据集已经是 -180~180 格式
+        target_lon_adjusted = lon - 360 if lon > 180 else lon  # 转换目标到 -180~180
+        print(f"   Dataset uses -180~180° format, target uses 0-360° format ({lon:.6f})")
+        print(f"   → Converting target to -180~180° format ({target_lon_adjusted:.6f}) for comparison")
+    # 如果两者都是 -180~180 格式，直接使用
+    else:
+        lon_adjusted = lon_vals.copy()
+        target_lon_adjusted = lon
+        print(f"   Both dataset and target use -180~180° format")
+    
+    # Calculate Euclidean distance using the ADJUSTED target
+    dist = np.sqrt((lat_vals - lat)**2 + (lon_adjusted - target_lon_adjusted)**2)
     gridcell_idx_py = int(np.argmin(dist))  # Python 0-based index
     gridcell_idx_elm = gridcell_idx_py + 1  # ELM 1-based index
     
