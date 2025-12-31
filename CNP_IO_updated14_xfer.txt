@@ -59,4 +59,4 @@ SCALAR VARIABLES (1D - 4 variables):
 • soil3c_vr, soil3n_vr, soil3p_vr
 • soil4c_vr, soil4n_vr, soil4p_vr
 
-• labilep_vr , occlp_vr, primp_vr, secondp_vr
+• labilep_vr , occlp_vr, primp_vr, secondp_vr, solutionp_vr
