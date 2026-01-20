@@ -10,6 +10,7 @@ import numpy as np
 import os
 import argparse
 from datetime import datetime
+from netCDF4 import Dataset as NC4Dataset
 
 # ==================== Configuration Parameters (Default Values) ====================
 SOURCE_NC = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc'
@@ -94,11 +95,19 @@ def extract_single_point_elm(source_nc=None, output_nc=None, target_lat=None, ta
     
     # ============ Step 1: Open dataset ============
     print("\n[1/5] Loading dataset...")
+    
+    # First, get ALL dimensions using netCDF4 (xarray may filter some out)
+    nc4_file = NC4Dataset(source_file, 'r')
+    all_nc_dims = {dim: len(nc4_file.dimensions[dim]) for dim in nc4_file.dimensions}
+    nc4_file.close()
+    
     ds = xr.open_dataset(source_file, decode_times=False, mask_and_scale=False)
     
     print(f"   ✓ Dataset loaded successfully")
     print(f"   - File size: {os.path.getsize(source_file) / (1024**3):.2f} GB")
-    print(f"   - Dimensions: gridcell={ds.dims['gridcell']}, topounit={ds.dims['topounit']}, " +
+    print(f"   - Dimensions (netCDF4): {len(all_nc_dims)} total")
+    print(f"   - Dimensions (xarray): {len(ds.dims)} visible")
+    print(f"   - Main dims: gridcell={ds.dims['gridcell']}, topounit={ds.dims['topounit']}, " +
           f"landunit={ds.dims['landunit']}, column={ds.dims['column']}, pft={ds.dims['pft']}")
     print(f"   - Number of variables: {len(ds.data_vars)}")
     
@@ -119,33 +128,33 @@ def extract_single_point_elm(source_nc=None, output_nc=None, target_lat=None, ta
     print(f"   - All unique longitudes (original): {unique_lons}")
     
     # Handle longitude format conversion (0-360° vs -180 to 180°)
-    # 智能选择：如果数据集和目标都是同一格式，保持原格式；否则统一转换
+    # Smart selection: if dataset and target use the same format, keep original format for efficiency
     dataset_uses_360 = lon_vals.max() > 200
-    # 判断目标经度格式：> 180 肯定是 0-360，< 0 肯定是 -180~180，0-180 之间默认认为是 0-360
+    # Determine target longitude format: > 180 must be 0-360, < 0 must be -180~180
     target_uses_360 = lon > 180 or (lon >= 0 and lon <= 180 and dataset_uses_360)
     
-    # 如果数据集和目标都是 0-360 格式，保持原格式比较（更高效）
+    # If both dataset and target are in 0-360 format, keep original format (more efficient)
     if dataset_uses_360 and target_uses_360:
-        lon_adjusted = lon_vals.copy()  # 保持 0-360 格式
-        target_lon_adjusted = lon  # 保持 0-360 格式
+        lon_adjusted = lon_vals.copy()  # Keep 0-360 format
+        target_lon_adjusted = lon  # Keep 0-360 format
         print(f"   Dataset uses 0-360° format, target also in 0-360° format ({lon:.6f})")
         print(f"   → Using 0-360° format for comparison (no conversion needed)")
-    # 如果数据集是 0-360 但目标是 -180~180，转换数据集
+    # If dataset is 0-360 but target is -180~180, convert dataset
     elif dataset_uses_360 and not target_uses_360:
         lon_adjusted = np.where(lon_vals > 180, lon_vals - 360, lon_vals)
-        target_lon_adjusted = lon  # 目标已经是 -180~180 格式
+        target_lon_adjusted = lon  # Target is already in -180~180 format
         print(f"   Dataset uses 0-360° format, target uses -180~180° format")
         print(f"   → Converting dataset to -180~180° format for comparison")
         unique_lons_adjusted = np.unique(lon_adjusted)
         print(f"   - Unique longitudes (adjusted): {len(unique_lons_adjusted)} values, range [{unique_lons_adjusted.min():.6f}, {unique_lons_adjusted.max():.6f}]")
         print(f"   - All unique longitudes (adjusted): {unique_lons_adjusted}")
-    # 如果数据集是 -180~180 但目标是 0-360，转换目标
+    # If dataset is -180~180 but target is 0-360, convert target
     elif not dataset_uses_360 and target_uses_360:
-        lon_adjusted = lon_vals.copy()  # 数据集已经是 -180~180 格式
-        target_lon_adjusted = lon - 360 if lon > 180 else lon  # 转换目标到 -180~180
+        lon_adjusted = lon_vals.copy()  # Dataset is already in -180~180 format
+        target_lon_adjusted = lon - 360 if lon > 180 else lon  # Convert target to -180~180
         print(f"   Dataset uses -180~180° format, target uses 0-360° format ({lon:.6f})")
         print(f"   → Converting target to -180~180° format ({target_lon_adjusted:.6f}) for comparison")
-    # 如果两者都是 -180~180 格式，直接使用
+    # If both use -180~180 format, use directly
     else:
         lon_adjusted = lon_vals.copy()
         target_lon_adjusted = lon
@@ -212,11 +221,26 @@ def extract_single_point_elm(source_nc=None, output_nc=None, target_lat=None, ta
     # Filter data by level
     subset = ds.copy()
     
-    # Filter each dimension
+    # Identify global dimensions (dimensions that don't vary with gridcell)
+    # These are common vertical layers or other global dimensions in ELM restart files
+    all_dims = set(ds.dims.keys())
+    spatial_dims = set(indices.keys())
+    global_dims = all_dims - spatial_dims
+    
+    print(f"   - Spatial dimensions to filter: {spatial_dims}")
+    print(f"   - Global dimensions to preserve: {global_dims}")
+    
+    # Filter each spatial dimension (only filter spatial dimensions, preserve global dimensions)
     for dim_name, dim_indices in indices.items():
         if dim_name in subset.dims and len(dim_indices) > 0:
             subset = subset.isel({dim_name: dim_indices})
             print(f"   ✓ Filtered {dim_name}: {len(dim_indices)} elements")
+    
+    # Verify that global dimensions are preserved
+    print(f"   ✓ Preserved global dimensions:")
+    for dim in global_dims:
+        if dim in subset.dims:
+            print(f"     - {dim}: {subset.dims[dim]} elements")
     
     # Calculate data compression ratio
     original_size_estimate = sum([
@@ -275,6 +299,18 @@ def extract_single_point_elm(source_nc=None, output_nc=None, target_lat=None, ta
         encoding=encoding,
         unlimited_dims=None
     )
+    
+    # Add missing dimensions that were in original file but filtered by xarray
+    missing_dims = set(all_nc_dims.keys()) - set(subset.dims.keys())
+    if missing_dims:
+        print(f"   Adding {len(missing_dims)} missing dimensions from original file...")
+        nc_out = NC4Dataset(output_file, 'a')
+        for dim_name in missing_dims:
+            if dim_name not in nc_out.dimensions:
+                dim_size = all_nc_dims[dim_name]
+                nc_out.createDimension(dim_name, dim_size)
+                print(f"     + {dim_name}: {dim_size}")
+        nc_out.close()
     
     # Verify output
     output_size = os.path.getsize(output_file) / (1024**2)  # MB
