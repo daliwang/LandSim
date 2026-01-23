@@ -54,6 +54,22 @@ python ../../scripts/cnp_result_validationplot.py --stats-only
 python ../../scripts/generate_prediction_quality_report.py
 ```
 
+### 4.1) Highlight a site in all scatter plots (optional)
+Highlight a given site (lon/lat) in every GT vs Pred scatter plot. The site will be marked as a red star.
+
+```bash
+python ../../scripts/cnp_result_validationplot_site.py . \
+  --lon 303.75 --lat -17.4246
+```
+
+Options and behavior:
+- The script matches samples by coordinate with a tolerance (default: 0.01 degrees).
+- Use `--tolerance N` to relax the matching if no point is found.
+- Use `--coord-csv /path/to/test_static_inverse.csv` to explicitly provide a coordinate source.
+- Supports `--top-bad-only` / `--worst-only` for restricted plotting.
+
+**Output**: scatter plots are saved under `plots_site/`.
+
 Options and behavior:
 - The quality report saves outputs under `analysis/`:
   - `detailed_quality_assessment.csv`, `variable_quality_summary.csv`, `overall_prediction_quality.png`, `prediction_quality_by_variable.png`, `r2_vs_rmse.png`, `prediction_quality_report.html`, `quality_summary_report.txt`.
@@ -86,6 +102,10 @@ Creates a NetCDF file containing all AI predictions for plotting and comparison:
 
 ```bash
 python ../../scripts/ai_predictions_to_netcdf.py  > ai_prediction_to_netcdf.log 2>&1 &
+```
+To verify the CSV predictions match the generated NetCDF:
+```bash
+python ../../scripts/verify_predictions_in_netcdf.py
 ```
 
 ### 7) Generate comparison plots
