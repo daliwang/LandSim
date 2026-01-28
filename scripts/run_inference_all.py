@@ -196,7 +196,8 @@ def run_inference_all(
     strict_loading: bool = True,
     debug_vars: bool = False,
     loader: str = 'auto',
-    mask_pft_with_gt: bool = False
+    mask_pft_with_gt: bool = False,
+    mask_absent_pfts: bool = True
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
@@ -243,6 +244,11 @@ def run_inference_all(
         variable_list_path=variable_list,
         model_config_path=model_config
     )
+    try:
+        config.update_training_config(mask_absent_pfts=bool(mask_absent_pfts))
+        logging.info(f"mask_absent_pfts set to {bool(mask_absent_pfts)}")
+    except Exception as e:
+        logging.warning(f"Failed to set mask_absent_pfts on training_config: {e}")
     if model_config is not None and use_training_config:
         logging.warning("--model-config provided along with --use-training-config; training config will still govern variables and scalers. Model overrides only affect architecture sizing.")
     
@@ -698,6 +704,21 @@ def run_inference_all(
             logging.warning("Training scaler 'static' not found; leaving static unnormalized")
         static_t = torch.tensor(static_mat, dtype=dtype)
 
+        # PFT presence mask (from raw PCT_NAT_PFT_1..16) if requested
+        pft_presence_mask_t = None
+        if mask_absent_pfts:
+            try:
+                pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
+                if all(c in df.columns for c in pct_cols):
+                    pct = df[pct_cols].values.astype(np.float32)
+                    mask = (pct > 0.0).astype(np.float32)
+                    pft_presence_mask_t = torch.tensor(mask, dtype=dtype)
+                    logging.info("Created pft_presence_mask from PCT_NAT_PFT_1..16 (fallback path)")
+                else:
+                    logging.warning("PCT_NAT_PFT_1..16 columns missing; pft_presence_mask not created (fallback path)")
+            except Exception as e:
+                logging.warning(f"Failed to create pft_presence_mask in fallback path: {e}")
+
         # PFT param
         pp_cols = config.data_config.pft_param_columns
         num_pfts = 17
@@ -901,7 +922,7 @@ def run_inference_all(
             logging.warning("Training scaler 'y_soil_2d' not found; leaving y_soil_2d unnormalized (group)")
         y_soil_2d_t = torch.tensor(y_soil2d, dtype=dtype)
 
-        return {
+        ret = {
             'time_series_data': time_series_t,
             'static_data': static_t,
             'pft_param_data': pft_param_t,
@@ -914,6 +935,9 @@ def run_inference_all(
             'water': None,
             'y_water': None,
         }
+        if pft_presence_mask_t is not None:
+            ret['pft_presence_mask'] = pft_presence_mask_t
+        return ret
 
     # Normalize using training scalers by default (no refit), or refit if requested
     logging.info("Normalizing data using training-compatible method...")
@@ -943,6 +967,11 @@ def run_inference_all(
     # For inference, we use the test data (which contains all data when train_split=0.0)
     test_data = split_data['test']
     logging.info(f"Using test data for inference: {len(test_data)} data types")
+    if mask_absent_pfts:
+        if isinstance(test_data, dict) and 'pft_presence_mask' in test_data:
+            logging.info("pft_presence_mask available; mask_absent_pfts will be applied during evaluation")
+        else:
+            logging.warning("mask_absent_pfts enabled but pft_presence_mask missing; mask may not be applied")
     
     # Convert test_data to model_inputs format expected by the model
     model_inputs = {}
@@ -1136,6 +1165,32 @@ def run_inference_all(
                     model_inputs.get('variables_2d_soil')
                 )
     
+    # Optionally apply PFT absence mask before saving predictions
+    if mask_absent_pfts and isinstance(test_data, dict) and 'pft_presence_mask' in test_data and isinstance(predictions, dict) and 'pft_1d' in predictions:
+        try:
+            vec = predictions['pft_1d']
+            mask = test_data['pft_presence_mask']
+            if isinstance(vec, torch.Tensor) and isinstance(mask, torch.Tensor):
+                mask = mask.to(vec.device, non_blocking=True)
+                n_pfts = 16
+                # Determine number of variables
+                varnames = data_info.get('variables_1d_pft', []) if isinstance(data_info, dict) else []
+                if vec.dim() == 2:
+                    n_vars = len(varnames) if varnames else (vec.size(1) // n_pfts)
+                    vec = vec.view(vec.size(0), n_vars, n_pfts)
+                    reshaped = True
+                else:
+                    reshaped = False
+                if mask.dim() == 2:
+                    mask = mask.view(mask.size(0), 1, n_pfts)
+                vec = vec * mask
+                predictions['pft_1d'] = vec.view(vec.size(0), -1) if reshaped else vec
+                logging.info("Applied pft_presence_mask to PFT1D predictions before saving")
+        except Exception as e:
+            logging.warning(f"Failed to apply pft_presence_mask to predictions: {e}")
+    elif mask_absent_pfts:
+        logging.warning("mask_absent_pfts enabled but pft_presence_mask not available; predictions not masked")
+
     logging.info("Inference completed successfully")
     
     # Save results
@@ -1273,6 +1328,16 @@ def run_inference_all(
                 except Exception:
                     gt_mask_per_var = None
 
+            # PFT presence mask (from PCT_NAT_PFT_1..16), applied after inverse transform
+            pft_presence_mask_np = None
+            if mask_absent_pfts and isinstance(test_data, dict) and 'pft_presence_mask' in test_data and hasattr(test_data['pft_presence_mask'], 'numel'):
+                try:
+                    ppm = test_data['pft_presence_mask'].detach().cpu().numpy()
+                    if ppm.ndim == 2 and ppm.shape[1] == num_pfts:
+                        pft_presence_mask_np = ppm
+                except Exception:
+                    pft_presence_mask_np = None
+
             # Write predictions per variable (denormalized when possible)
             for v in range(num_variables):
                 var_name = var_names[v]
@@ -1306,6 +1371,12 @@ def run_inference_all(
                     if gt_mask_per_var is not None and v < gt_mask_per_var.shape[1]:
                         mask_v = gt_mask_per_var[:, v, :]
                         var_predictions_original = var_predictions_original * mask_v.astype(var_predictions_original.dtype)
+                except Exception:
+                    pass
+                # Apply PFT presence mask (after inverse transform)
+                try:
+                    if pft_presence_mask_np is not None and pft_presence_mask_np.shape == var_predictions_original.shape:
+                        var_predictions_original = var_predictions_original * pft_presence_mask_np.astype(var_predictions_original.dtype)
                 except Exception:
                     pass
                 
@@ -1567,6 +1638,9 @@ def main():
     parser.add_argument("--debug-vars", action='store_true', help="Print detailed variable names and sample values during preprocessing/inference")
     parser.add_argument("--loader", choices=['auto','pandas','individual'], default='auto', help="Data loader to use (default: auto)")
     parser.add_argument("--mask-pft-with-gt", action='store_true', default=False, help="Mask PFT1D predictions by GT non-zero mask when available")
+    parser.add_argument("--mask-absent-pfts", dest="mask_absent_pfts", action="store_true", help="Mask absent PFTs using PCT_NAT_PFT_1..16 when available")
+    parser.add_argument("--no-mask-absent-pfts", dest="mask_absent_pfts", action="store_false", help="Disable masking of absent PFTs")
+    parser.set_defaults(mask_absent_pfts=True)
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
     args = parser.parse_args()
     
@@ -1587,6 +1661,7 @@ def main():
             , debug_vars=args.debug_vars
             , loader=args.loader
             , mask_pft_with_gt=args.mask_pft_with_gt
+            , mask_absent_pfts=args.mask_absent_pfts
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         
