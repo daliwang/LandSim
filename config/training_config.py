@@ -166,6 +166,17 @@ class TrainingConfig:
     batch_size: int = 16
     learning_rate: float = 0.0001
     
+    # Loss selection and zero-aware parameters
+    loss_type: str = 'mse'            # 'mse' | 'zero_aware'
+    base_loss: str = 'mse'            # underlying base loss for zero_aware: 'mse'|'mae'|'smoothl1'
+    zero_fp_weight: float = 1.0       # penalty for FP when truth==0
+    zero_fn_weight: float = 8.0       # stronger penalty for FN when truth>0
+    zero_margin: float = 0.1          # relative margin for FN
+    fp_power: float = 2.0             # exponent for FP term
+    fn_power: float = 1.0             # exponent for FN term
+    zero_eps: float = 1e-8            # defines zero in loss space
+    zero_eval_epsilon: float = 1e-6   # threshold for FP/FN@0 metrics
+    
     # Loss weights (can be adjusted for different output priorities)
     scalar_loss_weight: float = 1.0
     vector_loss_weight: float = 1.0

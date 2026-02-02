@@ -28,6 +28,7 @@ import json
 from models.combined_model import CombinedModel, FlexibleCombinedModel
 from models.cnp_combined_model import CNPCombinedModel
 from config.variable_weights import get_pft1d_variable_weights, get_soil2d_variable_weights, get_scalar_variable_weights
+from training.losses import ZeroAwareLoss
 
 # Import GPU monitoring
 from utils.gpu_monitor import GPUMonitor, log_memory_usage
@@ -176,7 +177,21 @@ class ModelTrainer:
         )
         
         # Setup loss function
-        self.criterion = nn.MSELoss()
+        loss_type = getattr(self.config, 'loss_type', 'mse') or 'mse'
+        if str(loss_type).lower() == 'zero_aware':
+            self.criterion = ZeroAwareLoss(
+                base=getattr(self.config, 'base_loss', 'mse'),
+                zero_fp_weight=getattr(self.config, 'zero_fp_weight', 1.0),
+                zero_fn_weight=getattr(self.config, 'zero_fn_weight', 8.0),
+                zero_margin=getattr(self.config, 'zero_margin', 0.1),
+                fp_power=getattr(self.config, 'fp_power', 2.0),
+                fn_power=getattr(self.config, 'fn_power', 1.0),
+                eps=getattr(self.config, 'zero_eps', 1e-8)
+            )
+            logger.info(f"Using ZeroAwareLoss with fp_w={getattr(self.config, 'zero_fp_weight', 1.0)}, "
+                        f"fn_w={getattr(self.config, 'zero_fn_weight', 8.0)}, margin={getattr(self.config, 'zero_margin', 0.1)}")
+        else:
+            self.criterion = nn.MSELoss()
         # Loss weights from config (defaults)
         self.scalar_loss_weight = getattr(self.config, 'scalar_loss_weight', 1.0)
         self.vector_loss_weight = getattr(self.config, 'vector_loss_weight', 1.0)
@@ -1211,6 +1226,7 @@ class ModelTrainer:
     def _calculate_metrics(self, predictions: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Calculate evaluation metrics."""
         metrics = {}
+        zero_eps_eval = float(getattr(self.config, 'zero_eval_epsilon', 1e-6))
         # Scalar
         pred_scalar_full = predictions['scalar'].cpu().numpy()
         target_scalar_full = targets['y_scalar'].cpu().numpy()
@@ -1253,6 +1269,20 @@ class ModelTrainer:
                 metrics[f'{name_s}_rmse'] = rmse_s
                 metrics[f'{name_s}_nrmse'] = nrmse_s
                 metrics[f'{name_s}_r2'] = r2_s
+        # Zero-related scalar metrics
+        try:
+            ps = predictions['scalar'].cpu().numpy()
+            ts = targets['y_scalar'].cpu().numpy()
+            if ps.shape == ts.shape:
+                zero_mask = (np.abs(ts) <= zero_eps_eval)
+                pos_mask = (np.abs(ts) > zero_eps_eval)
+                fp = ((ps > zero_eps_eval) & zero_mask).sum()
+                fn = ((ps <= zero_eps_eval) & pos_mask).sum()
+                total = ps.size
+                metrics['scalar_fp_at0'] = float(fp) / float(total) if total > 0 else 0.0
+                metrics['scalar_fn_at0'] = float(fn) / float(total) if total > 0 else 0.0
+        except Exception:
+            pass
         # PFT 1D - Detailed metrics per variable and PFT
         pred_pft_1d = predictions['pft_1d'].cpu().numpy()
         target_pft_1d = targets['y_pft_1d'].cpu().numpy()
@@ -1300,6 +1330,19 @@ class ModelTrainer:
                     metrics[f'{var_name}_pft{pft_idx}_rmse'] = rmse_vp
                     metrics[f'{var_name}_pft{pft_idx}_nrmse'] = nrmse_vp
                     metrics[f'{var_name}_pft{pft_idx}_r2'] = r2_vp
+        # Zero-related pft1d metrics (flatten)
+        try:
+            pf = pred_pft_1d.reshape(-1)
+            tf = target_pft_1d.reshape(-1)
+            zero_mask = (np.abs(tf) <= zero_eps_eval)
+            pos_mask = (np.abs(tf) > zero_eps_eval)
+            fp = ((pf > zero_eps_eval) & zero_mask).sum()
+            fn = ((pf <= zero_eps_eval) & pos_mask).sum()
+            total = pf.size
+            metrics['pft1d_fp_at0'] = float(fp) / float(total) if total > 0 else 0.0
+            metrics['pft1d_fn_at0'] = float(fn) / float(total) if total > 0 else 0.0
+        except Exception:
+            pass
         # Soil 2D
         pred_soil_2d = predictions['soil_2d'].cpu().numpy()
         target_soil_2d = targets['y_soil_2d'].cpu().numpy()
@@ -1362,6 +1405,19 @@ class ModelTrainer:
                         metrics[f'{var_name}_layer{layer_idx}_rmse'] = rmse_vl
                         metrics[f'{var_name}_layer{layer_idx}_nrmse'] = nrmse_vl
                         metrics[f'{var_name}_layer{layer_idx}_r2'] = r2_vl
+        # Zero-related soil2d metrics (flatten)
+        try:
+            pf = pred_soil_2d_flat.flatten()
+            tf = target_soil_2d_flat.flatten()
+            zero_mask = (np.abs(tf) <= zero_eps_eval)
+            pos_mask = (np.abs(tf) > zero_eps_eval)
+            fp = ((pf > zero_eps_eval) & zero_mask).sum()
+            fn = ((pf <= zero_eps_eval) & pos_mask).sum()
+            total = pf.size
+            metrics['soil2d_fp_at0'] = float(fp) / float(total) if total > 0 else 0.0
+            metrics['soil2d_fn_at0'] = float(fn) / float(total) if total > 0 else 0.0
+        except Exception:
+            pass
         return metrics
     
     def save_results(self, predictions: Dict[str, np.ndarray], metrics: Dict[str, float]):

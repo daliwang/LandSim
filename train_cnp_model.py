@@ -256,6 +256,65 @@ def main():
         default=None,
         help='Extra loss weight multiplier for litter phosphorus vars (litr1/2/3p_vr)'
     )
+    # Loss selection and zero-aware tuning
+    parser.add_argument(
+        '--loss',
+        dest='loss_type',
+        type=str,
+        choices=['mse', 'zero_aware'],
+        default='mse',
+        help='Loss function to use: mse (default) or zero_aware'
+    )
+    parser.add_argument(
+        '--base-loss',
+        dest='base_loss',
+        type=str,
+        choices=['mse', 'mae', 'smoothl1'],
+        default='mse',
+        help='Base loss used inside zero_aware'
+    )
+    parser.add_argument(
+        '--zero-fp-weight',
+        type=float,
+        default=1.0,
+        help='Weight for false positives when ground truth is zero (alpha)'
+    )
+    parser.add_argument(
+        '--zero-fn-weight',
+        type=float,
+        default=8.0,
+        help='Weight for false negatives when ground truth is positive (beta)'
+    )
+    parser.add_argument(
+        '--zero-margin',
+        type=float,
+        default=0.1,
+        help='Relative margin for false-negative penalty (tau)'
+    )
+    parser.add_argument(
+        '--fp-power',
+        type=float,
+        default=2.0,
+        help='Exponent for the false-positive term (p)'
+    )
+    parser.add_argument(
+        '--fn-power',
+        type=float,
+        default=1.0,
+        help='Exponent for the false-negative term (q)'
+    )
+    parser.add_argument(
+        '--zero-eps',
+        type=float,
+        default=1e-8,
+        help='Numerical epsilon to determine zeros for loss calculation'
+    )
+    parser.add_argument(
+        '--zero-eval-epsilon',
+        type=float,
+        default=1e-6,
+        help='Threshold to compute FP@0 and FN@0 metrics'
+    )
     parser.add_argument(
         '--mask-absent-pfts',
         dest='mask_absent_pfts',
@@ -283,6 +342,12 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Normalization method: {args.normalization}")
+    # Suppress very verbose per-variable scaler creation logs unless DEBUG
+    try:
+        if (args.log_level or 'INFO').upper() != 'DEBUG':
+            logging.getLogger('data.individual_scaler_manager').setLevel(logging.WARNING)
+    except Exception:
+        pass
     if args.normalization == 'group':
         logger.info("Using group normalization (same as original system)")
     elif args.normalization == 'individual':
@@ -353,6 +418,25 @@ def main():
             predictions_dir=str(output_dir / "cnp_predictions"),
             use_early_stopping=False
         )
+        # Apply loss configuration from CLI
+        try:
+            config.update_training_config(
+                loss_type=str(args.loss_type).lower(),
+                base_loss=str(args.base_loss).lower(),
+                zero_fp_weight=float(args.zero_fp_weight),
+                zero_fn_weight=float(args.zero_fn_weight),
+                zero_margin=float(args.zero_margin),
+                fp_power=float(args.fp_power),
+                fn_power=float(args.fn_power),
+                zero_eps=float(args.zero_eps),
+                zero_eval_epsilon=float(args.zero_eval_epsilon)
+            )
+            logger.info(f"Using loss={config.training_config.loss_type} base={config.training_config.base_loss} "
+                        f"zero(fp_w={config.training_config.zero_fp_weight}, fn_w={config.training_config.zero_fn_weight}, "
+                        f"margin={config.training_config.zero_margin}, fp_pow={config.training_config.fp_power}, "
+                        f"fn_pow={config.training_config.fn_power})")
+        except Exception as e:
+            logger.warning(f"Failed to apply loss CLI options: {e}")
         if args.mask_absent_pfts:
             try:
                 config.update_training_config(mask_absent_pfts=True)
