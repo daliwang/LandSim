@@ -15,6 +15,16 @@ python train_cnp_model.py --variable-list CNP_IO_demo.txt --epoch 100 2>&1 &
 Notes:
 - This launches training in the background and redirects logs to stdout/stderr.
 - The run output directory will be created under `cnp_results/run_YYYYMMDD_HHMMSS`.
+- Optional: restrict training/test split to tropical latitudes only:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt --epoch 100 \
+  --tropical-only
+```
+- Optional: customize the latitude range or column name:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt --epoch 100 \
+  --tropical-only --tropical-lat-range -23.5,23.5 --tropical-lat-column Latitude
+```
 
 ### 2a) Fine-tune a pretrained model (optional)
 If you already have a trained checkpoint and want to continue training on a TVA-style dataset, use the fine-tuning helper. Populate the necessary paths in your CNP_IO file (e.g. `CNP_IO_updated9_dev_gao.txt`):
