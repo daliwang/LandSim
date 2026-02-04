@@ -216,6 +216,23 @@ def main():
         help='Glob pattern for training files (e.g., enhanced_1_training_data_batch_*.pkl)'
     )
     parser.add_argument(
+        '--tropical-only',
+        action='store_true',
+        help='Filter dataset to tropical latitude band before train/test split'
+    )
+    parser.add_argument(
+        '--tropical-lat-range',
+        type=str,
+        default=None,
+        help='Latitude range for tropical filter, format "min,max" (default: -23.5,23.5)'
+    )
+    parser.add_argument(
+        '--tropical-lat-column',
+        type=str,
+        default=None,
+        help='Latitude column name override (default: auto-detect from static columns)'
+    )
+    parser.add_argument(
         '--max-files',
         type=int,
         default=None,
@@ -328,6 +345,25 @@ def main():
                 logger.info(f"Applied data overrides: {update_kwargs}")
             except Exception as e:
                 logger.warning(f"Failed to apply data overrides: {e}")
+        # Optional tropical-only filtering
+        if args.tropical_only:
+            tropical_kwargs = {'tropical_only': True}
+            if args.tropical_lat_range:
+                try:
+                    parts = [p.strip() for p in str(args.tropical_lat_range).split(',')]
+                    if len(parts) == 2:
+                        tropical_kwargs['tropical_lat_range'] = (float(parts[0]), float(parts[1]))
+                    else:
+                        logger.warning("Invalid --tropical-lat-range; expected format 'min,max'. Using default.")
+                except Exception:
+                    logger.warning("Failed to parse --tropical-lat-range; using default.")
+            if args.tropical_lat_column:
+                tropical_kwargs['tropical_lat_column'] = str(args.tropical_lat_column).strip()
+            try:
+                config.update_data_config(**tropical_kwargs)
+                logger.info(f"Enabled tropical filtering: {tropical_kwargs}")
+            except Exception as e:
+                logger.warning(f"Failed to apply tropical filtering config: {e}")
         if args.variable_list is not None:
             logger.info(f"Using CNP configuration from variable list file: {args.variable_list}")
         else:
@@ -460,6 +496,19 @@ def main():
         )
         # Check raw data for non-zero values after loading
         raw_data = data_loader.load_data()
+        
+        # Print all variables after loading
+        if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
+            logger.info("=" * 80)
+            logger.info("训练数据集变量列表 (Training Dataset Variables):")
+            logger.info("=" * 80)
+            logger.info(f"总变量数: {len(data_loader.df.columns)}")
+            logger.info(f"数据集形状: {data_loader.df.shape}")
+            logger.info("\n所有变量列表 (All Variables):")
+            for i, col in enumerate(sorted(data_loader.df.columns), 1):
+                logger.info(f"  {i:4d}. {col}")
+            logger.info("=" * 80)
+        
         logger.info("Checking raw data for soil2D variables...")
         for key, value in raw_data.items():
             if 'soil' in key.lower() and '2d' in key.lower():

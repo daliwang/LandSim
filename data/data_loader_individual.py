@@ -96,10 +96,30 @@ class DataLoaderIndividual:
             if count > 0:
                 logger.info(f"  {col}: {count}")
 
+    def _resolve_lat_column(self) -> Optional[str]:
+        """Resolve latitude column name from config or common patterns."""
+        candidates = []
+        lat_override = getattr(self.data_config, 'tropical_lat_column', None)
+        if lat_override:
+            candidates.append(lat_override)
+        # Prefer static columns that look like latitude
+        for col in getattr(self.data_config, 'static_columns', []) or []:
+            if 'lat' in str(col).lower():
+                candidates.append(col)
+        # Common column names
+        candidates.extend(['lat', 'latitude', 'LAT', 'Latitude', 'LATITUDE'])
+        for col in candidates:
+            if col in self.df.columns:
+                return col
+        return None
+
     def load_data(self) -> pd.DataFrame:
         """Load data from configured paths and patterns."""
         df_list = []
         logger.info("Loading data from multiple paths...")
+        logger.info(f"data_paths: {self.data_config.data_paths}")
+        logger.info(f"file_pattern: {self.data_config.file_pattern}")
+        logger.info(f"dataset_file_patterns: {getattr(self.data_config, 'dataset_file_patterns', {})}")
         for path in self.data_config.data_paths:
             # Resolve files matching pattern
             # Support per-dataset file patterns if provided
@@ -107,8 +127,15 @@ class DataLoaderIndividual:
                 per_dataset_patterns = getattr(self.data_config, 'dataset_file_patterns', {}) or {}
             except Exception:
                 per_dataset_patterns = {}
-            pattern = per_dataset_patterns.get(path, self.data_config.file_pattern)
-            files = list(Path(path).glob(pattern))
+            # Normalize path for matching (resolve to absolute path)
+            path_normalized = str(Path(path).resolve())
+            # Try both normalized and original path as keys
+            pattern = per_dataset_patterns.get(path_normalized, 
+                      per_dataset_patterns.get(path, self.data_config.file_pattern))
+            logger.info(f"Searching in path: {path} (normalized: {path_normalized}), using pattern: {pattern}")
+            path_obj = Path(path)
+            logger.info(f"Path exists: {path_obj.exists()}, is_dir: {path_obj.is_dir()}")
+            files = list(path_obj.glob(pattern))
             # Deterministic ordering for test runs
             if getattr(self.data_config, 'sort_file_list', True):
                 files = sorted(files, key=lambda p: p.name)
@@ -122,8 +149,10 @@ class DataLoaderIndividual:
                 logger.info(f"Limited to {len(files)} files due to max_files={self.data_config.max_files}")
             
             # Load each file
-            for file_path in files:
+            total_files = len(files)
+            for idx, file_path in enumerate(files, 1):
                 try:
+                    logger.info(f"Loading file {idx}/{total_files}: {file_path.name}")
                     # Check file extension and use appropriate loading method
                     if str(file_path).endswith('.pkl'):
                         df_chunk = pd.read_pickle(file_path)
@@ -138,7 +167,7 @@ class DataLoaderIndividual:
                     
                     # Load all files - zeros are valid data in soil science
                     df_list.append(df_chunk)
-                    logger.debug(f"Loaded {len(df_chunk)} samples from {file_path}")
+                    logger.info(f"Loaded {len(df_chunk)} samples from {file_path.name} (total samples so far: {sum(len(df) for df in df_list)})")
                         
                 except Exception as e:
                     logger.error(f"Failed to load {file_path}: {e}")
@@ -150,6 +179,17 @@ class DataLoaderIndividual:
         # Combine all dataframes
         self.df = pd.concat(df_list, ignore_index=True)
         logger.info(f"Successfully loaded {len(self.df)} samples")
+        
+        # Print all variables/columns in the dataset
+        logger.info("=" * 80)
+        logger.info("所有数据集变量列表 (All Dataset Variables):")
+        logger.info("=" * 80)
+        logger.info(f"总变量数: {len(self.df.columns)}")
+        logger.info(f"数据集形状: {self.df.shape}")
+        logger.info("\n变量列表 (按字母顺序):")
+        for i, col in enumerate(sorted(self.df.columns), 1):
+            logger.info(f"  {i:4d}. {col}")
+        logger.info("=" * 80)
         
         return self.df
 
@@ -177,6 +217,30 @@ class DataLoaderIndividual:
                 logger.info(f"Longitude filtering: {original_size} samples -> {filtered_size} samples (dropped {dropped_count} samples)")
             else:
                 logger.warning("'Longitude' column not found in dataset. Cannot apply longitude filtering.")
+
+        # Optional tropical-only filtering by latitude
+        if getattr(self.data_config, 'tropical_only', False):
+            lat_col = self._resolve_lat_column()
+            if lat_col is None:
+                logger.warning("Tropical filter enabled but no latitude column found. Skipping tropical filtering.")
+            else:
+                lat_range = getattr(self.data_config, 'tropical_lat_range', (-23.5, 23.5))
+                try:
+                    lat_min, lat_max = float(lat_range[0]), float(lat_range[1])
+                except Exception:
+                    lat_min, lat_max = -23.5, 23.5
+                    logger.warning("Invalid tropical_lat_range; falling back to [-23.5, 23.5].")
+                original_size = len(self.df)
+                lat_vals = pd.to_numeric(self.df[lat_col], errors='coerce')
+                mask = lat_vals.between(lat_min, lat_max, inclusive='both')
+                self.df = self.df[mask].reset_index(drop=True)
+                filtered_size = len(self.df)
+                logger.info(
+                    f"Tropical filtering on '{lat_col}': {original_size} -> {filtered_size} "
+                    f"(lat range [{lat_min}, {lat_max}])"
+                )
+                if filtered_size == 0:
+                    logger.warning("Tropical filter removed all samples. Check latitude column and range.")
         
         # Drop specified columns
         if hasattr(self.data_config, 'filter_columns') and self.data_config.filter_columns:
@@ -197,14 +261,14 @@ class DataLoaderIndividual:
                     target_len = int(getattr(self.data_config, 'time_series_length', 240))
                     if isinstance(x, (list, np.ndarray)):
                         arr = np.array(x, dtype=np.float32).flatten()
-                        # Prefer earliest 20-year window as per repeated forcing spec
+                        # Prefer latest 20-year window (last 20 years)
                         if arr.size >= target_len:
-                            arr = arr[:target_len]
+                            arr = arr[-target_len:]
                         else:
-                            # pad to target_len with zeros at the end
+                            # pad to target_len with zeros at the beginning (to align with latest data)
                             pad = target_len - arr.size
                             if pad > 0:
-                                arr = np.pad(arr, (0, pad), mode='constant')
+                                arr = np.pad(arr, (pad, 0), mode='constant')
                         # ensure no NaN/Inf
                         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
                         return arr
@@ -1533,14 +1597,36 @@ class DataLoaderIndividual:
         test_data = {}
         
         total_samples = len(self.df)
-        train_size = int(self.data_config.train_split * total_samples)
-        test_size = total_samples - train_size
         
-        logger.info(f"Data splitting details:")
-        logger.info(f"  - Total samples: {total_samples}")
-        logger.info(f"  - Train split ratio: {self.data_config.train_split}")
-        logger.info(f"  - Train size: {train_size}")
-        logger.info(f"  - Test size: {test_size}")
+        # 如果设置了 test_split，分别使用 train_split 和 test_split 计算
+        # 否则使用原来的逻辑：test_size = total_samples - train_size
+        if self.data_config.test_split is not None:
+            train_size = int(self.data_config.train_split * total_samples)
+            test_size = int(self.data_config.test_split * total_samples)
+            
+            # 验证比例是否合理
+            total_ratio = self.data_config.train_split + self.data_config.test_split
+            if total_ratio > 1.0:
+                logger.warning(
+                    f"Train split ({self.data_config.train_split}) + Test split ({self.data_config.test_split}) = {total_ratio} > 1.0. "
+                    f"Adjusting test_split to {1.0 - self.data_config.train_split}"
+                )
+                test_size = int((1.0 - self.data_config.train_split) * total_samples)
+            
+            unused_size = total_samples - train_size - test_size
+            logger.info(f"Data splitting details:")
+            logger.info(f"  - Total samples: {total_samples}")
+            logger.info(f"  - Train split ratio: {self.data_config.train_split} ({train_size} samples)")
+            logger.info(f"  - Test split ratio: {self.data_config.test_split} ({test_size} samples)")
+            logger.info(f"  - Unused data: {unused_size} samples ({(1.0 - self.data_config.train_split - self.data_config.test_split)*100:.1f}%)")
+        else:
+            train_size = int(self.data_config.train_split * total_samples)
+            test_size = total_samples - train_size
+            
+            logger.info(f"Data splitting details:")
+            logger.info(f"  - Total samples: {total_samples}")
+            logger.info(f"  - Train split ratio: {self.data_config.train_split} ({train_size} samples)")
+            logger.info(f"  - Test size: {test_size} samples (剩余部分)")
 
         # Expose split indices for downstream use (e.g., location validation)
         # Matches the contiguous slicing used below
