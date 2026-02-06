@@ -5,45 +5,15 @@
 # CNP Model configuration approximating the 3.8 M-parameter run (2025-10-07)
 
 [ENCODERS]
-# LSTM encoder
-lstm_hidden_size = 256
-# => Forcing embedding: 256
+# Time series tokenization (months per token)
+patch_size = 60
 
-# Surface/static encoder
-static_fc_size = 256
-# => Surface embedding: 128 (due to final // 2 in the model)
-
-# PFT parameters encoder (use CNN by default for CNP model)
-pft_param_cnn_channels = [32, 64, 128]
-pft_param_cnn_kernel_size = 3
-pft_param_cnn_padding = 1
-use_cnn_for_pft_param = true
-pft_param_size = 44
+# PFT setup
 num_pfts = 17
-# => PFT-parameter embedding (CNN + GAP): 64
-
-# Water encoder (disabled by default in training; keep head size at 0)
-water_fc_size = 0
-
-# Scalar encoder
-scalar_fc_size = 64
-# => Scalar embedding: 32 (two-layer MLP projects to 32)
-
-# 1D PFT encoder
-pft_1d_fc_size = 256
-# => PFT state embedding: 256
-
-[SOIL2D_CNN]
-# Soil 2D encoders (both 1D and 2D branches use these channel sizes)
-conv_channels = [32, 64, 128]
-conv_kernel_size = 3
-conv_padding = 1
-# => Soil 2D embedding: 128 (Flatten -> 128 -> 128 head)
 
 [TRANSFORMER]
 # Feature fusion transformer
-num_tokens = 7
-token_dim = 128
+embed_dim = 128
 transformer_layers = 8
 transformer_heads = 16
 

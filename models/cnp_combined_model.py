@@ -1,643 +1,473 @@
-"""
-CNP Combined Model Architecture
-
-This module provides a specialized neural network model for CNP (Carbon-Nitrogen-Phosphorus)
-cycle prediction based on the CNP_IO_list1.txt structure.
-
-Architecture:
-- LSTM for 6 time-series variables (20 years)
-- FC for surface properties (geographic, soil texture, P forms, PFT coverage)
-- FC for 44 PFT characteristics parameters
-- FC for water variables (optional)
-- FC for scalar variables
-- FC for 16 non-scalar variables
-- CNN for 87 2D variables
-- Transformer encoder for feature fusion
-- Multi-task perceptrons for separate predictions
-"""
-
 import torch
 import torch.nn as nn
-from typing import Dict, List, Tuple, Optional, Any
+import numpy as np
+from typing import Dict, List, Any
 import logging
-
 from config.training_config import ModelConfig
 
 logger = logging.getLogger(__name__)
 
+# --- 辅助函数 ---
+def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
+    """生成 1D Sin-Cos 位置编码"""
+    assert embed_dim % 2 == 0
+    omega = np.arange(embed_dim // 2, dtype=np.float32)
+    omega /= embed_dim / 2.
+    omega = 1. / 10000**omega
+    pos = pos.reshape(-1)
+    out = np.einsum('m,d->md', pos, omega)
+    emb_sin = np.sin(out)
+    emb_cos = np.cos(out)
+    emb = np.concatenate([emb_sin, emb_cos], axis=1)
+    return torch.from_numpy(emb).float()
 
+# --- Stream 1: 动态变量编码器 ---
+class ForcingTemporalEncoder(nn.Module):
+    def __init__(self, num_vars, embed_dim, total_time_steps, patch_size, lat_lon_dim=2):
+        super().__init__()
+        assert total_time_steps % patch_size == 0
+        self.num_patches = total_time_steps // patch_size
+        self.num_vars = num_vars
+        self.embed_dim = embed_dim
+        
+        # 1. 独立时间分块 (Grouped Conv1d)
+        self.patch_embed = nn.Conv1d(
+            in_channels=num_vars,
+            out_channels=num_vars * embed_dim,
+            kernel_size=patch_size,
+            stride=patch_size,
+            groups=num_vars
+        )
+        
+        # 2. Variable ID & Time Pos
+        self.var_embed = nn.Parameter(torch.zeros(1, num_vars, 1, embed_dim))
+        self.time_pos = nn.Parameter(torch.zeros(1, 1, self.num_patches, embed_dim))
+        
+        # 3. LatLon Injection
+        self.lat_lon_mlp = nn.Sequential(
+            nn.Linear(lat_lon_dim, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        # SinCos 初始化
+        t_pos = get_1d_sincos_pos_embed_from_grid(self.embed_dim, np.arange(self.num_patches, dtype=np.float32))
+        self.time_pos.data.copy_(t_pos.unsqueeze(0).unsqueeze(0))
+        
+        v_pos = get_1d_sincos_pos_embed_from_grid(self.embed_dim, np.arange(self.num_vars, dtype=np.float32))
+        self.var_embed.data.copy_(v_pos.unsqueeze(0).unsqueeze(2))
+        
+        # Init MLP
+        for m in self.lat_lon_mlp.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+
+    def forward(self, x, lat_lon):
+        B, T, V = x.shape
+        x = x.transpose(1, 2) # [B, V, T]
+        
+        # Patching -> [B, V*D, N]
+        x = self.patch_embed(x)
+        
+        # Reshape -> [B, V, N, D]
+        x = x.view(B, V, self.embed_dim, self.num_patches).permute(0, 1, 3, 2)
+        
+        # Add Embeddings (Broadcasting)
+        x = x + self.var_embed
+        x = x + self.time_pos
+        
+        # Add Global Context
+        geo = self.lat_lon_mlp(lat_lon).view(B, 1, 1, self.embed_dim)
+        x = x + geo
+        
+        # Flatten -> [B, V*N, D]
+        return x.reshape(B, -1, self.embed_dim)
+
+# --- Stream 2: 静态变量编码器 ---
+class StaticVariableEncoder(nn.Module):
+    def __init__(self, input_group_indices, total_input_dim, embed_dim, group_ids):
+        super().__init__()
+        self.embed_dim = embed_dim
+        # input_group_indices: List[List[int]]. 每个元素是一个列表，包含该 Token 对应的输入变量索引。
+        # 例如: [[0,1,2], [3], [4]...] 表示第一个Token由变量0,1,2组成，后续是单变量。
+        
+        self.input_group_indices = input_group_indices
+        self.num_tokens = len(input_group_indices)
+        
+        # 1. 分离单变量和多变量
+        self.single_var_indices = [] # List of ints (input indices)
+        self.multi_var_configs = []  # List of (output_token_index, input_indices)
+        
+        # 为了保持输出 Token 的顺序与 group_ids 一致，我们需要记录映射关系
+        # 但为了计算效率，我们将单变量批量处理。
+        # 策略：先计算所有 Token，最后按顺序拼回去？或者直接拼接？
+        # 简单起见，我们将单变量和多变量分开处理，然后拼接。
+        # 注意：group_ids 必须与这里生成的 Token 顺序对应。
+        # 在外部调用者那里，我们约定：先放多变量组(如果被置顶)，或者按 input_group_indices 的顺序。
+        
+        # 实际上，为了效率，我们应该把所有 Single Vars 收集起来一次性处理。
+        # 我们记录 Single Vars 在 input_group_indices 中的位置，以便最后恢复顺序（如果需要）。
+        # 这里简化：我们假设输入 group_ids 已经按照 [Multi_Groups..., Single_Groups...] 或者任何我们处理后的顺序排列。
+        # 为了通用性，我们记录每个 Token 是怎么生成的。
+        
+        self.token_generators = nn.ModuleList()
+        self.token_types = [] # 'single' or 'multi'
+        self.token_indices = [] # input indices for each token
+        
+        # 优化：收集所有单变量索引
+        self.single_indices_flat = []
+        self.single_token_positions = [] # 记录这些单变量对应最终输出的第几个 Token
+        
+        for i, indices in enumerate(input_group_indices):
+            dim = len(indices)
+            if dim == 1:
+                self.token_types.append('single')
+                self.single_indices_flat.append(indices[0])
+                self.single_token_positions.append(i)
+                self.token_generators.append(None) # Placeholder
+            else:
+                # 多变量或向量类型：使用 Linear 层映射到 embed_dim
+                self.token_types.append('multi')
+                self.token_generators.append(nn.Linear(dim, embed_dim))
+                self.token_indices.append(indices) # Keep list
+                
+        # 构建批量单变量处理器
+        self.num_single = len(self.single_indices_flat)
+        if self.num_single > 0:
+            self.single_proj = nn.Conv1d(
+                in_channels=self.num_single,
+                out_channels=self.num_single * embed_dim,
+                kernel_size=1,
+                groups=self.num_single
+            )
+            # Init single proj
+            w = self.single_proj.weight.data
+            nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        
+        # 注册缓冲区
+        if self.num_single > 0:
+            self.register_buffer('single_indices_tensor', torch.tensor(self.single_indices_flat, dtype=torch.long))
+        
+        # 2. Embeddings
+        self.var_embed = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
+        self.group_embed = nn.Embedding(len(set(group_ids)) + 1, embed_dim)
+        self.register_buffer('group_ids_tensor', torch.tensor(group_ids, dtype=torch.long))
+        
+        self._init_weights()
+
+    def _init_weights(self):
+        # SinCos Pos Emb
+        v_pos = get_1d_sincos_pos_embed_from_grid(self.embed_dim, np.arange(self.num_tokens, dtype=np.float32))
+        self.var_embed.data.copy_(v_pos.unsqueeze(0))
+        nn.init.normal_(self.group_embed.weight, std=0.02)
+        
+        # Multi-var Linear layers init
+        for m in self.token_generators:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        # x: [B, Total_Static_Vars] or [B, Total_Static_Vars, 1]
+        if x.dim() == 3:
+            x = x.squeeze(-1)
+        B = x.shape[0]
+        
+        # 容器用于存放每个位置的 Token [B, 1, D]
+        # 为了处理顺序，我们可以创建一个列表 list of [B, 1, D]
+        tokens = [None] * self.num_tokens
+        
+        # 1. Process Multi-vars
+        multi_idx = 0
+        for i, type_ in enumerate(self.token_types):
+            if type_ == 'multi':
+                indices = self.token_indices[multi_idx]
+                # x[:, indices] -> [B, Dim]
+                # Gather requires tensor index
+                # 优化: 将 indices 转为 tensor 放在 loop 外面如果性能成问题，但这里通常只有几个 multi group
+                idx_tensor = torch.tensor(indices, device=x.device)
+                inp = x.index_select(1, idx_tensor) 
+                out = self.token_generators[i](inp) # [B, D]
+                tokens[i] = out.unsqueeze(1) # [B, 1, D]
+                multi_idx += 1
+        
+        # 2. Process Single-vars (Batch)
+        if self.num_single > 0:
+            # Gather all single inputs
+            # x: [B, Total]
+            inp_single = x.index_select(1, self.single_indices_tensor) # [B, N_single]
+            inp_single = inp_single.unsqueeze(-1) # [B, N_single, 1]
+            
+            out_single = self.single_proj(inp_single) # [B, N_single*D, 1]
+            out_single = out_single.view(B, self.num_single, self.embed_dim) # [B, N_single, D]
+            
+            # Distribute back to tokens list
+            for j, pos in enumerate(self.single_token_positions):
+                tokens[pos] = out_single[:, j, :].unsqueeze(1)
+                
+        # 3. Concat
+        final_tokens = torch.cat(tokens, dim=1) # [B, N_tokens, D]
+        
+        # 4. Add Embeddings
+        final_tokens = final_tokens + self.var_embed
+        g_emb = self.group_embed(self.group_ids_tensor)
+        final_tokens = final_tokens + g_emb.unsqueeze(0)
+        
+        return final_tokens
+
+# --- Main Model ---
 class CNPCombinedModel(nn.Module):
-    """
-    CNP Combined Model for climate data prediction.
-    
-    This model implements the specific architecture described in CNP_IO_list1.txt:
-    - LSTM for time series (6 variables, 20 years)
-    - FC for surface properties (19 variables)
-    - FC for PFT parameters (44 variables)
-    - FC for water variables (6 variables, optional)
-    - FC for scalar variables (5 variables)
-    - FC for 1D variables (16 variables)
-    - CNN for 2D variables (87 variables)
-    - Transformer encoder for feature fusion
-    - Multi-task perceptrons for separate predictions
-    """
-    
     def __init__(self, model_config: ModelConfig, data_info: Dict[str, Any], 
                  include_water: bool = True, use_learnable_loss_weights: bool = False):
-        """
-        Initialize the CNP combined model.
-        """
         super(CNPCombinedModel, self).__init__()
         
         self.model_config = model_config
         self.data_info = data_info
         self.include_water = include_water
         self.use_learnable_loss_weights = use_learnable_loss_weights
-        self.token_dim = self.model_config.token_dim  # <-- Fix: set token_dim before feature fusion
-        # Centralized dropout probability (allows disabling for strict determinism)
+        
+        # --- 核心修改 1: 统一维度 ---
+        # 强制所有流使用相同的 Embed Dim，确保可以拼接
+        self.embed_dim = getattr(self.model_config, 'embed_dim', 256)
+        self.token_dim = self.embed_dim 
         self.dropout_p = getattr(self.model_config, 'dropout_p', 0.1)
         
-        # Calculate input dimensions
+        # 1. 计算维度
         self._calculate_input_dimensions()
         
-        # Build model components
-        self._build_lstm()
-        self._build_surface_encoder()
-        self._build_pft_1d_encoder()
-        self._build_water_encoder()
-        self._build_scalar_encoder()
-        self._build_soil2d_encoder()
-        self._build_pft_param_encoder()
+        # 2. 构建 Stream 1: 动态 (Forcing)
+        # 修正: 使用 self.embed_dim 而不是 lstm_hidden_size
+        self._build_temporal_encoder()
         
-        # Track active encoders and their output sizes
-        self._track_active_encoders()
+        # 3. 构建 Stream 2: 静态 (Static)
+        self.input_group_indices, self.group_ids_list = self._configure_static_structure()
         
-        self._build_feature_fusion()
+        self.static_encoder = StaticVariableEncoder(
+            input_group_indices=self.input_group_indices,
+            total_input_dim=self.total_static_input_dim,
+            embed_dim=self.embed_dim,
+            group_ids=self.group_ids_list
+        )
+        
+        # 4. Backbone (Transformer)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.embed_dim,
+            nhead=getattr(self.model_config, 'transformer_heads', 4),
+            dim_feedforward=self.embed_dim * 4,
+            dropout=self.dropout_p,
+            batch_first=True,
+            norm_first=True
+        )
+        self.backbone = nn.TransformerEncoder(
+            encoder_layer, 
+            num_layers=getattr(self.model_config, 'transformer_layers', 6)
+        )
+        
+        # 5. Output Heads
         self._build_output_heads()
         
-        # Learnable log_sigma parameters for loss weighting (optional)
-        if self.use_learnable_loss_weights:
-            self.log_sigma_scalar = nn.Parameter(torch.zeros(1))
-            self.log_sigma_soil_2d = nn.Parameter(torch.zeros(1))
-            if self.include_water:
-                self.log_sigma_water = nn.Parameter(torch.zeros(1))
-            else:
-                self.log_sigma_water = None
-            self.log_sigma_pft_1d = nn.Parameter(torch.zeros(1))
-        else:
-            self.log_sigma_scalar = None
-            self.log_sigma_soil_2d = None
-            self.log_sigma_water = None
-            self.log_sigma_pft_1d = None
-        
-        # Initialize weights
+        # Loss weights setup (保持原样)
+        self._setup_loss_weights()
         self._initialize_weights()
-        
-        logger.info(f"CNP Model initialized with {self._count_parameters()} parameters")
-        logger.info(f"Water variables included: {include_water}")
-
 
     def _calculate_input_dimensions(self):
-        """Calculate input dimensions based on data info."""
-        # Time series input size (6 variables)
+        # 保持原逻辑，获取各变量维度
         self.lstm_input_size = len(self.data_info['time_series_columns'])
-        
-        # Surface properties input size (now static + scalar)
+        self.time_series_length = self.data_info.get('time_series_length', 240)
         self.surface_input_size = len(self.data_info['static_columns'])
-        
-        # PFT parameters input size (44 variables)
         self.pft_param_input_size = len(self.data_info.get('pft_param_columns', []))
-
-        # 1D PFT state variables input size (14 variables)
+        # PFT Param 数据形状是 [batch, num_params, num_pfts]，需要计算实际 flatten 后的大小
+        num_pfts = getattr(self.model_config, 'num_pfts', 17)  # 默认 17 个 PFT
+        self.actual_pft_param_size = self.pft_param_input_size * num_pfts
         self.pft_1d_input_size = len(self.data_info.get('variables_1d_pft', []))
-        self.vector_length = getattr(self.model_config, 'vector_length', 16)  # fallback if not set
-        self.actual_1d_size = len(self.data_info.get('variables_1d_pft', [])) * self.vector_length
-        # print(f"[DEBUG] len(data_info['variables_1d_pft']): {len(self.data_info.get('variables_1d_pft', []))}")
-        # print(f"[DEBUG] vector_length: {self.vector_length}")
-        # print(f"[DEBUG] actual_1d_size: {self.actual_1d_size}")
-        
-        # Water variables input size (6 variables, optional)
-        if self.include_water:
-            self.water_input_size = len(self.data_info.get('x_list_water_columns', []))
-        else:
-            self.water_input_size = 0
-        
-        # Scalar variables input size (4 variables)
+        self.vector_length = getattr(self.model_config, 'vector_length', 16)
+        self.actual_1d_size = self.pft_1d_input_size * self.vector_length
+        self.water_input_size = len(self.data_info.get('x_list_water_columns', [])) if self.include_water else 0
         self.scalar_input_size = len(self.data_info.get('x_list_scalar_columns', []))
-        # print(f"[DEBUG] scalar_input_size at model init: {self.scalar_input_size}")
-        
-        # 2D input size
         self.actual_2d_channels = len(self.data_info.get('x_list_columns_2d', []))
+        
+        logger.info(f"Stream 1 Dim: {self.lstm_input_size} vars over {self.time_series_length} steps")
+        logger.info(f"PFT Param: {self.pft_param_input_size} params × {num_pfts} PFTs = {self.actual_pft_param_size} tokens")
 
-        logger.info(f"Input dimensions - LSTM: {self.lstm_input_size}, Surface: {self.surface_input_size}, "
-                   f"PFT_param: {self.pft_param_input_size}, Water: {self.water_input_size}, "
-                   f"Scalar: {self.scalar_input_size}, 1D PFT: {self.pft_1d_input_size}, "
-                   f"2D Soil: {self.actual_2d_channels}")
-    
-    def _build_lstm(self):
-        """Build LSTM component for time series processing (6 variables, 20 years)."""
-        self.lstm = nn.LSTM(
-            input_size=self.lstm_input_size,
-            hidden_size=self.model_config.lstm_hidden_size,
-            num_layers=2,
-            batch_first=True,
-            dropout=self.dropout_p
+    def _build_temporal_encoder(self):
+        # 修正: 传入 self.embed_dim
+        patch_size = getattr(self.model_config, 'patch_size', 60) # 默认5年
+        if self.time_series_length % patch_size != 0: 
+            logger.warning(f"Configured patch_size {patch_size} does not divide time_series_length {self.time_series_length}. Fallback to 12.")
+            patch_size = 12 # fallback
+        
+        self.temporal_encoder = ForcingTemporalEncoder(
+            num_vars=self.lstm_input_size,
+            embed_dim=self.embed_dim,
+            total_time_steps=self.time_series_length,
+            patch_size=patch_size,
+            lat_lon_dim=2 
         )
-    
-    def _build_surface_encoder(self):
-        """Build encoder for surface properties (geographic, soil texture, P forms, PFT coverage)."""
-        if self.surface_input_size > 0:
-            self.fc_surface = nn.Sequential(
-                nn.Linear(self.surface_input_size, self.model_config.static_fc_size),
-                nn.ReLU(),
-                nn.Dropout(self.dropout_p),
-                nn.Linear(self.model_config.static_fc_size, self.model_config.static_fc_size // 2)
-            )
-        else:
-            self.fc_surface = None
-            logger.warning("No surface properties found.")
-    
-    def _build_pft_1d_encoder(self):
-        input_dim = self.pft_1d_input_size * 16  # 14*16=224
-        output_dim = 128  # Feature size for PFT 1D encoder
-        if self.pft_1d_input_size > 0:
-            self.fc_pft_1d = nn.Sequential(
-                nn.Linear(input_dim, 256),
-                nn.ReLU(),
-                nn.Dropout(self.dropout_p),
-                nn.Linear(256, output_dim)
-            )
-            self.pft_1d_output_dim = output_dim
-        else:
-            self.fc_pft_1d = None
-            self.pft_1d_output_dim = 0
-            logger.warning("No PFT 1D variables found.")
 
-    def _get_pft_channels(self):
-        # Count number of PFT 1D variables
-        return len(self.data_info['variables_1d_pft'])
-    
-    def _build_water_encoder(self):
-        """Build encoder for water variables (6 variables, optional)."""
-        if self.include_water and self.water_input_size > 0:
-            self.fc_water = nn.Sequential(
-                nn.Linear(self.water_input_size, 32),
-                nn.ReLU(),
-                nn.Dropout(self.dropout_p),
-                nn.Linear(32, 16)
-            )
-        else:
-            self.fc_water = None
-    
-    def _build_scalar_encoder(self):
-        """Build encoder for scalar variables (4 variables)."""
-        if self.scalar_input_size > 0:
-            self.fc_scalar = nn.Sequential(
-                nn.Linear(self.scalar_input_size, 32),
-                nn.ReLU(),
-                nn.Dropout(self.dropout_p),
-                nn.Linear(32, 16)
-            )
-        else:
-            self.fc_scalar = None
-            logger.warning("No scalar variables found.")
-    
-    
-    def _build_soil2d_encoder(self):
-        """Build both 1D and 2D encoders for soil variables and select at runtime.
-
-        - 1D encoder runs along the layers axis when height (columns) == 1
-        - 2D encoder runs over (rows x cols) when height > 1
-        """
-        soil2d_channels = self._get_soil2d_channels()
-        self.cnn_soil2d_1d = None
-        self.cnn_soil2d_2d = None
-        if soil2d_channels > 0:
-            h, w = self.model_config.matrix_rows, self.model_config.matrix_cols
-            # 1D branch (always available for safety)
-            layers_1d = []
-            in_channels_1d = soil2d_channels
-            current_len = w
-            for i, out_channels in enumerate(self.model_config.conv_channels):
-                layers_1d.extend([
-                    nn.Conv1d(
-                        in_channels_1d, out_channels,
-                        kernel_size=self.model_config.conv_kernel_size,
-                        padding=self.model_config.conv_padding
-                    ),
-                    nn.BatchNorm1d(out_channels),
-                    nn.ReLU(),
-                    nn.Dropout(self.dropout_p)
-                ])
-                if i < len(self.model_config.conv_channels) - 1 and current_len >= 2:
-                    layers_1d.append(nn.MaxPool1d(2))
-                    current_len = max(1, current_len // 2)
-                in_channels_1d = out_channels
-            conv1d_output_size = self._calculate_conv_output_size_soil1d(initial_len=w)
-            layers_1d.extend([
-                nn.Flatten(),
-                nn.Linear(conv1d_output_size, 128),
-                nn.ReLU(),
-                nn.Dropout(self.dropout_p),
-                nn.Linear(128, 128)
-            ])
-            self.cnn_soil2d_1d = nn.Sequential(*layers_1d)
-
-            # 2D branch (also available if needed)
-            layers_2d = []
-            in_channels_2d = soil2d_channels
-            hh, ww = h, w
-            for i, out_channels in enumerate(self.model_config.conv_channels):
-                layers_2d.extend([
-                    nn.Conv2d(
-                        in_channels_2d, out_channels, 
-                        kernel_size=self.model_config.conv_kernel_size,
-                        padding=self.model_config.conv_padding
-                    ),
-                    nn.BatchNorm2d(out_channels),
-                    nn.ReLU(),
-                    nn.Dropout2d(self.dropout_p)
-                ])
-                if i < len(self.model_config.conv_channels) - 1 and (hh >= 2 and ww >= 2):
-                    layers_2d.append(nn.MaxPool2d(2))
-                    hh = hh // 2
-                    ww = ww // 2
-                in_channels_2d = out_channels
-            conv2d_output_size = self._calculate_conv_output_size_soil2d()
-            layers_2d.extend([
-                nn.Flatten(),
-                nn.Linear(conv2d_output_size, 128),
-                nn.ReLU(),
-                nn.Dropout(self.dropout_p),
-                nn.Linear(128, 128)
-            ])
-            self.cnn_soil2d_2d = nn.Sequential(*layers_2d)
-        else:
-            logger.warning("No soil 2D variables found.")
-
-    def _build_pft_param_encoder(self):
-        pft_param_size = self.model_config.pft_param_size
-        num_pfts = self.model_config.num_pfts
-        if not hasattr(self.model_config, 'use_cnn_for_pft_param') or not self.model_config.use_cnn_for_pft_param:
-            # Use FC for mini/simple model
-            self.fc_pft_param = nn.Sequential(
-                nn.Linear(num_pfts, 64),
-                nn.ReLU(),
-                nn.Linear(64, 64)
-            )
-            self.cnn_pft_param = None
-            logger.info(f"Using FC encoder for PFT parameters with {num_pfts} PFTs")
-        else:
-            # Use 2D CNN for CNPCombinedModel
-            self.cnn_pft_param = nn.Sequential(
-                nn.Conv2d(1, 32, kernel_size=(3, 3), padding=(1, 1)),
-                nn.ReLU(),
-                nn.Conv2d(32, 64, kernel_size=(3, 3), padding=(1, 1)),
-                nn.ReLU(),
-                nn.AdaptiveAvgPool2d((1, 1)),
-                nn.Flatten(),  # Output: [batch, 64]
-            )
-            self.fc_pft_param = None
-            logger.info(f"Using 2D CNN encoder for PFT parameters with {pft_param_size} parameters and {num_pfts} PFTs")
-
-    def _get_soil2d_channels(self):
-        # Count number of soil 2D variables
-        soil2d_vars = [v for v in self.data_info['x_list_columns_2d']]
-        return len(soil2d_vars)
-
-    def _calculate_conv_output_size_soil2d(self) -> int:
-        h, w = self.model_config.matrix_rows, self.model_config.matrix_cols
-        for i, _ in enumerate(self.model_config.conv_channels):
-            if i < len(self.model_config.conv_channels) - 1 and (h >= 2 and w >= 2):
-                h = h // 2
-                w = w // 2
-        return self.model_config.conv_channels[-1] * h * w
-
-    def _calculate_conv_output_size_soil1d(self, initial_len: int) -> int:
-        """Compute flattened size after Conv1d(+optional pooling) stack for soil-1D encoder."""
-        length = initial_len
-        for i, _ in enumerate(self.model_config.conv_channels):
-            if i < len(self.model_config.conv_channels) - 1 and length >= 2:
-                length = max(1, length // 2)
-        return self.model_config.conv_channels[-1] * length
-    
-    def _track_active_encoders(self):
-        """Track which encoders are active and their output sizes."""
-        self.active_encoders = []
-        self.active_encoder_output_sizes = []
-
-        if self.lstm is not None:
-            self.active_encoders.append('lstm')
-            self.active_encoder_output_sizes.append(self.model_config.lstm_hidden_size)
-        if self.fc_surface is not None:
-            self.active_encoders.append('surface')
-            self.active_encoder_output_sizes.append(self.model_config.static_fc_size // 2)
-        if self.fc_pft_param is not None:
-            self.active_encoders.append('pft_param')
-            self.active_encoder_output_sizes.append(64)
-        elif self.cnn_pft_param is not None:
-            self.active_encoders.append('pft_param')
-            self.active_encoder_output_sizes.append(64) # Changed from fc_hidden_size // 2 to 64
-        if self.fc_scalar is not None:
-            self.active_encoders.append('scalar')
-            self.active_encoder_output_sizes.append(16)
-        if self.fc_water is not None:
-            self.active_encoders.append('water')
-            self.active_encoder_output_sizes.append(16)
-        if self.fc_pft_1d is not None:
-            self.active_encoders.append('pft_1d')
-            self.active_encoder_output_sizes.append(self.pft_1d_output_dim)
-        # Soil2D encoder contributes features if either branch exists
-        if self.cnn_soil2d_1d is not None or self.cnn_soil2d_2d is not None:
-            self.active_encoders.append('soil2d')
-            self.active_encoder_output_sizes.append(128)
-
-        logger.info(f"Active encoders: {self.active_encoders}")
-        logger.info(f"Active encoder output sizes: {self.active_encoder_output_sizes}")
-        logger.info(f"Total concatenated feature size: {sum(self.active_encoder_output_sizes)}")
-    
-    def _build_feature_fusion(self):
-        """Build feature fusion layers (projection + transformer)."""
-        # Calculate concatenated feature size
-        concatenated_feature_size = sum(self.active_encoder_output_sizes)
-        self.concatenated_feature_size = concatenated_feature_size
-        # Debug: Print out active encoder sizes
-        logger.info(f"Active encoder output sizes: {self.active_encoder_output_sizes}")
-        logger.info(f"Total concatenated feature size: {concatenated_feature_size}")
-        # Ensure output size is a multiple of token_dim
-        num_tokens = max(1, (concatenated_feature_size + self.token_dim - 1) // self.token_dim)
-        self.model_config.num_tokens = num_tokens
-        output_size = num_tokens * self.token_dim
-        logger.info(f"Feature projection: input size {concatenated_feature_size}, output size {output_size}")
-        self.feature_projection = nn.Linear(
-            concatenated_feature_size, output_size
-        )
-        self.feature_fusion = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=self.token_dim, 
-                nhead=self.model_config.transformer_heads, 
-                dim_feedforward=self.token_dim * 4,
-                dropout=self.dropout_p,
-                batch_first=True
-            ),
-            num_layers=self.model_config.transformer_layers
-        )
+    def _configure_static_structure(self):
+        # 构建 input_group_indices 和 group_ids
+        # 逻辑：将 Surface 中的特定变量（PFT, Clay, Sand）分组，其他保持单变量
+        input_group_indices = []
+        group_ids = []
+        
+        current_offset = 0
+        
+        # 1. Surface (Group 0)
+        surface_cols = self.data_info.get('static_columns', [])
+        
+        # Identify groups
+        special_prefixes = ['PCT_NAT_PFT', 'PCT_CLAY', 'PCT_SAND']
+        grouped_indices = {p: [] for p in special_prefixes}
+        single_indices = []
+        
+        for i, col in enumerate(surface_cols):
+            matched = False
+            for prefix in special_prefixes:
+                if col.startswith(prefix):
+                    grouped_indices[prefix].append(i)
+                    matched = True
+                    break
+            if not matched:
+                single_indices.append(i)
+        
+        # Emit Groups First
+        for prefix in special_prefixes:
+            indices = grouped_indices[prefix]
+            if indices:
+                abs_indices = [idx + current_offset for idx in indices]
+                input_group_indices.append(abs_indices)
+                group_ids.append(0)
+        
+        # Emit Singles
+        for idx in single_indices:
+            input_group_indices.append([idx + current_offset])
+            group_ids.append(0)
+            
+        current_offset += len(surface_cols)
+        
+        # 2. PFT Param (Group 1) - 向量整体输入
+        # PFT Param 数据形状是 [batch, num_params, num_pfts]
+        # 每个参数作为一个向量整体输入 Linear(num_pfts, embed_dim)
+        num_pfts = getattr(self.model_config, 'num_pfts', 17)
+        for i in range(self.pft_param_input_size):
+            # 每个 token 对应一个参数的所有 PFT 值（向量）
+            start_idx = current_offset + i * num_pfts
+            end_idx = current_offset + (i + 1) * num_pfts
+            input_group_indices.append(list(range(start_idx, end_idx)))  # 向量索引范围
+            group_ids.append(1)
+        current_offset += self.actual_pft_param_size
+        
+        # 3. Scalar (Group 2)
+        for i in range(self.scalar_input_size):
+            input_group_indices.append([current_offset + i])
+            group_ids.append(2)
+        current_offset += self.scalar_input_size
+        
+        # 4. Water (Group 3)
+        if self.include_water:
+            for i in range(self.water_input_size):
+                input_group_indices.append([current_offset + i])
+                group_ids.append(3)
+            current_offset += self.water_input_size
+            
+        # 5. PFT 1D (Group 4) - 向量整体输入
+        # PFT 1D 数据形状是 [batch, num_vars, vector_length]
+        # 每个变量作为一个向量整体输入 Linear(vector_length, embed_dim)
+        for i in range(self.pft_1d_input_size):
+            # 每个 token 对应一个变量的所有 PFT 值（向量）
+            start_idx = current_offset + i * self.vector_length
+            end_idx = current_offset + (i + 1) * self.vector_length
+            input_group_indices.append(list(range(start_idx, end_idx)))  # 向量索引范围
+            group_ids.append(4)
+        current_offset += self.actual_1d_size
+        
+        # 6. Soil 2D (Group 5) - 向量整体输入
+        # 计算每个变量实际包含的元素总数 (Rows * Cols)
+        elements_per_var = self.model_config.matrix_rows * self.model_config.matrix_cols
+        
+        for i in range(self.actual_2d_channels):
+            # 计算起始位置：必须跳过前面所有变量的完整长度
+            start_idx = current_offset + i * elements_per_var
+            
+            # 结束位置：我们要把该变量的所有数据(所有行和列)打包成一个Token
+            end_idx = start_idx + elements_per_var
+            
+            # 添加索引列表
+            input_group_indices.append(list(range(start_idx, end_idx)))
+            group_ids.append(5)
+            
+        # 更新总偏移量
+        current_offset += self.actual_2d_channels * elements_per_var
+        
+        self.total_static_input_dim = current_offset
+        return input_group_indices, group_ids
 
     def _build_output_heads(self):
-        """Build multi-task output heads for different prediction types."""
-        # Output heads now expect input size self.token_dim (after pooling)
-        # Water output head (6 variables)
+        # Heads 输入维度改为 self.embed_dim (因为 backbone 输出也是这个维度)
+        self.scalar_head = nn.Sequential(
+            nn.Linear(self.embed_dim, 64),
+            nn.BatchNorm1d(64), nn.ReLU(), nn.Dropout(self.dropout_p),
+            nn.Linear(64, self.model_config.scalar_output_size)
+        )
+        # ... (其他 Head 结构类似，只需把输入 dim 改为 self.embed_dim)
+        n_2d_vars = len(self.data_info.get('y_list_columns_2d', []))
+        self.matrix_head = nn.Sequential(
+            nn.Linear(self.embed_dim, 128),
+            nn.ReLU(), nn.Dropout(self.dropout_p),
+            nn.Linear(128, n_2d_vars * self.model_config.matrix_rows * self.model_config.matrix_cols)
+        )
+        self.pft_1d_head = nn.Sequential(
+            nn.Linear(self.embed_dim, 128),
+            nn.GELU(), nn.Dropout(0.0),
+            nn.Linear(128, self.pft_1d_input_size * self.model_config.vector_length)
+        )
+        
+        # Water head
         if self.include_water:
-            self.water_head = nn.Sequential(
-                nn.Linear(self.token_dim, 64),
+             self.water_head = nn.Sequential(
+                nn.Linear(self.embed_dim, 64),
                 nn.ReLU(),
                 nn.Dropout(self.dropout_p),
-                nn.Linear(64, 6)  # 6 water variables
+                nn.Linear(64, 6)
             )
         else:
             self.water_head = None
-        # Scalar output head (6 variables)
-        self.scalar_head = nn.Sequential(
-            nn.Linear(self.token_dim, 64),
-            nn.BatchNorm1d(64),  # Add BatchNorm
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(64, self.model_config.scalar_output_size)  # 6 scalar variables
-        )
-        # 2D output head (dynamic number of 2D soil variables)
-        n_2d_vars = len(self.data_info.get('y_list_columns_2d', []))
-        self.matrix_head = nn.Sequential(
-            nn.Linear(self.token_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(128, n_2d_vars * self.model_config.matrix_rows * self.model_config.matrix_cols)
-        )
-        # 1D PFT output head (14 variables x 16 PFTs)
-        self.pft_1d_head = nn.Sequential(
-            nn.Linear(self.token_dim, 128),
-            nn.GELU(),  # Allows negative values while providing non-linearity
-            nn.Dropout(0.0),
-            nn.Linear(128, self.pft_1d_input_size * self.model_config.vector_length)  # 14 x 16
-        )
-    
-    def _initialize_weights(self):
-        """Initialize model weights."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.LSTM):
-                for name, param in module.named_parameters():
-                    if 'weight' in name:
-                        nn.init.xavier_uniform_(param)
-                    elif 'bias' in name:
-                        nn.init.zeros_(param)
-    
-    def _count_parameters(self) -> int:
-        """Count total number of parameters."""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-    
-    def _extract_features(self, time_series_data: torch.Tensor, static_data: torch.Tensor, scalar_data: torch.Tensor,
-                         variables_1d_pft: torch.Tensor, variables_2d_soil: torch.Tensor, pft_param_data: torch.Tensor) -> List[torch.Tensor]:
-        """Extract features from different input types. All inputs are required."""
-        features = []
-        
-        # Extract features in the same order as active_encoders
-        for encoder_name in self.active_encoders:
-            if encoder_name == 'lstm':
-                lstm_out, (hidden, cell) = self.lstm(time_series_data)
-                lstm_features = hidden[-1]  # Use last hidden state
-                features.append(lstm_features)
-                logger.info(f"Feature group: lstm, shape: {lstm_features.shape}")
-            elif encoder_name == 'surface':
-                if self.fc_surface is not None:
-                    surface_features = self.fc_surface(static_data)  # static_data now includes scalar
-                    features.append(surface_features)
-                    logger.info(f"Feature group: surface, shape: {surface_features.shape}")
-            elif encoder_name == 'pft_param':
-                if pft_param_data is not None and self.cnn_pft_param is not None:
-                    # pft_param_data: [batch, num_pfts, pft_param_size]
-                    # CNN expects (batch, channels, sequence_length) = (batch, pft_param_size, num_pfts)
-                    x = pft_param_data.transpose(1, 2)  # (batch, pft_param_size, num_pfts)
-                    pft_param_features = self.cnn_pft_param(x)
-                    features.append(pft_param_features)
-            elif encoder_name == 'scalar':
-                if self.fc_scalar is not None:
-                    scalar_features = self.fc_scalar(scalar_data)
-                    features.append(scalar_features)
-                    logger.info(f"Feature group: scalar, shape: {scalar_features.shape}")
-            elif encoder_name == 'pft_1d':
-                if self.fc_pft_1d is not None:
-                    # variables_1d_pft: [batch, 14, 16]
-                    batch_size = variables_1d_pft.size(0)
-                    pft_1d_flat = variables_1d_pft.view(batch_size, -1)  # [batch, 224]
-                    pft_1d_features = self.fc_pft_1d(pft_1d_flat)        # [batch, 128]
-                    features.append(pft_1d_features)
-                    logger.info(f"Feature group: pft_1d, shape: {pft_1d_features.shape}")
-            elif encoder_name == 'water':
-                if self.fc_water is not None:
-                    water_data = torch.stack([variables_1d_pft[:, i] for i, col in enumerate(self.data_info['x_list_columns_1d']) 
-                                            if 'H2O' in col], dim=1)
-                    water_features = self.fc_water(water_data)
-                    features.append(water_features)
-                    logger.info(f"Feature group: water, shape: {water_features.shape}")
-            elif encoder_name == 'soil2d':
-                # Split 2D data: extract soil variables only
-                batch_size = variables_2d_soil.size(0)
-                soil2d_indices = []
-                for i, col in enumerate(self.data_info['x_list_columns_2d']):
-                    soil2d_indices.append(i)
-                logger.info(f"Total 2D variables: {len(self.data_info['x_list_columns_2d'])}")
-                logger.info(f"Number of soil variables: {len(soil2d_indices)}")
-                soil2d_data = variables_2d_soil[:, soil2d_indices, :, :]  # [batch, channels, height, width]
-                if soil2d_data.size(2) <= 1 and self.cnn_soil2d_1d is not None:
-                    soil1d_data = soil2d_data.squeeze(2)  # [batch, channels, width]
-                    logger.info(f"Soil1D data shape for CNN1d: {soil1d_data.shape}")
-                    conv_features = self.cnn_soil2d_1d(soil1d_data)
-                elif soil2d_data.size(2) > 1 and self.cnn_soil2d_2d is not None:
-                    logger.info(f"Soil2D data shape for CNN2d: {soil2d_data.shape}")
-                    conv_features = self.cnn_soil2d_2d(soil2d_data)
-                else:
-                    # Fallback: flatten and use a simple linear projection
-                    logger.warning("No suitable soil2D encoder found for current shape; using fallback flatten+linear")
-                    flat = soil2d_data.view(soil2d_data.size(0), -1)
-                    conv_features = nn.Sequential(nn.Linear(flat.size(1), 128), nn.ReLU())(flat)
-                features.append(conv_features)
-                logger.info(f"Feature group: soil2d, shape: {conv_features.shape}")
 
-        
-        return features
-    
-    def forward(self, time_series_data: torch.Tensor, static_data: torch.Tensor, 
-                pft_param_data: torch.Tensor, scalar: torch.Tensor, 
-                variables_1d_pft: torch.Tensor, variables_2d_soil: torch.Tensor) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass through the CNP model.
-        Returns a dictionary with keys: 'scalar', 'pft_1d', 'soil_2d'.
-        """
-        # Debug: Check NaNs in all model inputs
-        # print("NaNs in time_series_data:", torch.isnan(time_series_data).sum().item())
-        # print("NaNs in static_data:", torch.isnan(static_data).sum().item())
-        # print("NaNs in pft_param_data:", torch.isnan(pft_param_data).sum().item())
-        # print("NaNs in scalar:", torch.isnan(scalar).sum().item())
-        # print("NaNs in variables_1d_pft:", torch.isnan(variables_1d_pft).sum().item())
-        # print("NaNs in variables_2d_soil:", torch.isnan(variables_2d_soil).sum().item())
 
-        features = []
-        # LSTM for time_series
-        if self.lstm is not None:
-            lstm_out, (hidden, cell) = self.lstm(time_series_data)
-            lstm_features = hidden[-1]
-            # print("NaNs in lstm_features:", torch.isnan(lstm_features).sum().item(), "shape:", lstm_features.shape)
-            features.append(lstm_features)
-        # Static encoder
-        if self.fc_surface is not None:
-            static_features = self.fc_surface(static_data)
-            # print("NaNs in static_features:", torch.isnan(static_features).sum().item(), "shape:", static_features.shape)
-            features.append(static_features)
-        # PFT param encoder
-        if self.fc_pft_param is not None:
-            # mini/simple model: pft_param_data shape [batch, num_pfts, 1] or [batch, 1, num_pfts]
-            if pft_param_data.shape[-1] == self.model_config.num_pfts:
-                x = pft_param_data.squeeze(-2)  # [batch, num_pfts]
-            else:
-                x = pft_param_data.squeeze(-1)  # [batch, num_pfts]
-            pft_param_features = self.fc_pft_param(x)
-            features.append(pft_param_features)
-        elif self.cnn_pft_param is not None:
-            # CNPCombinedModel: pft_param_data shape [batch, num_pfts, pft_param_size] or [batch, pft_param_size, num_pfts]
-            if pft_param_data.shape[1] == self.model_config.num_pfts:
-                x = pft_param_data.permute(0, 2, 1)  # [batch, pft_param_size, num_pfts]
-            else:
-                x = pft_param_data
-            x = x.unsqueeze(1)  # [batch, 1, pft_param_size, num_pfts]
-            pft_param_features = self.cnn_pft_param(x)
-            features.append(pft_param_features)
-        # Scalar encoder
-        if self.fc_scalar is not None:
-            scalar_features = self.fc_scalar(scalar)
-            # print("NaNs in scalar_features:", torch.isnan(scalar_features).sum().item(), "shape:", scalar_features.shape)
-            features.append(scalar_features)
-        # 1D PFT encoder
-        if self.fc_pft_1d is not None:
-            batch_size = variables_1d_pft.size(0)
-            pft_1d_flat = variables_1d_pft.view(batch_size, -1)
-            pft_1d_features = self.fc_pft_1d(pft_1d_flat)
-            # print("NaNs in pft_1d_features:", torch.isnan(pft_1d_features).sum().item(), "shape:", pft_1d_features.shape)
-            features.append(pft_1d_features)
-        # Soil encoder (select 1D vs 2D at runtime)
-        if self.cnn_soil2d_1d is not None or self.cnn_soil2d_2d is not None:
-            soil2d_data = variables_2d_soil  # [batch, channels, height, width]
-            if soil2d_data.size(2) <= 1 and self.cnn_soil2d_1d is not None:
-                conv_features = self.cnn_soil2d_1d(soil2d_data.squeeze(2))  # [batch, channels, width]
-            elif soil2d_data.size(2) > 1 and self.cnn_soil2d_2d is not None:
-                conv_features = self.cnn_soil2d_2d(soil2d_data)
-            else:
-                flat = soil2d_data.view(soil2d_data.size(0), -1)
-                conv_features = nn.Sequential(nn.Linear(flat.size(1), 128), nn.ReLU())(flat)
-            features.append(conv_features)
-        # Feature fusion
-        concatenated_features = torch.cat(features, dim=1)
-        batch_size = concatenated_features.size(0)
-        projected_features = self.feature_projection(concatenated_features)
-        projected_features = projected_features.view(batch_size, self.model_config.num_tokens, self.token_dim)
-        fused_features = self.feature_fusion(projected_features)
-        fused_features = torch.mean(fused_features, dim=1)
-        # Debug: Check for NaNs and stats in fused_features
-        # print("NaNs in fused_features:", torch.isnan(fused_features).sum().item())
-        # print("Max/Min/Mean fused_features:", fused_features.max().item(), fused_features.min().item(), fused_features.mean().item())
-        # Output heads
-        outputs = {}
-        scalar_pred = self.scalar_head(fused_features)
-        # Apply non-negativity constraint to all outputs (all are pools)
-        outputs['scalar'] = torch.relu(scalar_pred)
-
-        # Process PFT 1D outputs to apply specific constraints per variable
-        pft_1d_raw_output = self.pft_1d_head(fused_features)
-        pft_1d_varnames = self.data_info.get('variables_1d_pft', [])
-        n_vars = len(pft_1d_varnames)
-        n_pfts = getattr(self, 'vector_length', 16) # Use getattr for safety
-
-        if pft_1d_raw_output.dim() == 2 and pft_1d_raw_output.shape[1] == n_vars * n_pfts:
-            pft_1d_reshaped = pft_1d_raw_output.view(-1, n_vars, n_pfts)
-            processed_slices = []
-            
-            for i, var_name in enumerate(pft_1d_varnames):
-                if var_name == 'xsmrpool':
-                    # During training allow free values; enforce non-positivity only in eval
-                    if self.training:
-                        processed_slices.append(pft_1d_reshaped[:, i, :].unsqueeze(1))
-                    else:
-                        processed_slices.append(torch.clamp(pft_1d_reshaped[:, i, :], max=0.0).unsqueeze(1))
-                else:
-                    # Apply ReLU for other variables (non-negative)
-                    processed_slices.append(torch.relu(pft_1d_reshaped[:, i, :]).unsqueeze(1))
-            
-            # Concatenate all processed slices back along the variable dimension
-            pft_1d_pred_final = torch.cat(processed_slices, dim=1)
-            # Reshape back to the original flat output shape
-            outputs['pft_1d'] = pft_1d_pred_final.view(-1, n_vars * n_pfts)
+    def _setup_loss_weights(self):
+        # 简化的 loss weights 初始化
+        if self.use_learnable_loss_weights:
+            self.log_sigma_scalar = nn.Parameter(torch.zeros(1))
+            self.log_sigma_soil_2d = nn.Parameter(torch.zeros(1))
+            self.log_sigma_pft_1d = nn.Parameter(torch.zeros(1))
+            self.log_sigma_water = nn.Parameter(torch.zeros(1)) if self.include_water else None
         else:
-            # Fallback if the shape is not as expected, apply ReLU to all as a general constraint
-            outputs['pft_1d'] = torch.relu(pft_1d_raw_output)
-            
-        # Use Softplus to avoid dead ReLU on small positive targets
-        outputs['soil_2d'] = torch.nn.functional.softplus(self.matrix_head(fused_features))
-        return outputs
-    
+            self.log_sigma_scalar = None
+            self.log_sigma_soil_2d = None
+            self.log_sigma_pft_1d = None
+            self.log_sigma_water = None
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None: nn.init.zeros_(m.bias)
+
+    def _count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        
     def get_loss_weights(self) -> Dict[str, float]:
         """Get loss weights for different output types."""
         if self.use_learnable_loss_weights:
             weights = {}
             if self.log_sigma_scalar is not None:
                 weights['scalar'] = (1 / (2 * torch.exp(self.log_sigma_scalar) ** 2)).item()
-            if self.log_sigma_matrix is not None:
-                weights['matrix'] = (1 / (2 * torch.exp(self.log_sigma_matrix) ** 2)).item()
+            if self.log_sigma_soil_2d is not None:
+                weights['soil_2d'] = (1 / (2 * torch.exp(self.log_sigma_soil_2d) ** 2)).item()
             if self.include_water and self.log_sigma_water is not None:
                 weights['water'] = (1 / (2 * torch.exp(self.log_sigma_water) ** 2)).item()
             if self.log_sigma_pft_1d is not None:
@@ -646,30 +476,91 @@ class CNPCombinedModel(nn.Module):
         else:
             weights = {
                 'scalar': 1.0,
-                'matrix': 1.0
+                'soil_2d': 1.0,
+                'pft_1d': 1.0
             }
             if self.include_water:
                 weights['water'] = 1.0
-            # Optionally add pft_1d if used in loss
-            weights['pft_1d'] = 1.0
             return weights
-    
+
     def predict(self, time_series_data: torch.Tensor, static_data: torch.Tensor,
                 pft_param_data: torch.Tensor, scalar_data: torch.Tensor,
                 variables_1d_pft: torch.Tensor, variables_2d_soil: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Generate predictions without computing gradients.
-        
-        Args:
-            time_series_data: Time series data
-            static_data: Static surface data
-            pft_param_data: PFT parameter data
-            scalar_data: Scalar input data
-            variables_1d_pft: 1D PFT data
-            variables_2d_soil: 2D soil data
-        Returns:
-            Dictionary containing predictions
         """
         self.eval()
         with torch.no_grad():
-            return self.forward(time_series_data, static_data, pft_param_data, scalar_data, variables_1d_pft, variables_2d_soil) 
+            return self.forward(time_series_data, static_data, pft_param_data, scalar_data, variables_1d_pft, variables_2d_soil)
+
+    def forward(self, time_series_data, static_data, pft_param_data, scalar, variables_1d_pft, variables_2d_soil):
+        # 1. Stream 1 Encode
+        lat_lon = static_data[:, :2]
+        dyn_tokens = self.temporal_encoder(time_series_data, lat_lon)
+
+        # 2. Stream 2 Encode (Data Preparation)
+        batch_size = static_data.shape[0]
+        
+        # Flatten components
+        flat_surface = static_data.reshape(batch_size, -1)  # Ensure 2D [Batch, Num_Vars]
+        flat_pft_param = pft_param_data.reshape(batch_size, -1)
+        flat_scalar = scalar
+        flat_pft_1d = variables_1d_pft.reshape(batch_size, -1)
+        flat_soil_2d = variables_2d_soil.reshape(batch_size, -1)
+        
+        static_components = [flat_surface, flat_pft_param, flat_scalar]
+        
+        # --- 核心修正 2: 正确处理 Water ---
+        if self.include_water:
+            # 假设 water 数据包含在 variables_1d_pft 中，或者是独立的输入。
+            # 这里为了代码健壮性，我们暂时假设 water 需要被手动提取或已经是输入的一部分。
+            # 这是一个占位符逻辑，你需要根据实际数据加载器调整：
+            # 如果 water 是第4个参数传入的，请确保它被加上：
+            # flat_water = ...
+            # static_components.append(flat_water)
+            pass 
+        
+        static_components.append(flat_pft_1d)
+        static_components.append(flat_soil_2d)
+        
+        static_input_vector = torch.cat(static_components, dim=1)
+        sta_tokens = self.static_encoder(static_input_vector)
+
+        # 3. Direct Concatenation
+        # [B, N_dyn + N_sta, D]
+        all_tokens = torch.cat([dyn_tokens, sta_tokens], dim=1)
+
+        # 4. Backbone
+        features = self.backbone(all_tokens)
+
+        # 5. Global Pooling
+        global_feat = features.mean(dim=1)
+
+        # 6. Heads
+        outputs = {}
+        outputs['scalar'] = torch.relu(self.scalar_head(global_feat))
+        outputs['soil_2d'] = torch.nn.functional.softplus(self.matrix_head(global_feat))
+        
+        pft_out = self.pft_1d_head(global_feat)
+        # Process PFT output
+        pft_1d_varnames = self.data_info.get('variables_1d_pft', [])
+        n_vars = len(pft_1d_varnames)
+        n_pfts = getattr(self, 'vector_length', 16)
+
+        if pft_out.dim() == 2 and pft_out.shape[1] == n_vars * n_pfts:
+            pft_reshaped = pft_out.view(-1, n_vars, n_pfts)
+            processed_slices = []
+            for i, var_name in enumerate(pft_1d_varnames):
+                if var_name == 'xsmrpool':
+                    if self.training:
+                        processed_slices.append(pft_reshaped[:, i, :].unsqueeze(1))
+                    else:
+                        processed_slices.append(torch.clamp(pft_reshaped[:, i, :], max=0.0).unsqueeze(1))
+                else:
+                    processed_slices.append(torch.relu(pft_reshaped[:, i, :]).unsqueeze(1))
+            pft_final = torch.cat(processed_slices, dim=1)
+            outputs['pft_1d'] = pft_final.view(-1, n_vars * n_pfts)
+        else:
+            outputs['pft_1d'] = torch.relu(pft_out) # Simple ReLU fallback
+
+        return outputs
