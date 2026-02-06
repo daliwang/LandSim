@@ -6,7 +6,7 @@ making it easy to modify training settings without changing the core code.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -94,7 +94,12 @@ class DataConfig:
     
     # Data splitting
     train_split: float = 0.8
+    test_split: Optional[float] = None
     random_state: int = 42
+    # Tropical-only filtering (apply before train/test split)
+    tropical_only: bool = False
+    tropical_lat_range: Tuple[float, float] = (-23.5, 23.5)
+    tropical_lat_column: Optional[str] = None
     
     
     # File loading limits (for testing)
@@ -114,7 +119,11 @@ class DataConfig:
 class ModelConfig:
     """Configuration for model architecture."""
     
-    # LSTM parameters
+    # Core dimensions (Dual Stream Architecture)
+    embed_dim: int = 256
+    patch_size: int = 60
+
+    # LSTM parameters (Legacy / Stream 1 variant)
     lstm_hidden_size: int = 64
     
     # Fully connected layers
