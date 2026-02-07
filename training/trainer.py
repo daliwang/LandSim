@@ -551,11 +551,27 @@ class ModelTrainer:
             if getattr(self.config, 'pft_zero_sparsity_weight', 0.0) > 0.0:
                 with torch.no_grad():
                     zero_mask = (vector_targ.abs() <= getattr(self.config, 'pft_zero_threshold', 1e-8))
-                # Reshape predictions to match target shape if needed
                 try:
                     pred_for_penalty = (vector_pred if vector_pred.shape == vector_targ.shape
                                         else vector_pred.view_as(vector_targ))
-                    sparsity_penalty = (pred_for_penalty.abs() * zero_mask).mean()
+                    # Apply per-variable weights if provided
+                    var_weights = getattr(self.config, 'pft_zero_sparsity_weights', {}) or {}
+                    if var_weights and pred_for_penalty.dim() == 2:
+                        n_pfts = int(getattr(self.model_config, 'vector_length', 16) or 16)
+                        varnames = self.data_info.get('y_list_columns_1d', []) if isinstance(self.data_info, dict) else []
+                        n_vars = len(varnames) if varnames else (pred_for_penalty.size(1) // n_pfts)
+                        pred_3d = pred_for_penalty.view(pred_for_penalty.size(0), n_vars, n_pfts)
+                        mask_3d = zero_mask.view_as(pred_3d)
+                        weights = torch.ones(n_vars, device=pred_3d.device, dtype=pred_3d.dtype)
+                        for i in range(n_vars):
+                            name = varnames[i] if i < len(varnames) else None
+                            if name in var_weights:
+                                weights[i] = float(var_weights[name])
+                            elif name and name.startswith('Y_') and name[2:] in var_weights:
+                                weights[i] = float(var_weights[name[2:]])
+                        sparsity_penalty = (pred_3d.abs() * mask_3d * weights.view(1, -1, 1)).mean()
+                    else:
+                        sparsity_penalty = (pred_for_penalty.abs() * zero_mask).mean()
                     loss = loss + self.config.pft_zero_sparsity_weight * sparsity_penalty
                 except Exception:
                     pass

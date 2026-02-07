@@ -268,6 +268,37 @@ def main():
         help='Extra loss weight multiplier for litter nitrogen vars (litr1/2/3n_vr)'
     )
     parser.add_argument(
+        '--pft-zero-sparsity-weight',
+        type=float,
+        default=None,
+        help='Penalty weight for non-zero PFT1D predictions where target is zero (default: disabled)'
+    )
+    parser.add_argument(
+        '--pft-zero-threshold',
+        type=float,
+        default=None,
+        help='Threshold in normalized target space to treat PFT1D target as zero (default: 1e-8)'
+    )
+    parser.add_argument(
+        '--pft-zero-sparsity-weights-json',
+        type=str,
+        default=None,
+        help='Path to JSON mapping of per-variable sparsity weights (keys like cpool or Y_cpool)'
+    )
+    parser.add_argument(
+        '--pft1d-activation',
+        type=str,
+        default=None,
+        choices=['abs', 'relu', 'softplus', 'linear'],
+        help='Default activation for PFT1D outputs'
+    )
+    parser.add_argument(
+        '--pft1d-activation-overrides-json',
+        type=str,
+        default=None,
+        help='Path to JSON mapping of per-variable PFT1D activations (keys like cpool or Y_cpool)'
+    )
+    parser.add_argument(
         '--litter-p-loss-weight',
         type=float,
         default=None,
@@ -370,6 +401,41 @@ def main():
             logger.info(f"Using default CNP variable configuration{' with water' if include_water else ' without water'}")
         if args.model_config is not None:
             logger.info(f"Applied model architecture overrides from: {args.model_config}")
+        if args.pft_zero_sparsity_weight is not None or args.pft_zero_threshold is not None:
+            update_kwargs = {}
+            if args.pft_zero_sparsity_weight is not None:
+                update_kwargs['pft_zero_sparsity_weight'] = float(args.pft_zero_sparsity_weight)
+            if args.pft_zero_threshold is not None:
+                update_kwargs['pft_zero_threshold'] = float(args.pft_zero_threshold)
+            try:
+                config.update_training_config(**update_kwargs)
+                logger.info(f"Applied PFT zero sparsity settings: {update_kwargs}")
+            except Exception as e:
+                logger.warning(f"Failed to apply PFT zero sparsity settings: {e}")
+        if args.pft_zero_sparsity_weights_json is not None:
+            try:
+                with open(args.pft_zero_sparsity_weights_json, 'r') as f:
+                    weights = json.load(f)
+                if isinstance(weights, dict):
+                    config.update_training_config(pft_zero_sparsity_weights=weights)
+                    logger.info(f"Applied per-variable PFT sparsity weights from: {args.pft_zero_sparsity_weights_json}")
+            except Exception as e:
+                logger.warning(f"Failed to load per-variable sparsity weights: {e}")
+        if args.pft1d_activation is not None:
+            try:
+                config.update_model_config(pft1d_activation=str(args.pft1d_activation).lower())
+                logger.info(f"Applied default PFT1D activation: {args.pft1d_activation}")
+            except Exception as e:
+                logger.warning(f"Failed to set default PFT1D activation: {e}")
+        if args.pft1d_activation_overrides_json is not None:
+            try:
+                with open(args.pft1d_activation_overrides_json, 'r') as f:
+                    overrides = json.load(f)
+                if isinstance(overrides, dict):
+                    config.update_model_config(pft1d_activation_overrides=overrides)
+                    logger.info(f"Applied PFT1D activation overrides from: {args.pft1d_activation_overrides_json}")
+            except Exception as e:
+                logger.warning(f"Failed to load PFT1D activation overrides: {e}")
         # Set train/validation split
         config.update_data_config(train_split=0.8)
         # Prefer GPU when available, otherwise CPU

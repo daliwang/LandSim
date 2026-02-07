@@ -164,6 +164,9 @@ class ModelConfig:
     pft_1d_fc_size: int = 64
     num_pfts: int = 17  # Number of PFTs (default/fallback)
     use_cnn_for_pft_param: bool = False  # Whether to use CNN for PFT parameters
+    # PFT1D activation control
+    pft1d_activation: str = 'abs'  # 'abs', 'relu', 'softplus', 'linear'
+    pft1d_activation_overrides: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -244,6 +247,7 @@ class TrainingConfig:
     # PFT sparsity regularization (encourage zero predictions where targets are zero)
     pft_zero_sparsity_weight: float = 0.0  # default disabled; set >0 to enable
     pft_zero_threshold: float = 1e-8       # threshold in normalized target space for zero mask
+    pft_zero_sparsity_weights: Dict[str, float] = field(default_factory=dict)
 
     # Mask predictions for absent PFTs using PCT_NAT_PFT (PFT0 ignored)
     mask_absent_pfts: bool = False
