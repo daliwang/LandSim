@@ -299,6 +299,31 @@ def main():
         help='Path to JSON mapping of per-variable PFT1D activations (keys like cpool or Y_cpool)'
     )
     parser.add_argument(
+        '--tail-aware-vars',
+        type=str,
+        default=None,
+        help='Comma-separated list of PFT1D variables to use tail-aware loss (e.g., cpool,deadstemc)'
+    )
+    parser.add_argument(
+        '--tail-aware-vars-json',
+        type=str,
+        default=None,
+        help='Path to JSON list of PFT1D variables to use tail-aware loss'
+    )
+    parser.add_argument(
+        '--tail-aware-loss',
+        type=str,
+        default=None,
+        choices=['log1p_mse', 'mse'],
+        help='Tail-aware loss type (default: log1p_mse)'
+    )
+    parser.add_argument(
+        '--tail-aware-eps',
+        type=float,
+        default=None,
+        help='Epsilon for tail-aware log1p loss'
+    )
+    parser.add_argument(
         '--litter-p-loss-weight',
         type=float,
         default=None,
@@ -436,6 +461,28 @@ def main():
                     logger.info(f"Applied PFT1D activation overrides from: {args.pft1d_activation_overrides_json}")
             except Exception as e:
                 logger.warning(f"Failed to load PFT1D activation overrides: {e}")
+        if args.tail_aware_vars or args.tail_aware_vars_json or args.tail_aware_loss or args.tail_aware_eps:
+            try:
+                tail_vars = []
+                if args.tail_aware_vars:
+                    tail_vars = [v.strip() for v in str(args.tail_aware_vars).split(',') if v.strip()]
+                if args.tail_aware_vars_json:
+                    with open(args.tail_aware_vars_json, 'r') as f:
+                        payload = json.load(f)
+                    if isinstance(payload, list):
+                        tail_vars = payload
+                update_kwargs = {}
+                if tail_vars:
+                    update_kwargs['tail_aware_vars'] = tail_vars
+                if args.tail_aware_loss is not None:
+                    update_kwargs['tail_aware_loss'] = str(args.tail_aware_loss).lower()
+                if args.tail_aware_eps is not None:
+                    update_kwargs['tail_aware_epsilon'] = float(args.tail_aware_eps)
+                if update_kwargs:
+                    config.update_training_config(**update_kwargs)
+                    logger.info(f"Applied tail-aware loss settings: {update_kwargs}")
+            except Exception as e:
+                logger.warning(f"Failed to apply tail-aware loss settings: {e}")
         # Set train/validation split
         config.update_data_config(train_split=0.8)
         # Prefer GPU when available, otherwise CPU

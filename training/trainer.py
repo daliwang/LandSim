@@ -499,28 +499,25 @@ class ModelTrainer:
                 other_pred = torch.cat([vector_pred_reshaped[:, :x_idx, :], vector_pred_reshaped[:, x_idx+1:, :]], dim=1)
                 other_targ = torch.cat([vector_targ[:, :x_idx, :], vector_targ[:, x_idx+1:, :]], dim=1)
 
-                # Apply variable-specific weights for PFT1D variables
-                if self.use_variable_weights and hasattr(self, 'pft1d_var_weights') and self.pft1d_var_weights:
-                    # Get variable names
-                    pft1d_vars = list(self.data_info.get('variables_1d_pft', []))
+                # Apply variable-specific weights for PFT1D variables and optional tail-aware loss
+                pft1d_vars = list(self.data_info.get('variables_1d_pft', []))
+                tail_vars = set(getattr(self.config, 'tail_aware_vars', []) or [])
+                has_tail = len(tail_vars) > 0
+                has_weights = self.use_variable_weights and hasattr(self, 'pft1d_var_weights') and self.pft1d_var_weights
+                if has_weights or has_tail:
                     pft1d_loss = 0.0
-                    
                     # Process each variable separately (excluding xsmrpool which is handled specially)
                     for i in range(other_pred.size(1)):
-                        # Map the index back to the original variable name
                         var_idx = i if i < x_idx else i + 1  # Account for removed xsmrpool
                         if var_idx < len(pft1d_vars):
                             var_name = pft1d_vars[var_idx]
-                            var_weight = self.pft1d_var_weights.get(var_name, 1.0)
-                            
+                            var_weight = self.pft1d_var_weights.get(var_name, 1.0) if has_weights else 1.0
                             # Extract this variable across all PFTs
                             var_pred = other_pred[:, i:i+1, :].reshape(other_pred.size(0), -1)
                             var_targ = other_targ[:, i:i+1, :].reshape(other_targ.size(0), -1)
-                            
-                            # Apply weighted loss
-                            var_loss = self._compute_loss(var_pred, var_targ)
+                            use_tail = (var_name in tail_vars) or (f'Y_{var_name}' in tail_vars)
+                            var_loss = self._compute_tail_aware_loss(var_pred, var_targ) if use_tail else self._compute_loss(var_pred, var_targ)
                             pft1d_loss += var_weight * var_loss
-                    
                     # Add normalized loss
                     loss += self.vector_loss_weight * pft1d_loss / max(1, other_pred.size(1))
                 else:
@@ -913,6 +910,17 @@ class ModelTrainer:
             return loss
         else:
             return self.criterion(scalar_pred, target)
+
+    def _compute_tail_aware_loss(self, pred: torch.Tensor, targ: torch.Tensor) -> torch.Tensor:
+        """Tail-aware loss for heavy-tailed variables (log1p MSE by default)."""
+        loss_type = str(getattr(self.config, 'tail_aware_loss', 'log1p_mse')).lower()
+        eps = float(getattr(self.config, 'tail_aware_epsilon', 1e-8))
+        if loss_type == 'mse':
+            return self._compute_loss(pred, targ)
+        # log1p MSE (clamp to non-negative)
+        pred_clamped = torch.clamp(pred, min=0.0)
+        targ_clamped = torch.clamp(targ, min=0.0)
+        return self._compute_loss(torch.log1p(pred_clamped + eps), torch.log1p(targ_clamped + eps))
     
     def train(self) -> Dict[str, List[float]]:
         """

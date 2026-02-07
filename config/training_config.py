@@ -248,6 +248,10 @@ class TrainingConfig:
     pft_zero_sparsity_weight: float = 0.0  # default disabled; set >0 to enable
     pft_zero_threshold: float = 1e-8       # threshold in normalized target space for zero mask
     pft_zero_sparsity_weights: Dict[str, float] = field(default_factory=dict)
+    # Tail-aware loss for heavy-tailed PFT1D variables
+    tail_aware_vars: List[str] = field(default_factory=list)
+    tail_aware_loss: str = 'log1p_mse'  # 'log1p_mse' or 'mse'
+    tail_aware_epsilon: float = 1e-8
 
     # Mask predictions for absent PFTs using PCT_NAT_PFT (PFT0 ignored)
     mask_absent_pfts: bool = False
