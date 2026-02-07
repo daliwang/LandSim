@@ -557,10 +557,12 @@ class CNPCombinedModel(nn.Module):
                     else:
                         processed_slices.append(torch.clamp(pft_reshaped[:, i, :], max=0.0).unsqueeze(1))
                 else:
-                    processed_slices.append(torch.relu(pft_reshaped[:, i, :]).unsqueeze(1))
+                    # Use absolute value to enforce non-negativity without zeroing.
+                    processed_slices.append(torch.abs(pft_reshaped[:, i, :]).unsqueeze(1))
             pft_final = torch.cat(processed_slices, dim=1)
             outputs['pft_1d'] = pft_final.view(-1, n_vars * n_pfts)
         else:
-            outputs['pft_1d'] = torch.relu(pft_out) # Simple ReLU fallback
+            # Abs fallback keeps outputs non-negative without hard clipping.
+            outputs['pft_1d'] = torch.abs(pft_out)
 
         return outputs

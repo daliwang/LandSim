@@ -7,7 +7,8 @@ TVA4KM_PATH: /mnt/proj-shared/AI4BGC_7xw/TrainingData/TVA_4km_data_CNP
 DATA_PATHS: /another/path1, /another/path2
 
 # Global fallback pattern if a dataset-specific one isn't set
-FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
+#FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
+FILE_PATTERN: 1_training_data_batch_*.pkl
 
 # Per-dataset patterns (overrides FILE_PATTERN for that path only)
 TVA4KM_FILE_PATTERN: enhanced_monthly_training_data_batch_*.pkl
