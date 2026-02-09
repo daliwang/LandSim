@@ -358,7 +358,7 @@ Examples:
     
     parser.add_argument('--ai-predictions', default='./comparison_results/ai_predictions_for_plotting.nc',
                        help='Path to AI predictions NetCDF file (ai_predictions_for_plotting.nc)')
-    parser.add_argument('--restart-file', default='/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/original_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc',
+    parser.add_argument('--restart-file', default='/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc',
                        help='Path to model restart file to update')
     parser.add_argument('--output', default=None,
                        help='Output path for updated restart file [default: auto-generated based on variable list]')

@@ -314,7 +314,7 @@ def main():
         '--tail-aware-loss',
         type=str,
         default=None,
-        choices=['log1p_mse', 'mse'],
+        choices=['log1p_mse', 'log1p_huber', 'log1p_quantile', 'mse'],
         help='Tail-aware loss type (default: log1p_mse)'
     )
     parser.add_argument(
@@ -322,6 +322,30 @@ def main():
         type=float,
         default=None,
         help='Epsilon for tail-aware log1p loss'
+    )
+    parser.add_argument(
+        '--tail-aware-weight',
+        type=float,
+        default=None,
+        help='Base weight for tail-aware variables (multiplier)'
+    )
+    parser.add_argument(
+        '--tail-aware-weights-json',
+        type=str,
+        default=None,
+        help='Path to JSON mapping of per-variable tail-aware weights'
+    )
+    parser.add_argument(
+        '--tail-aware-huber-delta',
+        type=float,
+        default=None,
+        help='Huber delta (beta) for log1p_huber loss'
+    )
+    parser.add_argument(
+        '--tail-aware-quantile-tau',
+        type=float,
+        default=None,
+        help='Quantile tau for log1p_quantile loss'
     )
     parser.add_argument(
         '--litter-p-loss-weight',
@@ -461,7 +485,9 @@ def main():
                     logger.info(f"Applied PFT1D activation overrides from: {args.pft1d_activation_overrides_json}")
             except Exception as e:
                 logger.warning(f"Failed to load PFT1D activation overrides: {e}")
-        if args.tail_aware_vars or args.tail_aware_vars_json or args.tail_aware_loss or args.tail_aware_eps:
+        if (args.tail_aware_vars or args.tail_aware_vars_json or args.tail_aware_loss or
+            args.tail_aware_eps or args.tail_aware_weight or args.tail_aware_weights_json or
+            args.tail_aware_huber_delta or args.tail_aware_quantile_tau):
             try:
                 tail_vars = []
                 if args.tail_aware_vars:
@@ -478,6 +504,17 @@ def main():
                     update_kwargs['tail_aware_loss'] = str(args.tail_aware_loss).lower()
                 if args.tail_aware_eps is not None:
                     update_kwargs['tail_aware_epsilon'] = float(args.tail_aware_eps)
+                if args.tail_aware_weight is not None:
+                    update_kwargs['tail_aware_weight'] = float(args.tail_aware_weight)
+                if args.tail_aware_weights_json is not None:
+                    with open(args.tail_aware_weights_json, 'r') as f:
+                        weights = json.load(f)
+                    if isinstance(weights, dict):
+                        update_kwargs['tail_aware_weights'] = weights
+                if args.tail_aware_huber_delta is not None:
+                    update_kwargs['tail_aware_huber_delta'] = float(args.tail_aware_huber_delta)
+                if args.tail_aware_quantile_tau is not None:
+                    update_kwargs['tail_aware_quantile_tau'] = float(args.tail_aware_quantile_tau)
                 if update_kwargs:
                     config.update_training_config(**update_kwargs)
                     logger.info(f"Applied tail-aware loss settings: {update_kwargs}")

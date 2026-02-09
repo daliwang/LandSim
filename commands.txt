@@ -1,0 +1,56 @@
+02/07/2026:
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --epoch 100 \
+  --pft-zero-sparsity-weight 1.0 \
+  --pft-zero-threshold 1e-8 \
+  --tropical-only
+
+cd cnp_resuls/run_20260207_125838
+
+python ../../scripts/cnp_result_validationplot.py --stats-only
+python ../../scripts/generate_prediction_quality_report.py
+
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --epoch 100 \
+  --pft-zero-sparsity-weight 1.0 \
+  --pft-zero-sparsity-weights-json pft_zero_weights.json \
+  --pft1d-activation abs \
+  --pft1d-activation-overrides-json pft1d_activation_overrides.json \
+  --tropical-only
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --epoch 100 \
+  --tail-aware-vars cpool,deadstemc,deadcrootc,livestemc,livecrootc \
+  --tail-aware-loss log1p_mse \
+  --tail-aware-eps 1e-8 \
+  --tropical-only
+
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --epoch 100 \
+  --tail-aware-vars cpool,deadstemc,deadcrootc,livestemc,livecrootc \
+  --tail-aware-loss log1p_quantile \
+  --tail-aware-quantile-tau 0.9 \
+  --tail-aware-weights-json tail_weights.json \
+  --tropical-only
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --epoch 100 \
+  --pft1d-activation abs \
+  --tail-aware-vars cpool,deadstemc,deadcrootc,livestemc,livecrootc \
+  --tail-aware-loss log1p_mse \
+  --tail-aware-eps 1e-8
+
+
+python scripts/ai_predictions_to_restart.py \
+    --ai-predictions <ai_predictions.nc> \
+    --restart-file /path/to/original_restart.nc \
+    --output /path/to/original_restart.nc
+  

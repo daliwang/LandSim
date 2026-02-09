@@ -140,7 +140,10 @@ python ../../scripts/ai_predictions_to_restart.py > ai_predictions_to_restart.lo
 ```
 
 Outputs a new restart file derived from
-`original_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc`.
+default= `20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc`
+old file is :`original_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc`.
+
+
 
 ### 9) Compare restart files
 Compares selected layers and PFTs; optionally verify with `restart_variable_plot.py`.

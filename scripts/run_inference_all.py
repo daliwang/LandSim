@@ -31,6 +31,7 @@ import torch
 import numpy as np
 import os
 import pandas as pd
+from typing import Optional
 
 # Add project root to path for imports
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -136,6 +137,31 @@ def _load_training_model_config_from_config(model_path: Path) -> dict:
     return None
 
 
+def _load_training_data_config_from_config(model_path: Path) -> dict:
+    """Load data_config dict from cnp_config.json in the training run directory."""
+    import json
+    try:
+        model_dir = Path(model_path).parent
+        candidate_paths = [model_dir / 'cnp_config.json'] + [p / 'cnp_config.json' for p in model_dir.parents]
+        for config_path in candidate_paths:
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        cfg = json.load(f)
+                    if isinstance(cfg, dict):
+                        data_cfg = cfg.get('data_config')
+                        if isinstance(data_cfg, dict):
+                            logging.info(f"Loaded data_config from {config_path}")
+                            return data_cfg
+                except Exception as e:
+                    logging.warning(f"Failed reading data_config from {config_path}: {e}")
+                break
+        logging.warning("No data_config found in cnp_config.json near model path")
+    except Exception as e:
+        logging.warning(f"Error discovering data_config: {e}")
+    return None
+
+
 
 # Load training model architecture from cnp_config.json
 def _load_training_model_config(model_path: Path) -> dict:
@@ -186,8 +212,8 @@ def verify_locations(df: pd.DataFrame, context: str) -> None:
 
 def run_inference_all(
     model_path: str,
-    data_paths: str,
-    file_pattern: str,
+    data_paths: Optional[str],
+    file_pattern: Optional[str],
     output_dir: str,
     variable_list: str = None,
     model_config: str = None,
@@ -332,9 +358,25 @@ def run_inference_all(
             except Exception:
                 pass
     
-    # Update data config with provided paths and pattern
-    config.data_config.data_paths = [data_paths]
-    config.data_config.file_pattern = file_pattern
+    # Update data config with provided paths and pattern (if explicitly set)
+    if data_paths is not None:
+        if isinstance(data_paths, str):
+            parsed_paths = [p.strip() for p in data_paths.split(',') if p.strip()]
+        else:
+            parsed_paths = list(data_paths)
+        config.data_config.data_paths = parsed_paths
+    if file_pattern is not None:
+        config.data_config.file_pattern = file_pattern
+    # If not explicitly set, try training run's cnp_config.json data_config
+    if (data_paths is None or file_pattern is None) and use_training_config:
+        data_cfg = _load_training_data_config_from_config(Path(model_path))
+        if isinstance(data_cfg, dict):
+            if data_paths is None and data_cfg.get('data_paths'):
+                config.data_config.data_paths = data_cfg.get('data_paths')
+            if file_pattern is None and data_cfg.get('file_pattern'):
+                config.data_config.file_pattern = data_cfg.get('file_pattern')
+            if data_cfg.get('dataset_file_patterns'):
+                config.data_config.dataset_file_patterns = data_cfg.get('dataset_file_patterns')
     
     # CRITICAL FIX: Use the EXACT same data processing as training
     # During training: data was shuffled with random_state=42, then split 80/20
@@ -1627,8 +1669,8 @@ def run_inference_all(
 def main():
     parser = argparse.ArgumentParser(description="Run CNP model inference over entire dataset")
     parser.add_argument("--model", default='./cnp_predictions/model.pth', help="Path to trained model (.pth)")
-    parser.add_argument("--data-paths", default='/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP', help="Data directories containing PKL batches for inference")
-    parser.add_argument("--file-pattern", default='enhanced_*1_training_data_batch_*.pkl', help="Glob pattern for PKL files")
+    parser.add_argument("--data-paths", default=None, help="Data directories containing PKL batches for inference (comma-separated). If omitted, use CNP_IO or training config defaults")
+    parser.add_argument("--file-pattern", default=None, help="Glob pattern for PKL files. If omitted, use CNP_IO or training config defaults")
     parser.add_argument("--output-dir", default='cnp_inference_entire_dataset', help="Output directory for results")
     parser.add_argument("--variable-list", help="Path to variable list file (optional, will auto-detect from config)")
     parser.add_argument("--scalers-dir", help="Path to scalers directory (optional, will auto-detect from model directory)")

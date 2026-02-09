@@ -250,8 +250,12 @@ class TrainingConfig:
     pft_zero_sparsity_weights: Dict[str, float] = field(default_factory=dict)
     # Tail-aware loss for heavy-tailed PFT1D variables
     tail_aware_vars: List[str] = field(default_factory=list)
-    tail_aware_loss: str = 'log1p_mse'  # 'log1p_mse' or 'mse'
+    tail_aware_loss: str = 'log1p_mse'  # 'log1p_mse', 'log1p_huber', 'log1p_quantile', or 'mse'
     tail_aware_epsilon: float = 1e-8
+    tail_aware_weight: float = 1.0
+    tail_aware_weights: Dict[str, float] = field(default_factory=dict)
+    tail_aware_huber_delta: float = 1.0
+    tail_aware_quantile_tau: float = 0.9
 
     # Mask predictions for absent PFTs using PCT_NAT_PFT (PFT0 ignored)
     mask_absent_pfts: bool = False
