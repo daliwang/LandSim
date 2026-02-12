@@ -53,4 +53,29 @@ python scripts/ai_predictions_to_restart.py \
     --ai-predictions <ai_predictions.nc> \
     --restart-file /path/to/original_restart.nc \
     --output /path/to/original_restart.nc
-  
+
+python scripts/extract_elm_restart_point.py \
+  --restart-file /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260207_161353/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --lat -17.4246 \
+  --lon 303.75 \
+  --output-file /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260207_161353/single_point_file.nc>
+
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_cnpratio_reduced.txt \
+  --epoch 100 \
+  --pft1d-activation abs \
+  --tail-aware-vars cpool,deadstemc,deadcrootc,livestemc,livecrootc,npool,ppool,labilep \
+  --tail-aware-loss log1p_mse \
+  --tail-aware-eps 1e-8 \
+  --tropical-only
+
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --epoch 100 \
+  --tail-aware-vars cpool,deadstemc,deadcrootc,livestemc,livecrootc,npool,ppool,labilep,primp_vr,occld_vr,litr2c_vr,litr2p_vr,litr2n,litr3c_vr,litr3p_vr,litr3n_vr \
+  --tail-aware-loss log1p_mse \
+  --tail-aware-eps 1e-8 \
+  --tail-aware-weights-json list1_tail_weights.json \
+  --tropical-only

@@ -259,6 +259,9 @@ class TrainingConfig:
 
     # Mask predictions for absent PFTs using PCT_NAT_PFT (PFT0 ignored)
     mask_absent_pfts: bool = False
+    
+    # Variable-specific loss weights from JSON file
+    variable_weights_json: Optional[str] = None  # Path to JSON file with pft1d_weights, soil2d_weights, scalar_weights
 
     def get_device(self) -> torch.device:
         """Get the appropriate device for training."""

@@ -27,7 +27,12 @@ import json
 # from config.training_config import TrainingConfig  # Uncomment if TrainingConfig is defined
 from models.combined_model import CombinedModel, FlexibleCombinedModel
 from models.cnp_combined_model import CNPCombinedModel
-from config.variable_weights import get_pft1d_variable_weights, get_soil2d_variable_weights, get_scalar_variable_weights
+from config.variable_weights import (
+    get_pft1d_variable_weights, 
+    get_soil2d_variable_weights, 
+    get_scalar_variable_weights,
+    load_variable_weights_from_json
+)
 
 # Import GPU monitoring
 from utils.gpu_monitor import GPUMonitor, log_memory_usage
@@ -210,25 +215,37 @@ class ModelTrainer:
         if not self.use_variable_weights:
             logger.info("Variable-specific weights disabled")
             return
+        
+        # Load variable weights from JSON file if specified in config
+        variable_weights_json = getattr(self.config, 'variable_weights_json', None)
+        json_weights = None
+        if variable_weights_json:
+            loaded = load_variable_weights_from_json(variable_weights_json)
+            if loaded:
+                json_weights = loaded
+                logger.info(f"Loaded variable weights from: {variable_weights_json}")
             
         # Get variable names from data_info if available
         if hasattr(self, 'data_info'):
             # PFT1D variables
             if 'variables_1d_pft' in self.data_info:
                 pft1d_vars = self.data_info.get('variables_1d_pft', [])
-                self.pft1d_var_weights = get_pft1d_variable_weights(pft1d_vars)
+                pft1d_json = json_weights.get('pft1d_weights') if json_weights else None
+                self.pft1d_var_weights = get_pft1d_variable_weights(pft1d_vars, json_weights=pft1d_json)
                 logger.info(f"Initialized PFT1D variable weights: {self.pft1d_var_weights}")
                 
             # Soil2D variables
             if 'x_list_columns_2d' in self.data_info:
-                soil2d_vars = [var.replace('Y_', '') for var in self.data_info.get('y_list_columns_2d', [])]                
-                self.soil2d_var_weights = get_soil2d_variable_weights(soil2d_vars)
+                soil2d_vars = [var.replace('Y_', '') for var in self.data_info.get('y_list_columns_2d', [])]
+                soil2d_json = json_weights.get('soil2d_weights') if json_weights else None
+                self.soil2d_var_weights = get_soil2d_variable_weights(soil2d_vars, json_weights=soil2d_json)
                 logger.info(f"Initialized Soil2D variable weights: {self.soil2d_var_weights}")
                 
             # Scalar variables
             if 'x_list_scalar_columns' in self.data_info:
                 scalar_vars = self.data_info.get('x_list_scalar_columns', [])
-                self.scalar_var_weights = get_scalar_variable_weights(scalar_vars)
+                scalar_json = json_weights.get('scalar_weights') if json_weights else None
+                self.scalar_var_weights = get_scalar_variable_weights(scalar_vars, json_weights=scalar_json)
                 logger.info(f"Initialized scalar variable weights: {self.scalar_var_weights}")
     
         # Use learnable loss weights if specified in config
@@ -822,25 +839,181 @@ class ModelTrainer:
                     except Exception:
                         pass
 
-                # Compute loss
-                loss = self._compute_loss(outputs['scalar'], y_scalar)
-                # Vector (PFT1D): base MSE
+                # Compute loss - matching training loss computation for fair comparison
+                # Scalar loss with variable-specific weights (if enabled)
+                if self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
+                    scalar_loss = 0.0
+                    scalar_pred = outputs['scalar']
+                    scalar_vars = self.data_info.get('x_list_scalar_columns', [])
+                    for i, var_name in enumerate(scalar_vars):
+                        if i < scalar_pred.size(1):
+                            var_weight = self.scalar_var_weights.get(var_name, 1.0)
+                            var_loss = self._compute_loss(scalar_pred[:, i:i+1], y_scalar[:, i:i+1])
+                            scalar_loss += var_weight * var_loss
+                    scalar_loss = scalar_loss / max(1, len(scalar_vars))
+                    loss = self.scalar_loss_weight * scalar_loss
+                else:
+                    loss = self.scalar_loss_weight * self._compute_loss(outputs['scalar'], y_scalar)
+
+                # Vector (PFT1D): Apply same weighting as training
                 vector_pred = outputs['pft_1d']
                 vector_targ = y_pft_1d
-                loss += self._compute_loss(vector_pred.view(vector_pred.size(0), -1), vector_targ.view(vector_targ.size(0), -1))
-                # Optional sparsity regularization at validation (reporting only)
+                xsmrpool_weight = getattr(self.config, 'xsmrpool_loss_weight', 1.0)
+                
+                try:
+                    # Determine variable list and reshape predictions if needed
+                    varnames = None
+                    if hasattr(self.model, 'data_info') and 'variables_1d_pft' in self.model.data_info:
+                        varnames = list(self.model.data_info['variables_1d_pft'])
+                    n_vars = len(varnames) if varnames is not None else vector_targ.size(1)
+                    n_pfts = vector_targ.size(2)
+
+                    if vector_pred.dim() == 2:
+                        vector_pred_reshaped = vector_pred.view(vector_pred.size(0), n_vars, n_pfts)
+                    else:
+                        vector_pred_reshaped = vector_pred
+
+                    # Identify xsmrpool index
+                    if varnames is not None and 'xsmrpool' in varnames:
+                        x_idx = varnames.index('xsmrpool')
+                    else:
+                        x_idx = 3  # fallback
+
+                    # Split xsmrpool vs others
+                    x_pred = vector_pred_reshaped[:, x_idx, :]
+                    x_targ = vector_targ[:, x_idx, :]
+                    other_pred = torch.cat([vector_pred_reshaped[:, :x_idx, :], vector_pred_reshaped[:, x_idx+1:, :]], dim=1)
+                    other_targ = torch.cat([vector_targ[:, :x_idx, :], vector_targ[:, x_idx+1:, :]], dim=1)
+
+                    # Apply variable-specific weights and tail-aware loss (same as training)
+                    pft1d_vars = list(self.data_info.get('variables_1d_pft', []))
+                    tail_vars = set(getattr(self.config, 'tail_aware_vars', []) or [])
+                    tail_weights = getattr(self.config, 'tail_aware_weights', {}) or {}
+                    base_tail_weight = float(getattr(self.config, 'tail_aware_weight', 1.0) or 1.0)
+                    has_tail = len(tail_vars) > 0
+                    has_weights = self.use_variable_weights and hasattr(self, 'pft1d_var_weights') and self.pft1d_var_weights
+                    
+                    if has_weights or has_tail:
+                        pft1d_loss = 0.0
+                        for i in range(other_pred.size(1)):
+                            var_idx = i if i < x_idx else i + 1
+                            if var_idx < len(pft1d_vars):
+                                var_name = pft1d_vars[var_idx]
+                                var_weight = self.pft1d_var_weights.get(var_name, 1.0) if has_weights else 1.0
+                                # Tail-aware weighting
+                                tail_weight = base_tail_weight if ((var_name in tail_vars) or (f'Y_{var_name}' in tail_vars)) else 1.0
+                                if var_name in tail_weights:
+                                    tail_weight = float(tail_weights[var_name])
+                                elif f'Y_{var_name}' in tail_weights:
+                                    tail_weight = float(tail_weights[f'Y_{var_name}'])
+                                var_pred = other_pred[:, i:i+1, :].reshape(other_pred.size(0), -1)
+                                var_targ = other_targ[:, i:i+1, :].reshape(other_targ.size(0), -1)
+                                use_tail = (var_name in tail_vars) or (f'Y_{var_name}' in tail_vars)
+                                var_loss = self._compute_tail_aware_loss(var_pred, var_targ) if use_tail else self._compute_loss(var_pred, var_targ)
+                                pft1d_loss += var_weight * tail_weight * var_loss
+                        loss += self.vector_loss_weight * pft1d_loss / max(1, other_pred.size(1))
+                    else:
+                        loss += self.vector_loss_weight * self._compute_loss(
+                            other_pred.view(other_pred.size(0), -1),
+                            other_targ.view(other_targ.size(0), -1)
+                        )
+
+                    # Weighted MSE for xsmrpool (same as training)
+                    x_pred_flat = x_pred.view(x_pred.size(0), -1)
+                    x_targ_flat = x_targ.view(x_targ.size(0), -1)
+                    with torch.no_grad():
+                        nz_mask = (x_targ_flat < 0).float()
+                    base_w = 1.0
+                    extra = max(1.0, xsmrpool_weight) - 1.0
+                    weights = base_w + extra * nz_mask
+                    se = (x_pred_flat - x_targ_flat) ** 2
+                    weighted_mse = (se * weights).mean()
+                    loss += self.vector_loss_weight * weighted_mse
+                except Exception:
+                    # Fallback: original aggregate loss
+                    loss += self.vector_loss_weight * self._compute_loss(
+                        vector_pred.view(vector_pred.size(0), -1),
+                        vector_targ.view(vector_targ.size(0), -1)
+                    )
+                
+                # Optional sparsity regularization (same as training)
                 if getattr(self.config, 'pft_zero_sparsity_weight', 0.0) > 0.0:
                     with torch.no_grad():
                         zero_mask = (vector_targ.abs() <= getattr(self.config, 'pft_zero_threshold', 1e-8))
-                        try:
-                            pred_for_penalty = (vector_pred if vector_pred.shape == vector_targ.shape
-                                                else vector_pred.view_as(vector_targ))
+                    try:
+                        pred_for_penalty = (vector_pred if vector_pred.shape == vector_targ.shape
+                                            else vector_pred.view_as(vector_targ))
+                        # Apply per-variable weights if provided (same as training)
+                        var_weights = getattr(self.config, 'pft_zero_sparsity_weights', {}) or {}
+                        if var_weights and pred_for_penalty.dim() == 2:
+                            # Use n_pfts from vector_targ if available, otherwise default to 16
+                            n_pfts = vector_targ.size(2) if vector_targ.dim() >= 3 else 16
+                            varnames = self.data_info.get('y_list_columns_1d', []) if isinstance(self.data_info, dict) else []
+                            n_vars = len(varnames) if varnames else (pred_for_penalty.size(1) // n_pfts)
+                            pred_3d = pred_for_penalty.view(pred_for_penalty.size(0), n_vars, n_pfts)
+                            mask_3d = zero_mask.view_as(pred_3d)
+                            weights = torch.ones(n_vars, device=pred_3d.device, dtype=pred_3d.dtype)
+                            for i in range(n_vars):
+                                name = varnames[i] if i < len(varnames) else None
+                                if name in var_weights:
+                                    weights[i] = float(var_weights[name])
+                                elif name and name.startswith('Y_') and name[2:] in var_weights:
+                                    weights[i] = float(var_weights[name[2:]])
+                            sparsity_penalty = (pred_3d.abs() * mask_3d * weights.view(1, -1, 1)).mean()
+                        else:
                             sparsity_penalty = (pred_for_penalty.abs() * zero_mask).mean()
-                            loss = loss + self.config.pft_zero_sparsity_weight * sparsity_penalty
-                        except Exception:
-                            pass
-                # Matrix (Soil2D)
-                loss += self._compute_loss(outputs['soil_2d'].view(y_soil_2d.size(0), -1), y_soil_2d.view(y_soil_2d.size(0), -1))
+                        loss = loss + self.config.pft_zero_sparsity_weight * sparsity_penalty
+                    except Exception:
+                        pass
+                
+                # Matrix (Soil2D) with variable-specific weights and litter weights (same as training)
+                if self.use_variable_weights and hasattr(self, 'soil2d_var_weights') and self.soil2d_var_weights:
+                    soil2d_loss = 0.0
+                    soil2d_pred = outputs['soil_2d']
+                    soil2d_vars = [var.replace('Y_', '') for var in self.data_info.get('y_list_columns_2d', [])]
+                    n_vars = len(soil2d_vars)
+                    batch_size = soil2d_pred.size(0)
+                    
+                    if soil2d_pred.dim() == 4:
+                        soil2d_pred_reshaped = soil2d_pred
+                        soil2d_targ_reshaped = y_soil_2d
+                    else:
+                        rows = y_soil_2d.size(2) if y_soil_2d.dim() >= 3 else 1
+                        cols = y_soil_2d.size(3) if y_soil_2d.dim() >= 4 else 1
+                        soil2d_pred_reshaped = soil2d_pred.view(batch_size, n_vars, rows, cols)
+                        soil2d_targ_reshaped = y_soil_2d
+                    
+                    # Apply litter overrides (same as training)
+                    litter_c_names = {'litr1c_vr', 'litr2c_vr', 'litr3c_vr'}
+                    litter_n_names = {'litr1n_vr', 'litr2n_vr', 'litr3n_vr'}
+                    litter_p_names = {'litr1p_vr', 'litr2p_vr', 'litr3p_vr'}
+                    litter_c_w = getattr(self.config, 'litter_c_loss_weight', 1.0)
+                    litter_n_w = getattr(self.config, 'litter_n_loss_weight', 1.0)
+                    litter_p_w = getattr(self.config, 'litter_p_loss_weight', 1.0)
+
+                    for i, var_name in enumerate(soil2d_vars):
+                        if i < soil2d_pred_reshaped.size(1):
+                            base_weight = self.soil2d_var_weights.get(var_name, 1.0)
+                            if var_name in litter_c_names:
+                                var_weight = base_weight * litter_c_w
+                            elif var_name in litter_n_names:
+                                var_weight = base_weight * litter_n_w
+                            elif var_name in litter_p_names:
+                                var_weight = base_weight * litter_p_w
+                            else:
+                                var_weight = base_weight
+                            var_pred = soil2d_pred_reshaped[:, i:i+1].reshape(batch_size, -1)
+                            var_targ = soil2d_targ_reshaped[:, i:i+1].reshape(batch_size, -1)
+                            var_loss = self._compute_loss(var_pred, var_targ)
+                            soil2d_loss += var_weight * var_loss
+                    
+                    loss += self.matrix_loss_weight * soil2d_loss / max(1, n_vars)
+                else:
+                    loss += self.matrix_loss_weight * self._compute_loss(
+                        outputs['soil_2d'].view(y_soil_2d.size(0), -1),
+                        y_soil_2d.view(y_soil_2d.size(0), -1)
+                    )
+                
                 if 'water' in self.test_data and 'y_water' in self.test_data and 'water' in outputs:
                     loss += self._compute_loss(outputs['water'], y_water)
                 

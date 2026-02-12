@@ -336,6 +336,18 @@ def main():
         help='Path to JSON mapping of per-variable tail-aware weights'
     )
     parser.add_argument(
+        '--variable-weights-json',
+        type=str,
+        default=None,
+        help='Path to JSON file with variable-specific loss weights. Expected format: {"pft1d_weights": {...}, "soil2d_weights": {...}, "scalar_weights": {...}}'
+    )
+    parser.add_argument(
+        '--training-config-json',
+        type=str,
+        default=None,
+        help='Path to unified JSON config file with all training settings. Expected format: {"variable_weights": {...}, "tail_aware_weights": {...}, "pft_zero_sparsity_weights": {...}, "pft1d_activation_overrides": {...}}. Individual JSON files take precedence if both are specified.'
+    )
+    parser.add_argument(
         '--tail-aware-huber-delta',
         type=float,
         default=None,
@@ -520,6 +532,58 @@ def main():
                     logger.info(f"Applied tail-aware loss settings: {update_kwargs}")
             except Exception as e:
                 logger.warning(f"Failed to apply tail-aware loss settings: {e}")
+        
+        # Load unified training config JSON file if provided
+        unified_config = None
+        if args.training_config_json is not None:
+            try:
+                with open(args.training_config_json, 'r') as f:
+                    unified_config = json.load(f)
+                if isinstance(unified_config, dict):
+                    logger.info(f"Loaded unified training config from: {args.training_config_json}")
+                    
+                    # Extract variable_weights section
+                    if 'variable_weights' in unified_config:
+                        config.update_training_config(variable_weights_json=args.training_config_json)
+                        logger.info("Applied variable_weights from unified config")
+                    
+                    # Extract tail_aware_weights section (only if not already set via individual file)
+                    if 'tail_aware_weights' in unified_config and args.tail_aware_weights_json is None:
+                        tail_weights = unified_config['tail_aware_weights']
+                        if isinstance(tail_weights, dict):
+                            # Merge with existing tail-aware settings
+                            update_kwargs = {}
+                            # Extract tail vars from weights keys if tail_aware_vars not set via command line
+                            if not args.tail_aware_vars and not args.tail_aware_vars_json:
+                                update_kwargs['tail_aware_vars'] = list(tail_weights.keys())
+                            update_kwargs['tail_aware_weights'] = tail_weights
+                            config.update_training_config(**update_kwargs)
+                            logger.info("Applied tail_aware_weights from unified config")
+                    
+                    # Extract pft_zero_sparsity_weights section (only if not already set)
+                    if 'pft_zero_sparsity_weights' in unified_config and args.pft_zero_sparsity_weights_json is None:
+                        sparsity_weights = unified_config['pft_zero_sparsity_weights']
+                        if isinstance(sparsity_weights, dict):
+                            config.update_training_config(pft_zero_sparsity_weights=sparsity_weights)
+                            logger.info("Applied pft_zero_sparsity_weights from unified config")
+                    
+                    # Extract pft1d_activation_overrides section (only if not already set)
+                    if 'pft1d_activation_overrides' in unified_config and args.pft1d_activation_overrides_json is None:
+                        activation_overrides = unified_config['pft1d_activation_overrides']
+                        if isinstance(activation_overrides, dict):
+                            config.update_model_config(pft1d_activation_overrides=activation_overrides)
+                            logger.info("Applied pft1d_activation_overrides from unified config")
+            except Exception as e:
+                logger.warning(f"Failed to load unified training config: {e}")
+        
+        # Load variable weights from individual JSON file if provided (takes precedence over unified config)
+        if args.variable_weights_json is not None:
+            try:
+                config.update_training_config(variable_weights_json=args.variable_weights_json)
+                logger.info(f"Variable weights JSON file specified: {args.variable_weights_json}")
+            except Exception as e:
+                logger.warning(f"Failed to set variable weights JSON path: {e}")
+        
         # Set train/validation split
         config.update_data_config(train_split=0.8)
         # Prefer GPU when available, otherwise CPU
