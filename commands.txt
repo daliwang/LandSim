@@ -79,3 +79,55 @@ python train_cnp_model.py \
   --tail-aware-eps 1e-8 \
   --tail-aware-weights-json list1_tail_weights.json \
   --tropical-only
+
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config-json config/training_config_unified.json \
+  --tail-aware-loss log1p_mse \
+  --tail-aware-eps 1e-8 \
+  --epoch 100 \
+  --tropical-only
+
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_cnpratio_reduced.txt \
+  --training-config-json config/training_config_unified.json \
+  --epoch 100 \
+  --tropical-only
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config-json config/training_config_experiment_cpool.json \
+  --pft-zero-sparsity-weight 1.0 \
+  --epoch 100 \
+  --tropical-only \
+  2>&1 | tee training_cpool_experiment.log &
+
+
+
+  python train_cnp_model.py --training-config-json config/training_config_experiment_cpool.json ...
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config-json config/training_config_experiment_2.json \
+  --pft-zero-sparsity-weight 1.0 \
+  --epoch 50 \
+  --tropical-only \
+  2>&1 | tee training_cpool_experiment.log &
+
+  python ../../scripts/run_inference_all.py > run_inference_all.log 2>&1 &
+  python ../../scripts/ai_predictions_to_netcdf.py  > ai_prediction_to_netcdf.log 2>&1 &
+
+  python ../../scripts/run_inference_all.py \
+  --use-training-config \
+  --data-paths "/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP" \
+  --file-pattern "1_training_data_batch_*.pkl"
+
+
+    python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config-json config/training_config_experiment_3.json \
+  --pft-zero-sparsity-weight 1.0 \
+  --epoch 50 \
+  2>&1 | tee training_cpool_experiment.log &

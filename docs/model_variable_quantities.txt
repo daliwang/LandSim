@@ -1,0 +1,58 @@
+• deadcrootc, deadcrootc_storage, deadstemc, deadstemc_storage, deadstemc_xfer
+	
+    double deadwdcp(pft) ;
+		deadwdcp:units = "gC/gP" ;
+		deadwdcp:long_name = "dead wood C:P " ;
+	double deadwdcn(pft) ;
+		deadwdcn:units = "gC/gN" ;
+		deadwdcn:long_name = "Dead wood (xylem and heartwood) C:N" ;
+		deadwdcn:coordinates = "pftname" ;
+
+ deadwdcn = 1, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 0, 0, 
+    0, 0, 0, 500, 500, 500, 500, 500, 500, 500, 500 ;
+
+deadwdcp = 1, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 
+    3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 
+    3000, 3000 ;
+
+, deadcrootn, deadcrootn_storage, deadcrootp, deadcrootp_storage 
+
+• deadstemn, deadstemn_storage, deadstemp, deadstemp_storage
+Check woody = 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+If woody of pft is 1, do calculation with the ratio
+Other forcing cnp to 0.
+
+• leafc, leafc_storage, leafc_xfer
+leafcn = 1, 35, 40, 25, 30, 30, 25, 25, 25, 30, 25, 25, 25, 25, 25, 25, 25, 
+    25, 25, 25, 25, 25, 25, 25, 25 ;
+leafn, leafn_storage, leafp, leafp_storage, leadfn_xfer, leafp_xfer
+leafcp = 1, 525, 400, 250, 600, 450, 500, 375, 250, 450, 375, 250, 250, 375, 
+    375, 275, 275, 275, 275, 275, 275, 275, 275, 275, 275 ;
+
+• frootc, frootc_storage, 
+frootcn = 1, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 
+    42, 42, 42, 42, 42, 42, 42, 42 ;
+frootcp = 1, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 
+    1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 
+    1000, 1000 ;
+frootn, frootn_storage, frootp, frootp_storage
+
+• livestemc, livestemc_storage, livecrootc, livecrootc_storage
+livestemn, livestemn_storage, livestemp, livestemp_storage, 
+• livecrootn, livecrootn_storage, livecrootp, livecrootp_storage
+livewdcp = 1, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 
+    3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 3000, 
+    3000, 3000 ;
+livewdcn = 1, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 0, 0, 0, 0, 0, 50, 
+    50, 50, 50, 50, 50, 50, 50 ;
+
+
+• soil1c_vr, cn_s1_new = 12 ;  np_s1_new = 30
+• soil2c_vr,   cn_s2_new = 12 ; np_s2_new = 30
+• soil3c_vr,  cn_s3 _new= 10 ;  np_s3_new = 50 ;
+• soil4c_vr, cn_s4_new = 10 ;  np_s4_new = 50 ;
+
+soil1n_vr, soil1p_vr
+soil2n_vr, soil2p_vr
+soil3n_vr, soil3p_vr
+soil4n_vr, soil4p_vr

@@ -26,6 +26,73 @@ python train_cnp_model.py --variable-list CNP_IO_demo.txt --epoch 100 \
   --tropical-only --tropical-lat-range -23.5,23.5 --tropical-lat-column Latitude
 ```
 
+### 2b) Configure Training Parameters (Optional)
+
+You can customize training behavior using a unified configuration JSON file that consolidates all user-defined settings:
+
+**Unified Config File (Recommended):**
+Create a single JSON file (`config/training_config_unified.json`) with all training parameters:
+
+```json
+{
+  "variable_weights": {
+    "pft1d_weights": {"cpool": 2.0, "npool": 2.0, "tlai": 3.0},
+    "soil2d_weights": {"primp_vr": 3.0, "litr2p_vr": 5.0},
+    "scalar_weights": {"GPP": 1.5, "NPP": 1.5}
+  },
+  "tail_aware_weights": {
+    "cpool": 5.0,
+    "deadstemc": 5.0,
+    "litr2p_vr": 5.0
+  },
+  "pft_zero_sparsity_weights": {
+    "cpool": 1.0,
+    "deadstemc": 1.0
+  },
+  "pft1d_activation_overrides": {
+    "cpool": "abs",
+    "deadstemc": "abs"
+  }
+}
+```
+
+Then use it during training:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt \
+  --training-config-json config/training_config_unified.json \
+  --epoch 100
+```
+
+**Individual Config Files (Legacy, Still Supported):**
+You can also use separate JSON files for each configuration type:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt \
+  --variable-weights-json config/variable_weights_config.json \
+  --tail-aware-weights-json list1_tail_weights.json \
+  --pft-zero-sparsity-weights-json pft_zero_weights.json \
+  --pft1d-activation-overrides-json pft1d_activation_overrides.json \
+  --epoch 100
+```
+
+**Mixing Unified + Individual Files:**
+You can use unified config as a base and override specific sections:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt \
+  --training-config-json config/training_config_unified.json \
+  --tail-aware-weights-json custom_tail_weights.json \
+  --epoch 100
+```
+
+**Configuration Sections:**
+- `variable_weights`: Per-variable loss weights for PFT1D, Soil2D, and Scalar outputs
+- `tail_aware_weights`: Multipliers for tail-aware loss on heavy-tailed variables
+- `pft_zero_sparsity_weights`: Weights for PFT zero sparsity penalty
+- `pft1d_activation_overrides`: Per-variable activation function overrides
+
+**Documentation:**
+- See `config/UNIFIED_CONFIG_README.md` for detailed unified config usage
+- See `config/VARIABLE_WEIGHTS_README.md` for variable weights details
+
 ### 2a) Fine-tune a pretrained model (optional)
 If you already have a trained checkpoint and want to continue training on a TVA-style dataset, use the fine-tuning helper. Populate the necessary paths in your CNP_IO file (e.g. `CNP_IO_updated9_dev_gao.txt`):
 

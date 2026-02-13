@@ -547,6 +547,23 @@ def main():
                         config.update_training_config(variable_weights_json=args.training_config_json)
                         logger.info("Applied variable_weights from unified config")
                     
+                    # Extract tail_aware_config section (loss type and epsilon)
+                    if 'tail_aware_config' in unified_config:
+                        tail_config = unified_config['tail_aware_config']
+                        if isinstance(tail_config, dict):
+                            update_kwargs = {}
+                            # Set loss type if not already set via command line
+                            if 'loss' in tail_config and args.tail_aware_loss is None:
+                                update_kwargs['tail_aware_loss'] = str(tail_config['loss']).lower()
+                            # Set epsilon if not already set via command line
+                            if 'epsilon' in tail_config and args.tail_aware_eps is None:
+                                update_kwargs['tail_aware_epsilon'] = float(tail_config['epsilon'])
+                            if 'huber_delta' in tail_config and getattr(args, 'tail_aware_huber_delta', None) is None:
+                                update_kwargs['tail_aware_huber_delta'] = float(tail_config['huber_delta'])
+                            if update_kwargs:
+                                config.update_training_config(**update_kwargs)
+                                logger.info(f"Applied tail_aware_config from unified config: {update_kwargs}")
+                    
                     # Extract tail_aware_weights section (only if not already set via individual file)
                     if 'tail_aware_weights' in unified_config and args.tail_aware_weights_json is None:
                         tail_weights = unified_config['tail_aware_weights']
@@ -955,6 +972,15 @@ def main():
                 }
             }
 
+            # Save data_config (paths and pattern) so inference can use the same data as training
+            data_cfg = getattr(config, 'data_config', None)
+            data_config_snapshot = None
+            if data_cfg is not None:
+                data_config_snapshot = {
+                    'data_paths': list(getattr(data_cfg, 'data_paths', []) or []),
+                    'file_pattern': getattr(data_cfg, 'file_pattern', None) or 'enhanced_1_training_data_batch_*.pkl',
+                    'dataset_file_patterns': dict(getattr(data_cfg, 'dataset_file_patterns', None) or {}),
+                }
             config_dict = {
                 'include_water': include_water,
                 'normalization_method': args.normalization,
@@ -963,6 +989,7 @@ def main():
                 'prediction_element_counts': prediction_element_counts,
                 'model_config': config.model_config.__dict__,
                 'training_config': config.training_config.__dict__,
+                'data_config': data_config_snapshot,
                 # Model-config provenance for verification
                 'model_config_source': getattr(config, 'model_config_source', None),
                 'model_config_overrides_keys': getattr(config, 'model_config_overrides_keys', None)

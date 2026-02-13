@@ -367,16 +367,23 @@ def run_inference_all(
         config.data_config.data_paths = parsed_paths
     if file_pattern is not None:
         config.data_config.file_pattern = file_pattern
-    # If not explicitly set, try training run's cnp_config.json data_config
+    # If not explicitly set, try training run's cnp_config.json data_config (same paths as training)
     if (data_paths is None or file_pattern is None) and use_training_config:
         data_cfg = _load_training_data_config_from_config(Path(model_path))
         if isinstance(data_cfg, dict):
             if data_paths is None and data_cfg.get('data_paths'):
                 config.data_config.data_paths = data_cfg.get('data_paths')
+                logging.info(f"Using data_paths from training run cnp_config.json: {config.data_config.data_paths}")
             if file_pattern is None and data_cfg.get('file_pattern'):
                 config.data_config.file_pattern = data_cfg.get('file_pattern')
             if data_cfg.get('dataset_file_patterns'):
                 config.data_config.dataset_file_patterns = data_cfg.get('dataset_file_patterns')
+        elif data_paths is None:
+            logging.warning(
+                "Training run cnp_config.json has no data_config (or no data_paths). "
+                "Using paths from variable list or default. If inference fails with 'No data files could be loaded', "
+                "pass --data-paths with the same paths used at training (e.g. from your CNP_IO file or training CLI)."
+            )
     
     # CRITICAL FIX: Use the EXACT same data processing as training
     # During training: data was shuffled with random_state=42, then split 80/20

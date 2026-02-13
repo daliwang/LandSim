@@ -2,9 +2,9 @@
   "variable_weights": {
     "pft1d_weights": {
       "xsmrpool": 5.0,
-      "cpool": 2.0,
-      "npool": 2.0,
-      "ppool": 2.0,
+      "cpool": 5.0,
+      "npool": 5.0,
+      "ppool": 5.0,
       "tlai": 3.0,
       "totvegc": 2.0,
       "litr2p_vr": 5.0,
@@ -16,10 +16,14 @@
       "sminn_vr": 3.0,
       "smin_no3_vr": 3.0,
       "smin_nh4_vr": 3.0,
-      "labilep_vr": 2.5,
+      "labilep_vr": 5.0,
       "secondp_vr": 2.5,
       "litr2p_vr": 5.0,
-      "litr2n_vr": 5.0
+      "litr3p_vr": 5.0,
+      "litr2n_vr": 5.0,
+      "soil1c_vr": 5.0,
+      "soil1n_vr": 5.0,
+      "soil1p_vr": 5.0
     },
     "scalar_weights": {
       "GPP": 1.5,
@@ -27,6 +31,10 @@
       "AR": 1.2,
       "HR": 1.2
     }
+  },
+  "tail_aware_config": {
+    "loss": "log1p_mse",
+    "epsilon": 0.00000001
   },
   "tail_aware_weights": {
     "cpool": 5.0,
@@ -37,14 +45,18 @@
     "npool": 5.0,
     "ppool": 5.0,
     "labilep": 5.0,
+    "labilep_vr": 5.0,
     "primp_vr": 5.0,
     "occld_vr": 5.0,
     "litr2c_vr": 5.0,
     "litr2p_vr": 5.0,
     "litr2n": 5.0,
     "litr3c_vr": 5.0,
-    "Litr3p_vr": 5.0,
-    "Litr3n_vr": 5.0
+    "litr3p_vr": 5.0,
+    "litr3n_vr": 5.0,
+    "soil1c_vr": 5.0,
+    "soil1n_vr": 5.0,
+    "soil1p_vr": 5.0
   },
   "pft_zero_sparsity_weights": {
     "cpool": 1.0,

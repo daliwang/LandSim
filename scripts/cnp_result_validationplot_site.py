@@ -47,6 +47,23 @@ def _find_site_indices_in_df(df: pd.DataFrame, lon: float, lat: float, tol: floa
     return np.where(mask)[0].tolist()
 
 
+def _nearest_coord_in_df(df: pd.DataFrame, lon: float, lat: float):
+    """Return (nearest_lon, nearest_lat, distance) or None if no lon/lat columns."""
+    cols = _find_lat_lon_columns(df)
+    if not cols:
+        return None
+    lon_col, lat_col = cols
+    lon_vals = pd.to_numeric(df[lon_col], errors="coerce").values
+    lat_vals = pd.to_numeric(df[lat_col], errors="coerce").values
+    valid = np.isfinite(lon_vals) & np.isfinite(lat_vals)
+    if not np.any(valid):
+        return None
+    dist = np.sqrt((lon_vals - lon) ** 2 + (lat_vals - lat) ** 2)
+    dist[~valid] = np.inf
+    idx = np.argmin(dist)
+    return float(lon_vals[idx]), float(lat_vals[idx]), float(dist[idx])
+
+
 def _find_site_indices(results_dir: str, lon: float, lat: float, tol: float, coord_csv: Optional[str]) -> List[int]:
     candidates = []
     if coord_csv:
@@ -78,6 +95,17 @@ def _find_site_indices(results_dir: str, lon: float, lat: float, tol: float, coo
             except Exception as e:
                 print(f"Warning: failed to read {path}: {e}")
 
+    # No match: try to report nearest point to help the user
+    for path in candidates:
+        if path and os.path.exists(path):
+            try:
+                df = pd.read_csv(path)
+                near = _nearest_coord_in_df(df, lon, lat)
+                if near is not None:
+                    print(f"No row with (lon, lat) within tolerance {tol}. Nearest point in data: lon={near[0]:.4f}, lat={near[1]:.4f} (distance ~{near[2]:.3f}°). Try --tolerance {max(0.5, min(5, near[2] + 0.1)):.1f} or use that coordinate.")
+                    break
+            except Exception:
+                pass
     return []
 
 
@@ -696,7 +724,11 @@ def main_with_site(results_dir, plot_scatter, plot_loss, lon, lat, tol, coord_cs
 
     site_indices = _find_site_indices(results_dir, lon, lat, tol, coord_csv)
     if not site_indices:
-        raise ValueError("No matching samples found for the given lon/lat. Try a larger --tolerance or verify coordinates.")
+        raise ValueError(
+            "No matching samples found for the given lon/lat. "
+            "The default --tolerance is 0.01 (degrees). Grid data is often coarser (e.g. 1–2°); "
+            "try e.g. --tolerance 2.0 or check the message above for the nearest point."
+        )
     site_label = f"Site ({lon}, {lat})"
 
     selection = None
