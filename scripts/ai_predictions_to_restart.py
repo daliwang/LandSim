@@ -25,6 +25,7 @@ import netCDF4 as nc
 import sys
 import json
 import re
+import math
 
 # Project imports
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -55,6 +56,72 @@ def _build_gridcell_groups(one_d_to_grid, n_grid):
         if 0 <= g < n_grid:
             groups[g].append(idx)
     return groups
+
+
+def _parse_lat_range(lat_range_text: str) -> tuple[float, float]:
+    """Parse latitude range string in 'min,max' format."""
+    parts = [p.strip() for p in str(lat_range_text).split(",")]
+    if len(parts) != 2:
+        raise ValueError(f"Invalid latitude range '{lat_range_text}'. Expected format: min,max")
+    lat_min, lat_max = float(parts[0]), float(parts[1])
+    if lat_min > lat_max:
+        lat_min, lat_max = lat_max, lat_min
+    return lat_min, lat_max
+
+
+def _wrap_lon(lon: float) -> float:
+    """Wrap longitude to [-180, 180) for stable coordinate matching."""
+    return ((float(lon) + 180.0) % 360.0) - 180.0
+
+
+def _coord_key(lon: float, lat: float, decimals: int) -> tuple[float, float]:
+    return (round(_wrap_lon(lon), decimals), round(float(lat), decimals))
+
+
+def build_update_grid_mask(
+    variable_mapping: Dict[str, Any],
+    merge_scope: str,
+    tropical_lat_range: tuple[float, float],
+    coord_tol: float
+) -> np.ndarray:
+    """Build per-gridcell update mask for restart overwrite."""
+    n_grid = int(variable_mapping["n_grid"])
+    mask_all = np.ones(n_grid, dtype=bool)
+    if merge_scope == "all":
+        print("Merge scope: all model gridcells (backward-compatible behavior)")
+        return mask_all
+
+    model_lon = np.asarray(variable_mapping["model_lon"], dtype=float)
+    model_lat = np.asarray(variable_mapping["model_lat"], dtype=float)
+    ai_lon = np.asarray(variable_mapping["ai_lon"], dtype=float)
+    ai_lat = np.asarray(variable_mapping["ai_lat"], dtype=float)
+
+    lat_min, lat_max = tropical_lat_range
+    in_tropical = np.isfinite(model_lat) & (model_lat >= lat_min) & (model_lat <= lat_max)
+
+    tol = float(coord_tol)
+    if not np.isfinite(tol) or tol <= 0:
+        tol = 1e-6
+    decimals = max(0, int(math.ceil(-math.log10(tol))))
+
+    ai_coord_keys = set()
+    for lon, lat in zip(ai_lon, ai_lat):
+        if np.isfinite(lon) and np.isfinite(lat):
+            ai_coord_keys.add(_coord_key(lon, lat, decimals))
+
+    has_ai_match = np.zeros(n_grid, dtype=bool)
+    for g in range(n_grid):
+        if not (np.isfinite(model_lon[g]) and np.isfinite(model_lat[g])):
+            continue
+        has_ai_match[g] = _coord_key(model_lon[g], model_lat[g], decimals) in ai_coord_keys
+
+    update_mask = in_tropical & has_ai_match
+    print(f"Merge scope: tropical-only (lat in [{lat_min}, {lat_max}])")
+    print(f"Coordinate tolerance for matching: {tol} (rounded decimals: {decimals})")
+    print(f"  Tropical model gridcells: {int(in_tropical.sum())}/{n_grid}")
+    print(f"  Model gridcells matched in AI coords: {int(has_ai_match.sum())}/{n_grid}")
+    print(f"  Gridcells eligible for overwrite: {int(update_mask.sum())}/{n_grid}")
+    return update_mask
 
 
 def load_datasets(ai_predictions_path: Path, restart_file_path: Path) -> tuple[xr.Dataset, xr.Dataset]:
@@ -91,13 +158,9 @@ def create_spatial_mapping(ds_ai: xr.Dataset, ds_model: xr.Dataset) -> tuple[np.
     from scipy.spatial.distance import cdist
     ai_coords = np.column_stack([ai_lon, ai_lat])
     model_coords = np.column_stack([model_lon, model_lat])
-    distances = cdist(ai_coords, model_coords)
-    ai_to_model_mapping = np.argmin(distances, axis=1)
-    
-    print(f"  Spatial mapping created: {len(ai_to_model_mapping)} AI -> {len(set(ai_to_model_mapping))} Model")
-    print(f"  Mapping range: AI gridcell 0->model gridcell {ai_to_model_mapping[0]}")
-    print(f"  Mapping range: AI gridcell {len(ai_lon)-1}->model gridcell {ai_to_model_mapping[-1]}")
-    
+    distances = cdist(model_coords, ai_coords)
+    model_to_ai_mapping = np.argmin(distances, axis=1) # 索引是模型格点, 值是最近的 AI 格点
+    print(f"  Spatial mapping created: {len(model_to_ai_mapping)} Model -> {len(set(model_to_ai_mapping))} AI")
     # Get grid information from the MODEL file as the master coordinate system
     n_grid = ds_model.sizes["gridcell"]
     print(f"  Using MODEL gridcell count: {n_grid}")
@@ -116,10 +179,14 @@ def create_spatial_mapping(ds_ai: xr.Dataset, ds_model: xr.Dataset) -> tuple[np.
     variable_mapping = {
         'grid_to_cols': grid_to_cols,
         'grid_to_pfts': grid_to_pfts,
-        'n_grid': n_grid
+        'n_grid': n_grid,
+        'ai_lon': ai_lon,
+        'ai_lat': ai_lat,
+        'model_lon': model_lon,
+        'model_lat': model_lat
     }
     
-    return ai_to_model_mapping, variable_mapping
+    return model_to_ai_mapping, variable_mapping
 
 
 def auto_detect_variable_list(ai_predictions_path: Path) -> list:
@@ -148,8 +215,9 @@ def auto_detect_variable_list(ai_predictions_path: Path) -> list:
 
 def create_updated_restart_file(restart_file_path: Path, output_path: Path, 
                                ai_predictions_path: Path, cnp_io_variables: List[str],
-                               ai_to_model_mapping: np.ndarray, variable_mapping: Dict[str, Any]) -> None:
-    """Directly update the restart file using netCDF4 without xarray encoding issues."""
+                               model_to_ai_mapping: np.ndarray, variable_mapping: Dict[str, Any],
+                               strict_dims: bool = False,
+                               update_grid_mask: Optional[np.ndarray] = None) -> None:
     print(f"Saving updated restart file to: {output_path}")
     
     # Create output directory if it doesn't exist
@@ -161,8 +229,65 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
     
     # Open the output file for direct modification
     with nc.Dataset(output_path, 'r+') as ds_out:
+        # Verify and adjust spinup_state
+        try:
+            if 'spinup_state' in ds_out.variables:
+                spin_var = ds_out.variables['spinup_state']
+                try:
+                    orig_val = np.array(spin_var[:]).item() if spin_var.size == 1 else None
+                except Exception:
+                    orig_val = None
+                if orig_val is not None:
+                    print(f"spinup_state in original restart (copied): {orig_val}")
+                    if orig_val != 1:
+                        print("Warning: Expected spinup_state==1 for adspinup; proceeding to set final_spinup (0) anyway")
+                else:
+                    print("Warning: Could not read scalar value of spinup_state; proceeding to set to 0")
+                # Set to final_spinup mode (0)
+                try:
+                    spin_var[...] = 0
+                    print("Set spinup_state to 0 (final_spinup) in updated restart")
+                except Exception as e:
+                    print(f"Warning: Failed to set spinup_state to 0: {e}")
+            else:
+                print("Warning: 'spinup_state' variable not found in restart; skipping spinup flag update")
+        except Exception as e:
+            print(f"Warning: spinup_state check/update failed: {e}")
         # Load AI predictions
         with nc.Dataset(ai_predictions_path, 'r') as ds_ai:
+            # Helpers for shape/dimension checks
+            def _fail_or_warn(msg: str) -> bool:
+                if strict_dims:
+                    raise ValueError(msg)
+                print(f"Warning: {msg} — skipping this variable")
+                return False
+            
+            def _check_pft_compat(ai_var: nc.Variable, model_var: nc.Variable) -> bool:
+                # Expect AI dims to include pft and gridcell
+                ai_dims = list(ai_var.dimensions)
+                if not ('pft' in ai_dims and 'gridcell' in ai_dims):
+                    return _fail_or_warn(f"PFT var '{ai_var.name}' missing required dims (has {ai_dims}, need ['pft','gridcell'])")
+                # Model var should be 1D over pfts1d (or equivalent)
+                if len(model_var.shape) < 1:
+                    return _fail_or_warn(f"Model PFT var '{model_var.name}' has invalid shape {model_var.shape}")
+                # Require at least 16 PFT slots (PFT1..PFT16). We skip PFT0 by design.
+                if model_var.shape[0] < 16:
+                    return _fail_or_warn(f"Model PFT var '{model_var.name}' has insufficient length {model_var.shape[0]} (<16)")
+                return True
+            
+            def _check_soil_compat(ai_var: nc.Variable, model_var: nc.Variable) -> bool:
+                # Expect AI dims: (column, levgrnd, gridcell)
+                ai_dims = list(ai_var.dimensions)
+                required = {'column','levgrnd','gridcell'}
+                if not required.issubset(set(ai_dims)):
+                    return _fail_or_warn(f"Soil var '{ai_var.name}' missing required dims (has {ai_dims}, need {sorted(required)})")
+                if len(model_var.shape) < 2:
+                    return _fail_or_warn(f"Model soil var '{model_var.name}' has invalid shape {model_var.shape}")
+                # Need at least 10 layers in model to write top 10
+                if model_var.shape[1] < 10:
+                    return _fail_or_warn(f"Model soil var '{model_var.name}' has insufficient levgrnd={model_var.shape[1]} (<10)")
+                return True
+            
             # Update PFT variables
             for var_name in ds_ai.variables:
                 if (var_name in ds_out.variables and 
@@ -174,33 +299,31 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                     print(f"    AI data shape: {ai_data.shape}")
                     print(f"    Model variable shape: {model_var.shape}")
                     
+                    # Dimension compatibility check
+                    if not _check_pft_compat(ds_ai.variables[var_name], model_var):
+                        continue
+                    
                     # Get the grid-to-pfts mapping
                     if 'grid_to_pfts' in variable_mapping:
                         grid_to_pfts = variable_mapping['grid_to_pfts']
                         
                         # For each model gridcell, update PFT data
                         for g in range(variable_mapping['n_grid']):
+                            if update_grid_mask is not None and not bool(update_grid_mask[g]):
+                                continue
                             if g < len(grid_to_pfts) and len(grid_to_pfts[g]) > 0:
                                 # Get PFTs in this gridcell
                                 gridcell_pfts = grid_to_pfts[g]
                                 
-                                # Find corresponding AI gridcell using spatial mapping
-                                ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
-                                if len(ai_gridcell_idx) > 0:
-                                    ai_gridcell_idx = ai_gridcell_idx[0]
-                                    
-                                    # Update each PFT instance in this gridcell
-                                    # Only update PFT1-PFT16 (skip PFT0), and only in the first column
-                                    # Get the first 16 PFTs in this gridcell (exact same as working script)
-                                    gridcell_pfts = gridcell_pfts[:16]  # First 16 PFTs
-                                    for pft_idx, model_pft_idx in enumerate(gridcell_pfts):
-                                        # Skip PFT0 (index 0), start from PFT1 (index 1)
-                                        if 1 <= pft_idx <= 16 and model_pft_idx < len(model_var):
-                                            # AI PFT0 -> Model PFT1, AI PFT1 -> Model PFT2, etc.
-                                            # Adjust index: AI PFT k corresponds to Model PFT (k+1) in the first 16
-                                            adjusted_k = pft_idx - 1  # AI PFT0 -> Model PFT1, AI PFT1 -> Model PFT2
-                                            if adjusted_k < ai_data.shape[0]:
-                                                model_var[model_pft_idx] = ai_data[adjusted_k, ai_gridcell_idx]
+
+                                ai_gridcell_idx = model_to_ai_mapping[g]
+                                gridcell_pfts = gridcell_pfts[:16] 
+                                for pft_idx, model_pft_idx in enumerate(gridcell_pfts):
+                                    # Skip PFT0 (index 0), start from PFT1 (index 1)
+                                    if 1 <= pft_idx <= 16 and model_pft_idx < len(model_var):
+                                        adjusted_k = pft_idx - 1  
+                                        if adjusted_k < ai_data.shape[0]:
+                                            model_var[model_pft_idx] = ai_data[adjusted_k, ai_gridcell_idx]
             
             # Update soil variables
             for var_name in ds_ai.variables:
@@ -214,37 +337,37 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                     print(f"    AI data shape: {ai_data.shape}")
                     print(f"    Model variable shape: {model_var.shape}")
                     
+                    # Dimension compatibility check
+                    if not _check_soil_compat(ds_ai.variables[var_name], model_var):
+                        continue
+                    
                     # Get the grid-to-cols mapping
                     if 'grid_to_cols' in variable_mapping:
                         grid_to_cols = variable_mapping['grid_to_cols']
                         
                         # For each model gridcell, update column data
                         for g in range(variable_mapping['n_grid']):
+                            if update_grid_mask is not None and not bool(update_grid_mask[g]):
+                                continue
                             if g < len(grid_to_cols) and len(grid_to_cols[g]) > 0:
                                 # Get columns in this gridcell
                                 gridcell_cols = grid_to_cols[g]
                                 
-                                # Find corresponding AI gridcell using spatial mapping
-                                ai_gridcell_idx = np.where(ai_to_model_mapping == g)[0]
-                                if len(ai_gridcell_idx) > 0:
-                                    ai_gridcell_idx = ai_gridcell_idx[0]
-                                    
-                                    # Update first column in this gridcell (use AI column 0)
-                                    if len(gridcell_cols) > 0:
-                                        model_col_idx = gridcell_cols[0]  # First column of this gridcell
-                                        if model_col_idx < model_var.shape[0]:
-                                            # Update only first 10 layers for this column (even if model has 15 layers)
-                                            layers_to_update = min(10, ai_data.shape[1])
-                                            for layer_idx in range(layers_to_update):
-                                                # Handle AI data indexing - shape is (column, levgrnd, gridcell)
-                                                if ai_data.ndim == 3:
-                                                    model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx, ai_gridcell_idx]
-                                                else:
-                                                    model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx]
+
+                                ai_gridcell_idx = model_to_ai_mapping[g]
+
+                                if len(gridcell_cols) > 0:
+                                    model_col_idx = gridcell_cols[0]  
+                                    if model_col_idx < model_var.shape[0]:
+                                        layers_to_update = min(10, ai_data.shape[1])
+                                        for layer_idx in range(layers_to_update):
+                                            if ai_data.ndim == 3:
+                                                model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx, ai_gridcell_idx]
+                                            else:
+                                                model_var[model_col_idx, layer_idx] = ai_data[0, layer_idx]
     
     print(f"Updated restart file saved successfully!")
     print(f"File size: {output_path.stat().st_size / (1024*1024):.1f} MB")
-
 
 def get_varlist_name_from_config(ai_predictions_path):
     for parent in [ai_predictions_path.parent] + list(ai_predictions_path.parents):
@@ -321,6 +444,14 @@ Examples:
                        help='Preview changes without saving updated restart file')
     parser.add_argument('--backup', action='store_true',
                        help='Create backup of original restart file before updating')
+    parser.add_argument('--strict-dims', action='store_true',
+                       help='Abort on any dimension mismatch instead of skipping')
+    parser.add_argument('--merge-scope', choices=['all', 'tropical-only'], default='all',
+                       help='Overwrite scope: all model gridcells (default) or tropical-only')
+    parser.add_argument('--tropical-lat-range', type=str, default='-23.5,23.5',
+                       help='Latitude range used when --merge-scope tropical-only, format "min,max"')
+    parser.add_argument('--coord-tol', type=float, default=1e-4,
+                       help='Coordinate match tolerance for tropical-only merge')
     
     args = parser.parse_args()
     
@@ -350,6 +481,7 @@ Examples:
     print(f"Output: {output_path}")
     print(f"Preview only: {args.preview_only}")
     print(f"Create backup: {args.backup}")
+    print(f"Merge scope: {args.merge_scope}")
     print("=" * 60)
     
     # Load datasets
@@ -357,6 +489,19 @@ Examples:
     
     # Create spatial mapping
     ai_to_model_mapping, variable_mapping = create_spatial_mapping(ds_ai, ds_model)
+    
+    tropical_lat_range = (-23.5, 23.5)
+    if args.merge_scope == 'tropical-only':
+        try:
+            tropical_lat_range = _parse_lat_range(args.tropical_lat_range)
+        except Exception as e:
+            parser.error(f"Invalid --tropical-lat-range: {e}")
+    update_grid_mask = build_update_grid_mask(
+        variable_mapping=variable_mapping,
+        merge_scope=args.merge_scope,
+        tropical_lat_range=tropical_lat_range,
+        coord_tol=args.coord_tol
+    )
     
     # Parse CNP_IO list if provided, else auto-detect
     cnp_io_variables = []
@@ -428,6 +573,7 @@ Examples:
     print(f"  AI gridcells: {ds_ai.sizes.get('gridcell', 'N/A')}")
     print(f"  Model gridcells: {ds_model.sizes.get('gridcell', 'N/A')}")
     print(f"  Spatial mapping: {len(ai_to_model_mapping)} AI -> {len(set(ai_to_model_mapping))} Model")
+    print(f"  Effective overwrite gridcells: {int(np.count_nonzero(update_grid_mask))}")
     
     if not args.preview_only:
         # Create backup if requested
@@ -439,7 +585,8 @@ Examples:
         
         # Save updated restart file using direct NetCDF manipulation
         create_updated_restart_file(restart_file_path, output_path, ai_predictions_path, 
-                                   cnp_io_variables, ai_to_model_mapping, variable_mapping)
+                                   cnp_io_variables, ai_to_model_mapping, variable_mapping,
+                                   strict_dims=args.strict_dims, update_grid_mask=update_grid_mask)
         
         print(f"\nRestart file updated successfully!")
         print(f"Original: {restart_file_path}")
@@ -454,6 +601,7 @@ Examples:
         print(f"  Other columns: Preserved (not modified)")
         print(f"  Spatial mapping: Used geographic coordinates to map AI gridcells to model gridcells")
         print(f"  Coordinate system: Model coordinates used as master reference for alignment")
+        print(f"  Overwrite scope: {args.merge_scope} (eligible gridcells: {int(np.count_nonzero(update_grid_mask))})")
         print(f"  Important: Only CNP_IO variables were modified - all other variables and attributes unchanged")
         
         print(f"\nYou can now use the updated restart file for model simulations!")
