@@ -491,6 +491,26 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                             )
                 except Exception as e:
                     print(f"  Skipped BadPFTs plot for {var_name}: {e}")
+            
+            # Also generate aggregate_all plot for this bad variable (all PFTs, not just bad ones)
+            try:
+                pft_cols_all = []
+                for col in gt_data.columns:
+                    m = re.search(r"pft(\d+)$", col)
+                    if m and 1 <= int(m.group(1)) <= NUM_PFTS:
+                        pft_cols_all.append(col)
+                if pft_cols_all and all(c in pred_data.columns for c in pft_cols_all):
+                    gt_all_pfts = gt_data[pft_cols_all].values.flatten()
+                    pred_all_pfts = pred_data[pft_cols_all].values.flatten()
+                    valid_mask = ~(np.isnan(gt_all_pfts) | np.isnan(pred_all_pfts))
+                    if np.sum(valid_mask) >= 3:
+                        plot_gt_vs_pred(
+                            gt_all_pfts[valid_mask], pred_all_pfts[valid_mask],
+                            f"{label} {var_name} AllPFTs (pft1–pft{NUM_PFTS}) GT vs Pred",
+                            os.path.join(out_dir, SUBDIR_ALLLAYER, f"{label}_{var_name}_AllPFTs_gt_vs_pred.png")
+                        )
+            except Exception as e:
+                print(f"  Skipped aggregate_all AllPFTs plot for {var_name}: {e}")
 
 def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True, selection=None):
     """Legacy function for old single-file 1D format - kept for compatibility"""
@@ -738,6 +758,20 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                             )
                 except Exception as e:
                     print(f"  Skipped BadLayers plot for {var_name}: {e}")
+            
+            # Also generate aggregate_all plot for this bad variable (all layers, not just bad ones)
+            try:
+                gt_all_layers = gt_data.iloc[:, 0:NUM_LAYERS].values.flatten()
+                pred_all_layers = pred_data.iloc[:, 0:NUM_LAYERS].values.flatten()
+                valid_mask = ~(np.isnan(gt_all_layers) | np.isnan(pred_all_layers))
+                if np.sum(valid_mask) >= 3:
+                    plot_gt_vs_pred(
+                        gt_all_layers[valid_mask], pred_all_layers[valid_mask],
+                        f"{label} {var_name} FirstCol({NUM_LAYERS} layers) GT vs Pred",
+                        os.path.join(out_dir, SUBDIR_ALLLAYER, f"{label}_{var_name}_FirstCol_AllLayers_gt_vs_pred.png")
+                    )
+            except Exception as e:
+                print(f"  Skipped aggregate_all AllLayers plot for {var_name}: {e}")
 
 def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True, selection=None):
     """Legacy function for old single-file 2D format - kept for compatibility"""

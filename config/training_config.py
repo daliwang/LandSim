@@ -259,6 +259,8 @@ class TrainingConfig:
 
     # Mask predictions for absent PFTs using PCT_NAT_PFT (PFT0 ignored)
     mask_absent_pfts: bool = False
+    # Min PFT percent for training-only mask (0 = pct>0; e.g. 2.0 = pct>=2%). Inference always uses pct>0.
+    pft_presence_threshold: float = 0.0
     
     # Variable-specific loss weights from JSON file
     variable_weights_json: Optional[str] = None  # Path to JSON file with pft1d_weights, soil2d_weights, scalar_weights
@@ -321,6 +323,10 @@ class PreprocessingConfig:
     # Memory management
     memory_save_threshold: int = 50  # Save to disk every N variables
 
+    # PFT presence mask: min percent for "present" during training only (0 = pct>0; e.g. 2.0 = pct>=2%).
+    # Used only when normalize_data_individual(transform_only=False). Inference uses pct>0.
+    pft_presence_threshold: float = 0.0
+
 class TrainingConfigManager:
     def __init__(self):
         self.data_config = DataConfig()
@@ -351,6 +357,9 @@ class TrainingConfigManager:
                 setattr(self.training_config, key, value)
             else:
                 raise ValueError(f"Unknown training config parameter: {key}")
+        # Sync training-only PFT mask threshold to preprocessing (for data loader)
+        if 'pft_presence_threshold' in kwargs:
+            self.preprocessing_config.pft_presence_threshold = self.training_config.pft_presence_threshold
     
     def get_all_configs(self) -> Dict[str, Any]:
         """Get all configurations as a dictionary."""

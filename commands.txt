@@ -9,7 +9,7 @@ python train_cnp_model.py \
 
 cd cnp_resuls/run_20260207_125838
 
-python ../../scripts/cnp_result_validationplot.py --stats-only
+python ../../scripts/cnp_result_validationplot.py --stats-only &&
 python ../../scripts/generate_prediction_quality_report.py
 
 
@@ -131,3 +131,27 @@ python train_cnp_model.py \
   --pft-zero-sparsity-weight 1.0 \
   --epoch 50 \
   2>&1 | tee training_cpool_experiment.log &
+
+
+   python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config-json config/training_config_experiment_5.json \
+  --epoch 50 \
+  --tropical-only \
+  2>&1 | tee training_cpool_experiment4.log &
+
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_2.json \
+  --model-config large_model_tokenization_config_v02.txt \
+  --epoch 80 \
+  --tropical-only
+
+
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_2.json \
+  --pft-presence-threshold 2.0 \
+  --epoch 80 \
+  --tropical-only

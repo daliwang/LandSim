@@ -337,6 +337,9 @@ class ModelTrainer:
             tensors_to_check.append(self.train_data['y_water'])
             tensor_names.append('y_water')
         
+        # Mask for training step: use strict (e.g. pct>=2%) when set, else inference mask (pct>0)
+        _has_pft_mask = 'pft_presence_mask_training' in self.train_data or 'pft_presence_mask' in self.train_data
+        _pft_mask_train = self.train_data.get('pft_presence_mask_training', self.train_data.get('pft_presence_mask'))
         # Create data loader with GPU optimizations
         if 'water' in self.train_data and 'y_water' in self.train_data:
             train_dataset = TensorDataset(
@@ -351,7 +354,7 @@ class ModelTrainer:
                 self.train_data['y_soil_2d'],
                 self.train_data['water'],
                 self.train_data['y_water'],
-                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
+                *((_pft_mask_train,) if _has_pft_mask else ())
             )
         else:
             train_dataset = TensorDataset(
@@ -364,8 +367,7 @@ class ModelTrainer:
                 self.train_data['y_scalar'],
                 self.train_data['y_pft_1d'],
                 self.train_data['y_soil_2d'],
-                # Optional mask as final feature; if absent, a placeholder will be injected in-loop
-                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
+                *((_pft_mask_train,) if _has_pft_mask else ())
             )
         
         train_loader = DataLoader(
@@ -385,12 +387,12 @@ class ModelTrainer:
 
         for batch_idx, batch in enumerate(progress_bar):
             if 'water' in self.train_data and 'y_water' in self.train_data:
-                if 'pft_presence_mask' in self.train_data:
+                if _has_pft_mask:
                     (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water, pft_presence_mask) = batch
                 else:
                     (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
             else:
-                if 'pft_presence_mask' in self.train_data:
+                if _has_pft_mask:
                     (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
                 else:
                     (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
@@ -421,8 +423,8 @@ class ModelTrainer:
             if 'water' in self.train_data and 'y_water' in self.train_data:
                 water = water.to(self.device, non_blocking=True).contiguous()
                 y_water = y_water.to(self.device, non_blocking=True).contiguous()
-            # Presence mask to device if provided
-            if 'pft_presence_mask' in self.train_data:
+            # Presence mask to device if provided (training uses strict mask when pft_presence_mask_training is set)
+            if _has_pft_mask:
                 pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True).contiguous()
 
             # print(f"[DEBUG] variables_1d_pft shape before model: {variables_1d_pft.shape}")
@@ -446,7 +448,7 @@ class ModelTrainer:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
 
             # Optionally apply PFT presence mask to predictions before loss
-            if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.train_data:
+            if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and _has_pft_mask:
                 try:
                     vec = outputs['pft_1d']
                     varnames = list(self.model.data_info.get('variables_1d_pft', [])) if hasattr(self.model, 'data_info') else None
@@ -516,6 +518,9 @@ class ModelTrainer:
                 other_pred = torch.cat([vector_pred_reshaped[:, :x_idx, :], vector_pred_reshaped[:, x_idx+1:, :]], dim=1)
                 other_targ = torch.cat([vector_targ[:, :x_idx, :], vector_targ[:, x_idx+1:, :]], dim=1)
 
+                # PFT presence mask for loss: only compute loss where mask==1 (e.g. pct >= 2%)
+                pft_loss_mask = pft_presence_mask if _has_pft_mask else None  # (B, n_pfts)
+
                 # Apply variable-specific weights for PFT1D variables and optional tail-aware loss
                 pft1d_vars = list(self.data_info.get('variables_1d_pft', []))
                 tail_vars = set(getattr(self.config, 'tail_aware_vars', []) or [])
@@ -541,18 +546,26 @@ class ModelTrainer:
                             var_pred = other_pred[:, i:i+1, :].reshape(other_pred.size(0), -1)
                             var_targ = other_targ[:, i:i+1, :].reshape(other_targ.size(0), -1)
                             use_tail = (var_name in tail_vars) or (f'Y_{var_name}' in tail_vars)
-                            var_loss = self._compute_tail_aware_loss(var_pred, var_targ) if use_tail else self._compute_loss(var_pred, var_targ)
+                            if pft_loss_mask is not None:
+                                var_loss = self._compute_masked_tail_aware_loss(var_pred, var_targ, pft_loss_mask) if use_tail else self._masked_pft_mse(var_pred, var_targ, pft_loss_mask)
+                            else:
+                                var_loss = self._compute_tail_aware_loss(var_pred, var_targ) if use_tail else self._compute_loss(var_pred, var_targ)
                             pft1d_loss += var_weight * tail_weight * var_loss
                     # Add normalized loss
                     loss += self.vector_loss_weight * pft1d_loss / max(1, other_pred.size(1))
                 else:
-                    # Apply standard loss for other variables
-                    loss += self.vector_loss_weight * self._compute_loss(
-                        other_pred.view(other_pred.size(0), -1),
-                        other_targ.view(other_targ.size(0), -1)
-                    )
+                    # Apply standard loss for other variables (masked when pft_loss_mask is set)
+                    if pft_loss_mask is not None:
+                        mask_expanded = pft_loss_mask.unsqueeze(1).expand(-1, other_pred.size(1), -1)
+                        se = (other_pred - other_targ).pow(2)
+                        loss += self.vector_loss_weight * (se * mask_expanded).sum() / mask_expanded.sum().clamp(min=1.0)
+                    else:
+                        loss += self.vector_loss_weight * self._compute_loss(
+                            other_pred.view(other_pred.size(0), -1),
+                            other_targ.view(other_targ.size(0), -1)
+                        )
 
-                # Weighted MSE for xsmrpool
+                # Weighted MSE for xsmrpool (masked when pft_loss_mask is set)
                 x_pred_flat = x_pred.view(x_pred.size(0), -1)
                 x_targ_flat = x_targ.view(x_targ.size(0), -1)
                 with torch.no_grad():
@@ -561,7 +574,10 @@ class ModelTrainer:
                 extra = max(1.0, xsmrpool_weight) - 1.0
                 weights = base_w + extra * nz_mask
                 se = (x_pred_flat - x_targ_flat) ** 2
-                weighted_mse = (se * weights).mean()
+                if pft_loss_mask is not None:
+                    weighted_mse = (se * weights * pft_loss_mask).sum() / (pft_loss_mask.sum().clamp(min=1.0))
+                else:
+                    weighted_mse = (se * weights).mean()
                 loss += self.vector_loss_weight * weighted_mse
             except Exception:
                 # Fallback: original aggregate loss
@@ -1112,6 +1128,26 @@ class ModelTrainer:
             return torch.mean(torch.maximum(tau * diff, (tau - 1.0) * diff))
         # default: log1p MSE
         return self._compute_loss(pred_log, targ_log)
+
+    def _masked_pft_mse(self, pred: torch.Tensor, targ: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """MSE over PFT slots where mask==1 only. pred, targ, mask: (B, n_pfts)."""
+        if mask is None or mask.sum() < 1e-8:
+            return (pred - targ).pow(2).mean()
+        se = (pred - targ).pow(2)
+        return (se * mask).sum() / mask.sum().clamp(min=1.0)
+
+    def _compute_masked_tail_aware_loss(self, pred: torch.Tensor, targ: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """Tail-aware loss (log1p MSE) over PFT slots where mask==1 only."""
+        if mask is None or mask.sum() < 1e-8:
+            return self._compute_tail_aware_loss(pred, targ)
+        loss_type = str(getattr(self.config, 'tail_aware_loss', 'log1p_mse')).lower()
+        eps = float(getattr(self.config, 'tail_aware_epsilon', 1e-8))
+        pred_clamped = torch.clamp(pred, min=0.0)
+        targ_clamped = torch.clamp(targ, min=0.0)
+        pred_log = torch.log1p(pred_clamped + eps)
+        targ_log = torch.log1p(targ_clamped + eps)
+        se = (pred_log - targ_log).pow(2)
+        return (se * mask).sum() / mask.sum().clamp(min=1.0)
     
     def train(self) -> Dict[str, List[float]]:
         """

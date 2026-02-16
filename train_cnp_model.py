@@ -378,7 +378,14 @@ def main():
         help='Disable masking of absent PFTs'
     )
     parser.set_defaults(mask_absent_pfts=True)
-    
+    parser.add_argument(
+        '--pft-presence-threshold',
+        dest='pft_presence_threshold',
+        type=float,
+        default=0.0,
+        metavar='PCT',
+        help='Min PFT percent for training mask only (0 = pct>0; e.g. 2.0 = pct>=2%%). Inference always uses pct>0.'
+    )
     args = parser.parse_args()
     
     # Create output directory with timestamp
@@ -626,6 +633,12 @@ def main():
                 logger.info("Masking absent PFTs enabled (using PCT_NAT_PFT_1..16)")
             except Exception as e:
                 logger.warning(f"Failed to enable mask_absent_pfts: {e}")
+        if getattr(args, 'pft_presence_threshold', 0.0) != 0.0:
+            try:
+                config.update_training_config(pft_presence_threshold=float(args.pft_presence_threshold))
+                logger.info("PFT presence threshold for training mask: pct >= %s (inference still uses pct > 0)", args.pft_presence_threshold)
+            except Exception as e:
+                logger.warning(f"Failed to set pft_presence_threshold: {e}")
         # apply xsmrpool loss weight from CLI if provided
         if args.xsmrpool_loss_weight is not None:
             try:
