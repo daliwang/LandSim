@@ -170,8 +170,16 @@ Options and behavior:
 Creates a folder `cnp_inference_entire_dataset` with AI predictions for the entire dataset.
 
 ```bash
-python ../../scripts/run_inference_all.py > run_inference_all.log 2>&1 &
+python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset > run_inference_all.log 2>&1 &
 ```
+
+**CNP stoichiometric ratio enforcement (optional):** To enforce C:N and C:P ratios by deriving N/P from C predictions after inference, add `--derive-np-from-c`:
+
+```bash
+python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c > run_inference_all.log 2>&1 &
+```
+
+This overwrites N/P prediction files with stoichiometrically consistent values. Training should still use the full CNP variable list. See **CNP ratio and derivation docs** below.
 
 ### 6) Export AI predictions to NetCDF
 Creates a NetCDF file containing all AI predictions for plotting and comparison:
@@ -272,3 +280,20 @@ python scripts/extract_elm_restart_point.py \
   --lon -84.208336(Target longitude coordinate) \
   --output-file single_point_extracted.nc
 ```
+
+---
+
+### CNP stoichiometry and derivation (docs)
+
+Documentation for enforcing C:N and C:P ratios and deriving N/P from C at inference:
+
+| Doc | Description |
+|-----|-------------|
+| `docs/CNP_RATIO_ENFORCEMENT_USAGE.md` | **How to enable** ratio enforcement: `--derive-np-from-c`, standalone script, validation |
+| `docs/CNP_DERIVATION_CLARIFICATION.md` | Why train full CNP (not C-only) and derive N/P at inference |
+| `docs/CNP_DERIVATION_APPROACH.md` | Rationale and benefits of the derivation approach |
+| `docs/CNP_DERIVATION_IMPLEMENTATION.md` | Implementation details and ratio definitions |
+| `docs/DERIVATION_RESULTS_INTERPRETATION.md` | How to interpret derivation and ratio validation results |
+| `docs/CNP_STOICHIOMETRIC_RELATIONSHIPS.md` | Underlying CNP ratio relationships and target variables |
+
+Scripts: `scripts/derive_np_from_c.py`, `scripts/validate_cnp_ratios.py`.
