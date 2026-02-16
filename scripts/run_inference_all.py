@@ -48,6 +48,12 @@ except Exception:
 from data.data_loader_pandas import PandasDataLoader
 from config.training_config import get_cnp_model_config, parse_cnp_io_list, get_cnp_combined_config
 
+# Import derivation function for CNP ratio enforcement
+try:
+    from scripts.derive_np_from_c import derive_np_from_c_predictions
+except ImportError:
+    derive_np_from_c_predictions = None
+
 def _load_training_variables_from_config(model_path: Path) -> dict:
     """Load variable lists from cnp_config.json in the training run directory."""
     try:
@@ -223,7 +229,8 @@ def run_inference_all(
     debug_vars: bool = False,
     loader: str = 'auto',
     mask_pft_with_gt: bool = False,
-    mask_absent_pfts: bool = True
+    mask_absent_pfts: bool = True,
+    derive_np_from_c: bool = False
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
@@ -1671,6 +1678,39 @@ def run_inference_all(
         logging.warning(f"Failed to save inverse-transformed static features: {e}")
     logging.info("Inference completed successfully!")
     
+    # Apply CNP ratio enforcement by deriving N/P from C if requested
+    if derive_np_from_c:
+        if derive_np_from_c_predictions is None:
+            logging.error("Cannot derive N/P from C: derive_np_from_c module not available")
+        else:
+            logging.info("="*80)
+            logging.info("Enforcing CNP stoichiometric ratios by deriving N/P from C predictions...")
+            logging.info("="*80)
+            
+            # Find config path (same logic as used earlier in function)
+            model_dir = Path(model_path).parent
+            config_path = None
+            candidate_paths = [model_dir / 'cnp_config.json'] + [p / 'cnp_config.json' for p in model_dir.parents]
+            for cp in candidate_paths:
+                if cp.exists():
+                    config_path = cp
+                    break
+            
+            if config_path is None:
+                logging.error("Cannot derive N/P: cnp_config.json not found near model path")
+            else:
+                predictions_dir = Path(output_dir) / 'cnp_predictions'
+                try:
+                    derived_files = derive_np_from_c_predictions(
+                        predictions_dir=predictions_dir,
+                        config_path=config_path,
+                        output_dir=predictions_dir  # Overwrite existing predictions
+                    )
+                    logging.info(f"Successfully derived {len(derived_files)} N/P variable files")
+                    logging.info("CNP ratio enforcement completed!")
+                except Exception as e:
+                    logging.error(f"Failed to derive N/P from C: {e}", exc_info=True)
+    
     return Path(output_dir)
 
 def main():
@@ -1691,6 +1731,8 @@ def main():
     parser.add_argument("--no-mask-absent-pfts", dest="mask_absent_pfts", action="store_false", help="Disable masking of absent PFTs")
     parser.set_defaults(mask_absent_pfts=True)
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
+    parser.add_argument("--derive-np-from-c", action='store_true', default=False, 
+                       help="Enforce CNP stoichiometric ratios by deriving N/P variables from C predictions after inference (default: False)")
     args = parser.parse_args()
     
     # Setup logging
@@ -1711,6 +1753,7 @@ def main():
             , loader=args.loader
             , mask_pft_with_gt=args.mask_pft_with_gt
             , mask_absent_pfts=args.mask_absent_pfts
+            , derive_np_from_c=args.derive_np_from_c
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         

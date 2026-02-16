@@ -187,6 +187,21 @@ class ModelTrainer:
         self.vector_loss_weight = getattr(self.config, 'vector_loss_weight', 1.0)
         self.matrix_loss_weight = getattr(self.config, 'matrix_loss_weight', 1.0)
         
+        # Setup CNP ratio constraint loss (optional)
+        self.use_cnp_ratio_constraints = getattr(self.config, 'use_cnp_ratio_constraints', False)
+        self.cnp_ratio_constraint_weight = getattr(self.config, 'cnp_ratio_constraint_weight', 1.0)
+        if self.use_cnp_ratio_constraints:
+            from training.losses import CNPRatioConstraintLoss
+            self.cnp_ratio_loss_fn = CNPRatioConstraintLoss(
+                data_info=self.data_info,
+                constraint_weight=self.cnp_ratio_constraint_weight,
+                ratio_tolerance=getattr(self.config, 'cnp_ratio_tolerance', 0.1),
+                mode="soft"
+            )
+            logger.info(f"CNP ratio constraints enabled with weight={self.cnp_ratio_constraint_weight}")
+        else:
+            self.cnp_ratio_loss_fn = None
+        
         # Training state
         self.train_losses = []
         self.val_losses = []
@@ -671,7 +686,31 @@ class ModelTrainer:
                 )
             if 'water' in self.train_data and 'y_water' in self.train_data and 'water' in outputs:
                 loss += self._compute_loss(outputs['water'], y_water)
-
+            
+            # Add CNP ratio constraint loss if enabled
+            if self.use_cnp_ratio_constraints and self.cnp_ratio_loss_fn is not None:
+                try:
+                    # Build variable index mappings
+                    pft_1d_vars = self.data_info.get('variables_1d_pft', [])
+                    soil_2d_vars = self.data_info.get('variables_2d_soil', [])
+                    pft_1d_var_indices = {var: i for i, var in enumerate(pft_1d_vars)}
+                    soil_2d_var_indices = {var: i for i, var in enumerate(soil_2d_vars)}
+                    
+                    # Compute CNP ratio constraint loss
+                    cnp_ratio_loss = self.cnp_ratio_loss_fn(
+                        pft_1d_pred=outputs['pft_1d'],
+                        pft_1d_target=y_pft_1d,
+                        soil_2d_pred=outputs['soil_2d'],
+                        soil_2d_target=y_soil_2d,
+                        pft_params=pft_param,
+                        pft_1d_var_indices=pft_1d_var_indices,
+                        soil_2d_var_indices=soil_2d_var_indices
+                    )
+                    loss += cnp_ratio_loss
+                except Exception as e:
+                    logger.warning(f"Failed to compute CNP ratio constraint loss: {e}")
+                    # Continue training without CNP ratio loss if computation fails
+            
             # Backward and optimizer step
             if self.use_amp and self.scaler is not None:
                 self.scaler.scale(loss).backward()
@@ -1032,6 +1071,27 @@ class ModelTrainer:
                 
                 if 'water' in self.test_data and 'y_water' in self.test_data and 'water' in outputs:
                     loss += self._compute_loss(outputs['water'], y_water)
+                
+                # Add CNP ratio constraint loss if enabled (validation)
+                if self.use_cnp_ratio_constraints and self.cnp_ratio_loss_fn is not None:
+                    try:
+                        pft_1d_vars = self.data_info.get('variables_1d_pft', [])
+                        soil_2d_vars = self.data_info.get('variables_2d_soil', [])
+                        pft_1d_var_indices = {var: i for i, var in enumerate(pft_1d_vars)}
+                        soil_2d_var_indices = {var: i for i, var in enumerate(soil_2d_vars)}
+                        
+                        cnp_ratio_loss = self.cnp_ratio_loss_fn(
+                            pft_1d_pred=outputs['pft_1d'],
+                            pft_1d_target=y_pft_1d,
+                            soil_2d_pred=outputs['soil_2d'],
+                            soil_2d_target=y_soil_2d,
+                            pft_params=pft_param,
+                            pft_1d_var_indices=pft_1d_var_indices,
+                            soil_2d_var_indices=soil_2d_var_indices
+                        )
+                        loss += cnp_ratio_loss
+                    except Exception as e:
+                        pass  # Silently skip CNP ratio loss in validation if it fails
                 
                 loss_value = get_loss_value(loss)
                 total_loss += loss_value
