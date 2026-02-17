@@ -175,6 +175,19 @@ def main():
         default=None,
         help='Optional seed to use when --random-shuffle is enabled (default: no fixed seed)'
     )
+    parser.add_argument(
+        '--split-seed',
+        type=int,
+        default=None,
+        help='Seed for train/val split shuffle (default: 42). Use a different value to get a different train/validation split.'
+    )
+    parser.add_argument(
+        '--train-split',
+        type=float,
+        default=None,
+        metavar='RATIO',
+        help='Fraction of data for training, 0-1 (default: 0.8). Remainder is validation.'
+    )
 
     parser.add_argument(
         '--use-trendy1',
@@ -609,7 +622,10 @@ def main():
                 logger.warning(f"Failed to set variable weights JSON path: {e}")
         
         # Set train/validation split
-        config.update_data_config(train_split=0.8)
+        train_split = args.train_split if args.train_split is not None else 0.8
+        config.update_data_config(train_split=train_split)
+        if args.train_split is not None:
+            logger.info(f"Train/validation split ratio: {train_split} (from --train-split)")
         # Prefer GPU when available, otherwise CPU
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         config.update_training_config(device=device_str)
@@ -661,8 +677,12 @@ def main():
             logger.warning(f"Failed to set litter loss weights: {e}")
         logger.info(f"Effective learning rate for this run: {effective_lr}")
 
-        # Shuffling policy: fixed vs random
-        if args.random_shuffle:
+        # Shuffling policy: split-seed (train/val split), then fixed vs random for reproducibility
+        if args.split_seed is not None:
+            config.update_data_config(random_state=int(args.split_seed))
+            config.update_training_config(random_seed=int(args.split_seed))
+            logger.info(f"Train/validation split seed: {args.split_seed} (different split than default 42)")
+        elif args.random_shuffle:
             # Use provided shuffle seed or system randomness
             if args.shuffle_seed is not None:
                 config.update_data_config(random_state=int(args.shuffle_seed))
@@ -678,7 +698,7 @@ def main():
                 config.update_data_config(random_state=dyn_seed)
                 config.update_training_config(random_seed=dyn_seed)
         else:
-            # Keep fixed seeds for fair comparisons
+            # Keep fixed seeds for fair comparisons (default random_state=42)
             logger.info("Fixed shuffling (seeded) enabled for fair comparison")
 
         # If only validating configuration, exit early before heavy work (used in CI)

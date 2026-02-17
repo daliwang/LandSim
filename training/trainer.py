@@ -533,7 +533,8 @@ class ModelTrainer:
                 other_pred = torch.cat([vector_pred_reshaped[:, :x_idx, :], vector_pred_reshaped[:, x_idx+1:, :]], dim=1)
                 other_targ = torch.cat([vector_targ[:, :x_idx, :], vector_targ[:, x_idx+1:, :]], dim=1)
 
-                # PFT presence mask for loss: only compute loss where mask==1 (e.g. pct >= 2%)
+                # PFT presence mask for loss: only compute loss where mask==1 (e.g. pct >= 2%).
+                # Mirror the same logic in validate_epoch() so train/val loss are comparable.
                 pft_loss_mask = pft_presence_mask if _has_pft_mask else None  # (B, n_pfts)
 
                 # Apply variable-specific weights for PFT1D variables and optional tail-aware loss
@@ -859,6 +860,9 @@ class ModelTrainer:
                     y_water = y_water.to(self.device, non_blocking=True).contiguous()
                 if 'pft_presence_mask' in self.test_data:
                     pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True).contiguous()
+                # Use same PFT presence mask for loss as in training (loss only on present PFTs).
+                # Keep in sync with train_epoch(): if train uses pft_loss_mask for PFT1D/xsmrpool loss, val must too.
+                pft_loss_mask = pft_presence_mask if 'pft_presence_mask' in self.test_data else None
 
                 # print(f"[DEBUG] variables_1d_pft shape before model (val): {variables_1d_pft.shape}")
                 # if variables_1d_pft.dim() == 2 and variables_1d_pft.shape[1] == 224:
@@ -964,16 +968,26 @@ class ModelTrainer:
                                 var_pred = other_pred[:, i:i+1, :].reshape(other_pred.size(0), -1)
                                 var_targ = other_targ[:, i:i+1, :].reshape(other_targ.size(0), -1)
                                 use_tail = (var_name in tail_vars) or (f'Y_{var_name}' in tail_vars)
-                                var_loss = self._compute_tail_aware_loss(var_pred, var_targ) if use_tail else self._compute_loss(var_pred, var_targ)
+                                # Use masked loss when PFT presence mask is available (match training)
+                                if pft_loss_mask is not None:
+                                    var_loss = self._compute_masked_tail_aware_loss(var_pred, var_targ, pft_loss_mask) if use_tail else self._masked_pft_mse(var_pred, var_targ, pft_loss_mask)
+                                else:
+                                    var_loss = self._compute_tail_aware_loss(var_pred, var_targ) if use_tail else self._compute_loss(var_pred, var_targ)
                                 pft1d_loss += var_weight * tail_weight * var_loss
                         loss += self.vector_loss_weight * pft1d_loss / max(1, other_pred.size(1))
                     else:
-                        loss += self.vector_loss_weight * self._compute_loss(
-                            other_pred.view(other_pred.size(0), -1),
-                            other_targ.view(other_targ.size(0), -1)
-                        )
+                        # Apply masked MSE when PFT presence mask is available (match training)
+                        if pft_loss_mask is not None:
+                            mask_expanded = pft_loss_mask.unsqueeze(1).expand(-1, other_pred.size(1), -1)
+                            se = (other_pred - other_targ).pow(2)
+                            loss += self.vector_loss_weight * (se * mask_expanded).sum() / mask_expanded.sum().clamp(min=1.0)
+                        else:
+                            loss += self.vector_loss_weight * self._compute_loss(
+                                other_pred.view(other_pred.size(0), -1),
+                                other_targ.view(other_targ.size(0), -1)
+                            )
 
-                    # Weighted MSE for xsmrpool (same as training)
+                    # Weighted MSE for xsmrpool (same as training: use mask when available)
                     x_pred_flat = x_pred.view(x_pred.size(0), -1)
                     x_targ_flat = x_targ.view(x_targ.size(0), -1)
                     with torch.no_grad():
@@ -982,7 +996,10 @@ class ModelTrainer:
                     extra = max(1.0, xsmrpool_weight) - 1.0
                     weights = base_w + extra * nz_mask
                     se = (x_pred_flat - x_targ_flat) ** 2
-                    weighted_mse = (se * weights).mean()
+                    if pft_loss_mask is not None:
+                        weighted_mse = (se * weights * pft_loss_mask).sum() / (pft_loss_mask.sum().clamp(min=1.0))
+                    else:
+                        weighted_mse = (se * weights).mean()
                     loss += self.vector_loss_weight * weighted_mse
                 except Exception:
                     # Fallback: original aggregate loss

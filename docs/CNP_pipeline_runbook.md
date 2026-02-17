@@ -127,7 +127,7 @@ cd cnp_results/run_YYYYMMDD_HHMMSS  # e.g., cnp_results/run_20250815_205419
 Generates quick statistics and a prediction quality report. The report now also creates filtered plots for the “top variables by bad-count”.
 
 ```bash
-python ../../scripts/cnp_result_validationplot.py --stats-only
+python ../../scripts/cnp_result_validationplot.py --stats-only && \
 python ../../scripts/generate_prediction_quality_report.py
 ```
 
