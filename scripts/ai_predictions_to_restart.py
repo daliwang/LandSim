@@ -25,6 +25,7 @@ import netCDF4 as nc
 import sys
 import json
 import re
+import math
 
 # Project imports
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -55,6 +56,72 @@ def _build_gridcell_groups(one_d_to_grid, n_grid):
         if 0 <= g < n_grid:
             groups[g].append(idx)
     return groups
+
+
+def _parse_lat_range(lat_range_text: str) -> tuple[float, float]:
+    """Parse latitude range string in 'min,max' format."""
+    parts = [p.strip() for p in str(lat_range_text).split(",")]
+    if len(parts) != 2:
+        raise ValueError(f"Invalid latitude range '{lat_range_text}'. Expected format: min,max")
+    lat_min, lat_max = float(parts[0]), float(parts[1])
+    if lat_min > lat_max:
+        lat_min, lat_max = lat_max, lat_min
+    return lat_min, lat_max
+
+
+def _wrap_lon(lon: float) -> float:
+    """Wrap longitude to [-180, 180) for stable coordinate matching."""
+    return ((float(lon) + 180.0) % 360.0) - 180.0
+
+
+def _coord_key(lon: float, lat: float, decimals: int) -> tuple[float, float]:
+    return (round(_wrap_lon(lon), decimals), round(float(lat), decimals))
+
+
+def build_update_grid_mask(
+    variable_mapping: Dict[str, Any],
+    merge_scope: str,
+    tropical_lat_range: tuple[float, float],
+    coord_tol: float
+) -> np.ndarray:
+    """Build per-gridcell update mask for restart overwrite."""
+    n_grid = int(variable_mapping["n_grid"])
+    mask_all = np.ones(n_grid, dtype=bool)
+    if merge_scope == "all":
+        print("Merge scope: all model gridcells (backward-compatible behavior)")
+        return mask_all
+
+    model_lon = np.asarray(variable_mapping["model_lon"], dtype=float)
+    model_lat = np.asarray(variable_mapping["model_lat"], dtype=float)
+    ai_lon = np.asarray(variable_mapping["ai_lon"], dtype=float)
+    ai_lat = np.asarray(variable_mapping["ai_lat"], dtype=float)
+
+    lat_min, lat_max = tropical_lat_range
+    in_tropical = np.isfinite(model_lat) & (model_lat >= lat_min) & (model_lat <= lat_max)
+
+    tol = float(coord_tol)
+    if not np.isfinite(tol) or tol <= 0:
+        tol = 1e-6
+    decimals = max(0, int(math.ceil(-math.log10(tol))))
+
+    ai_coord_keys = set()
+    for lon, lat in zip(ai_lon, ai_lat):
+        if np.isfinite(lon) and np.isfinite(lat):
+            ai_coord_keys.add(_coord_key(lon, lat, decimals))
+
+    has_ai_match = np.zeros(n_grid, dtype=bool)
+    for g in range(n_grid):
+        if not (np.isfinite(model_lon[g]) and np.isfinite(model_lat[g])):
+            continue
+        has_ai_match[g] = _coord_key(model_lon[g], model_lat[g], decimals) in ai_coord_keys
+
+    update_mask = in_tropical & has_ai_match
+    print(f"Merge scope: tropical-only (lat in [{lat_min}, {lat_max}])")
+    print(f"Coordinate tolerance for matching: {tol} (rounded decimals: {decimals})")
+    print(f"  Tropical model gridcells: {int(in_tropical.sum())}/{n_grid}")
+    print(f"  Model gridcells matched in AI coords: {int(has_ai_match.sum())}/{n_grid}")
+    print(f"  Gridcells eligible for overwrite: {int(update_mask.sum())}/{n_grid}")
+    return update_mask
 
 
 def load_datasets(ai_predictions_path: Path, restart_file_path: Path) -> tuple[xr.Dataset, xr.Dataset]:
@@ -112,7 +179,11 @@ def create_spatial_mapping(ds_ai: xr.Dataset, ds_model: xr.Dataset) -> tuple[np.
     variable_mapping = {
         'grid_to_cols': grid_to_cols,
         'grid_to_pfts': grid_to_pfts,
-        'n_grid': n_grid
+        'n_grid': n_grid,
+        'ai_lon': ai_lon,
+        'ai_lat': ai_lat,
+        'model_lon': model_lon,
+        'model_lat': model_lat
     }
     
     return model_to_ai_mapping, variable_mapping
@@ -145,7 +216,8 @@ def auto_detect_variable_list(ai_predictions_path: Path) -> list:
 def create_updated_restart_file(restart_file_path: Path, output_path: Path, 
                                ai_predictions_path: Path, cnp_io_variables: List[str],
                                model_to_ai_mapping: np.ndarray, variable_mapping: Dict[str, Any],
-                               strict_dims: bool = False) -> None:
+                               strict_dims: bool = False,
+                               update_grid_mask: Optional[np.ndarray] = None) -> None:
     print(f"Saving updated restart file to: {output_path}")
     
     # Create output directory if it doesn't exist
@@ -237,6 +309,8 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                         
                         # For each model gridcell, update PFT data
                         for g in range(variable_mapping['n_grid']):
+                            if update_grid_mask is not None and not bool(update_grid_mask[g]):
+                                continue
                             if g < len(grid_to_pfts) and len(grid_to_pfts[g]) > 0:
                                 # Get PFTs in this gridcell
                                 gridcell_pfts = grid_to_pfts[g]
@@ -273,6 +347,8 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                         
                         # For each model gridcell, update column data
                         for g in range(variable_mapping['n_grid']):
+                            if update_grid_mask is not None and not bool(update_grid_mask[g]):
+                                continue
                             if g < len(grid_to_cols) and len(grid_to_cols[g]) > 0:
                                 # Get columns in this gridcell
                                 gridcell_cols = grid_to_cols[g]
@@ -370,6 +446,12 @@ Examples:
                        help='Create backup of original restart file before updating')
     parser.add_argument('--strict-dims', action='store_true',
                        help='Abort on any dimension mismatch instead of skipping')
+    parser.add_argument('--merge-scope', choices=['all', 'tropical-only'], default='all',
+                       help='Overwrite scope: all model gridcells (default) or tropical-only')
+    parser.add_argument('--tropical-lat-range', type=str, default='-23.5,23.5',
+                       help='Latitude range used when --merge-scope tropical-only, format "min,max"')
+    parser.add_argument('--coord-tol', type=float, default=1e-4,
+                       help='Coordinate match tolerance for tropical-only merge')
     
     args = parser.parse_args()
     
@@ -399,6 +481,7 @@ Examples:
     print(f"Output: {output_path}")
     print(f"Preview only: {args.preview_only}")
     print(f"Create backup: {args.backup}")
+    print(f"Merge scope: {args.merge_scope}")
     print("=" * 60)
     
     # Load datasets
@@ -406,6 +489,19 @@ Examples:
     
     # Create spatial mapping
     ai_to_model_mapping, variable_mapping = create_spatial_mapping(ds_ai, ds_model)
+    
+    tropical_lat_range = (-23.5, 23.5)
+    if args.merge_scope == 'tropical-only':
+        try:
+            tropical_lat_range = _parse_lat_range(args.tropical_lat_range)
+        except Exception as e:
+            parser.error(f"Invalid --tropical-lat-range: {e}")
+    update_grid_mask = build_update_grid_mask(
+        variable_mapping=variable_mapping,
+        merge_scope=args.merge_scope,
+        tropical_lat_range=tropical_lat_range,
+        coord_tol=args.coord_tol
+    )
     
     # Parse CNP_IO list if provided, else auto-detect
     cnp_io_variables = []
@@ -477,6 +573,7 @@ Examples:
     print(f"  AI gridcells: {ds_ai.sizes.get('gridcell', 'N/A')}")
     print(f"  Model gridcells: {ds_model.sizes.get('gridcell', 'N/A')}")
     print(f"  Spatial mapping: {len(ai_to_model_mapping)} AI -> {len(set(ai_to_model_mapping))} Model")
+    print(f"  Effective overwrite gridcells: {int(np.count_nonzero(update_grid_mask))}")
     
     if not args.preview_only:
         # Create backup if requested
@@ -489,7 +586,7 @@ Examples:
         # Save updated restart file using direct NetCDF manipulation
         create_updated_restart_file(restart_file_path, output_path, ai_predictions_path, 
                                    cnp_io_variables, ai_to_model_mapping, variable_mapping,
-                                   strict_dims=args.strict_dims)
+                                   strict_dims=args.strict_dims, update_grid_mask=update_grid_mask)
         
         print(f"\nRestart file updated successfully!")
         print(f"Original: {restart_file_path}")
@@ -504,6 +601,7 @@ Examples:
         print(f"  Other columns: Preserved (not modified)")
         print(f"  Spatial mapping: Used geographic coordinates to map AI gridcells to model gridcells")
         print(f"  Coordinate system: Model coordinates used as master reference for alignment")
+        print(f"  Overwrite scope: {args.merge_scope} (eligible gridcells: {int(np.count_nonzero(update_grid_mask))})")
         print(f"  Important: Only CNP_IO variables were modified - all other variables and attributes unchanged")
         
         print(f"\nYou can now use the updated restart file for model simulations!")

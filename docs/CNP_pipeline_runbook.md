@@ -142,6 +142,31 @@ python ../../scripts/ai_predictions_to_restart.py > ai_predictions_to_restart.lo
 Outputs a new restart file derived from
 `original_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc`.
 
+#### 8.1) Tropical-only merge into a global restart file
+If your inference was generated with `--tropical-only`, you can overwrite only tropical gridcells in a global restart file while keeping non-tropical regions unchanged.
+
+Recommended: run preview first (no file write):
+```bash
+python ../../scripts/ai_predictions_to_restart.py \
+  --restart-file /path/to/global_restart.nc \
+  --output ./updated_restart_tropical_merge.nc \
+  --merge-scope tropical-only \
+  --preview-only
+```
+
+Then run without preview to write output:
+```bash
+python ../../scripts/ai_predictions_to_restart.py \
+  --restart-file /path/to/global_restart.nc \
+  --output ./updated_restart_tropical_merge.nc \
+  --merge-scope tropical-only
+```
+
+Notes:
+- Default tropical range is `-23.5,23.5` (`--tropical-lat-range` to override).
+- Coordinate matching tolerance defaults to `1e-4` (`--coord-tol` to override).
+- Confirm log line `Overwrite scope: tropical-only (eligible gridcells: ...)` before production runs.
+
 ### 9) Compare restart files
 Compares selected layers and PFTs; optionally verify with `restart_variable_plot.py`.
 
