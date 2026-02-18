@@ -475,6 +475,7 @@ def parse_cnp_io_list(filename):
         'trendy1_file_pattern': None,
         'trendy05_file_pattern': None,
         'tva4km_file_pattern': None,
+        'max_files': None,
         'ai_predictions_default': None,
         'model_default': None,
         'comparison_output_dir': None,
@@ -534,8 +535,9 @@ def parse_cnp_io_list(filename):
                 #       TRENDY05_PATH = /path/to/trendy05
                 #       FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
                 #       DATA_PATHS: /p1,/p2
+                #       MAX_FILES: 3
                 if line and not line.startswith('#'):
-                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths|ai_predictions_default|model_default|comparison_output_dir|csv_predictions_default|ai_restart_default|fallback_data_dir|fallback_reference_file|fallback_reference_filename)\s*[:=]\s*(.+)$', line)
+                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths|max_files|ai_predictions_default|model_default|comparison_output_dir|csv_predictions_default|ai_restart_default|fallback_data_dir|fallback_reference_file|fallback_reference_filename)\s*[:=]\s*(.+)$', line)
                     if kv_match:
                         key = kv_match.group(1).lower()
                         val = kv_match.group(2).strip()
@@ -545,6 +547,11 @@ def parse_cnp_io_list(filename):
                             result['data_paths'].extend(paths)
                         elif key == 'file_pattern':
                             result['file_pattern'] = val
+                        elif key == 'max_files':
+                            try:
+                                result['max_files'] = int(val)
+                            except ValueError:
+                                logging.warning(f"Invalid MAX_FILES value '{val}', expected integer. Ignoring.")
                         elif key == 'trendy1_path':
                             result['trendy1_path'] = val
                         elif key == 'trendy05_path':
@@ -722,6 +729,10 @@ def get_cnp_combined_config(
                 dataset_file_patterns[p] = parsed['tva4km_file_pattern']
         if parsed.get('file_pattern'):
             file_pattern = parsed['file_pattern']
+        # Apply max_files from CNP_IO if specified (CLI max_files parameter takes precedence)
+        if parsed.get('max_files') is not None and max_files is None:
+            max_files = parsed['max_files']
+            logging.info(f"Using MAX_FILES from CNP_IO file: {max_files}")
     # Fallback to defaults if none provided via CNP_IO
     if not data_paths:
         if use_trendy1:

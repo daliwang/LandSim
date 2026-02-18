@@ -17,6 +17,24 @@ Create a single JSON file (`training_config_unified.json`) with the following st
 
 ```json
 {
+  "training_hyperparameters": {
+    "num_epochs": 100,
+    "batch_size": 128,
+    "learning_rate": 0.0001,
+    "optimizer_type": "adam",
+    "weight_decay": 0.0,
+    "use_scheduler": false,
+    "scheduler_type": "step",
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.1,
+    "xsmrpool_loss_weight": 10.0,
+    "litter_c_loss_weight": 1.0,
+    "litter_n_loss_weight": 1.0,
+    "litter_p_loss_weight": 1.0,
+    "scalar_loss_weight": 1.0,
+    "vector_loss_weight": 1.0,
+    "matrix_loss_weight": 1.0
+  },
   "variable_weights": {
     "pft1d_weights": {
       "cpool": 2.0,
@@ -34,11 +52,23 @@ Create a single JSON file (`training_config_unified.json`) with the following st
       "NPP": 1.5
     }
   },
+  "tail_aware_config": {
+    "loss": "log1p_mse",
+    "epsilon": 1e-8
+  },
   "tail_aware_weights": {
     "cpool": 5.0,
     "deadstemc": 5.0,
     "litr2p_vr": 5.0,
     "litr2n": 5.0
+  },
+  "pft_mask_config": {
+    "mask_absent_pfts": true,
+    "pft_presence_threshold": 0.0
+  },
+  "pft_zero_sparsity_config": {
+    "weight": 1.0,
+    "threshold": 1e-8
   },
   "pft_zero_sparsity_weights": {
     "cpool": 1.0,
@@ -95,29 +125,79 @@ python train_cnp_model.py \
 
 ## Configuration Sections
 
+### `training_hyperparameters`
+Core training hyperparameters and loss weights:
+- **Basic training**: `num_epochs`, `batch_size`, `learning_rate`
+- **Optimizer**: `optimizer_type` (`"adam"`, `"sgd"`, `"adamw"`), `weight_decay`
+- **Scheduler**: `use_scheduler` (boolean), `scheduler_type` (`"step"`, `"cosine"`, `"plateau"`), `scheduler_step_size`, `scheduler_gamma`
+- **Loss weights**: `scalar_loss_weight`, `vector_loss_weight`, `matrix_loss_weight`, `xsmrpool_loss_weight`, `litter_c_loss_weight`, `litter_n_loss_weight`, `litter_p_loss_weight`
+
+**Note**: CLI arguments take precedence over JSON values for `num_epochs`, `batch_size`, `learning_rate`, and loss weights (allows easy overrides).
+
+### `reproducibility_config`
+Settings for reproducibility and data handling:
+- `random_seed`: Random seed for training and data splitting (default: `42`)
+- `strict_determinism`: Enable strict deterministic mode (default: `false`)
+- `train_split`: Train/validation split ratio (default: `0.8`)
+- `normalization`: Normalization method - `"group"`, `"individual"`, or `"hybrid"` (default: `"individual"`)
+- `dropout_p`: Global dropout probability override (default: `null` to use model default)
+
+**Note**: CLI arguments (`--split-seed`, `--strict-determinism`, `--train-split`, `--normalization`, `--dropout-p`) take precedence over JSON values.
+
+### `data_filtering_config`
+Settings for data filtering:
+- `tropical_only`: Filter dataset to tropical latitudes (default: `false`)
+- `tropical_lat_range`: Latitude range as `[min, max]` or `"min,max"` string (default: `[-23.5, 23.5]`)
+
+**Note**: CLI arguments (`--tropical-only`, `--tropical-lat-range`) take precedence over JSON values.
+
 ### `variable_weights`
 Contains three subsections:
 - `pft1d_weights`: Weights for 1D PFT variables
 - `soil2d_weights`: Weights for 2D soil variables  
 - `scalar_weights`: Weights for scalar output variables
 
+### `tail_aware_config`
+Configuration for tail-aware loss:
+- `loss`: Loss type (`"log1p_mse"`, `"log1p_huber"`, `"log1p_quantile"`, or `"mse"`)
+- `epsilon`: Small epsilon value for numerical stability (default: `1e-8`)
+- `huber_delta`: Delta parameter for Huber loss (optional, default: `1.0`)
+
 ### `tail_aware_weights`
 Per-variable multipliers for tail-aware loss. Applied to variables listed in `tail_aware_vars`.
 
+### `pft_mask_config`
+Configuration for PFT presence masking:
+- `mask_absent_pfts`: Boolean to enable/disable masking absent PFTs using PCT_NAT_PFT_1..16 (default: `false`)
+- `pft_presence_threshold`: Minimum PFT percent for training-only mask (default: `0.0` meaning `pct > 0`; e.g. `2.0` means `pct >= 2%`). Inference always uses `pct > 0`.
+
+**Note**: When `mask_absent_pfts` is enabled, predictions are zeroed where PFTs are absent, and loss is only computed for present PFTs. The `pft_presence_threshold` allows stricter masking during training (e.g., ignore PFTs with <2% coverage) while inference uses the standard `pct > 0` threshold.
+
+### `pft_zero_sparsity_config`
+Configuration for PFT zero sparsity regularization:
+- `weight`: Global weight multiplier for sparsity penalty (default: `0.0`, set `>0` to enable)
+- `threshold`: Threshold in normalized target space for zero mask (default: `1e-8`)
+
 ### `pft_zero_sparsity_weights`
-Per-variable weights for PFT zero sparsity penalty. Applied when `pft_zero_sparsity_weight > 0`.
+Per-variable weights for PFT zero sparsity penalty. Applied when `pft_zero_sparsity_config.weight > 0`.
 
 ### `pft1d_activation_overrides`
 Per-variable activation function overrides. Valid values: `"abs"`, `"relu"`, `"softplus"`, `"linear"`.
 
 ## Precedence Rules
 
-When both unified config and individual files are specified:
+When both unified config and CLI arguments are specified:
 
-1. **Tail-aware weights**: Individual `--tail-aware-weights-json` overrides unified config
-2. **Sparsity weights**: Individual `--pft-zero-sparsity-weights-json` overrides unified config
-3. **Activation overrides**: Individual `--pft1d-activation-overrides-json` overrides unified config
-4. **Variable weights**: Individual `--variable-weights-json` overrides unified config
+1. **Training hyperparameters**: CLI args (`--epochs`, `--batch-size`, `--learning-rate`, `--xsmrpool-loss-weight`, `--litter-*-loss-weight`) override unified config
+2. **Reproducibility config**: CLI args (`--split-seed`, `--strict-determinism`, `--train-split`, `--normalization`, `--dropout-p`) override unified config
+3. **Data filtering config**: CLI args (`--tropical-only`, `--tropical-lat-range`) override unified config
+4. **PFT mask config**: CLI args (`--mask-absent-pfts` / `--no-mask-absent-pfts`, `--pft-presence-threshold`) override unified config
+5. **Tail-aware config**: CLI args (`--tail-aware-loss`, `--tail-aware-eps`) override unified config
+6. **Tail-aware weights**: Individual `--tail-aware-weights-json` overrides unified config
+7. **Sparsity config**: CLI args (`--pft-zero-sparsity-weight`, `--pft-zero-threshold`) override unified config
+8. **Sparsity weights**: Individual `--pft-zero-sparsity-weights-json` overrides unified config
+9. **Activation overrides**: Individual `--pft1d-activation-overrides-json` overrides unified config
+10. **Variable weights**: Individual `--variable-weights-json` overrides unified config
 
 This allows you to:
 - Use unified config as a base/default configuration
@@ -128,6 +208,27 @@ This allows you to:
 
 ```json
 {
+  "training_hyperparameters": {
+    "num_epochs": 100,
+    "batch_size": 128,
+    "learning_rate": 0.0001,
+    "optimizer_type": "adamw",
+    "weight_decay": 0.01,
+    "use_scheduler": true,
+    "scheduler_type": "cosine",
+    "xsmrpool_loss_weight": 10.0
+  },
+  "reproducibility_config": {
+    "random_seed": 42,
+    "strict_determinism": false,
+    "train_split": 0.8,
+    "normalization": "individual",
+    "dropout_p": null
+  },
+  "data_filtering_config": {
+    "tropical_only": true,
+    "tropical_lat_range": [-23.5, 23.5]
+  },
   "variable_weights": {
     "pft1d_weights": {
       "xsmrpool": 5.0,
@@ -153,6 +254,10 @@ This allows you to:
       "HR": 1.2
     }
   },
+  "tail_aware_config": {
+    "loss": "log1p_mse",
+    "epsilon": 1e-8
+  },
   "tail_aware_weights": {
     "cpool": 5.0,
     "deadstemc": 5.0,
@@ -170,6 +275,14 @@ This allows you to:
     "litr3c_vr": 5.0,
     "Litr3p_vr": 5.0,
     "Litr3n_vr": 5.0
+  },
+  "pft_mask_config": {
+    "mask_absent_pfts": true,
+    "pft_presence_threshold": 0.0
+  },
+  "pft_zero_sparsity_config": {
+    "weight": 1.0,
+    "threshold": 1e-8
   },
   "pft_zero_sparsity_weights": {
     "cpool": 1.0,

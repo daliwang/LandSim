@@ -597,6 +597,21 @@ def main():
                             config.update_training_config(**update_kwargs)
                             logger.info("Applied tail_aware_weights from unified config")
                     
+                    # Extract pft_zero_sparsity_config section (weight and threshold)
+                    if 'pft_zero_sparsity_config' in unified_config:
+                        sparsity_config = unified_config['pft_zero_sparsity_config']
+                        if isinstance(sparsity_config, dict):
+                            update_kwargs = {}
+                            # Set weight if not already set via command line
+                            if 'weight' in sparsity_config and args.pft_zero_sparsity_weight is None:
+                                update_kwargs['pft_zero_sparsity_weight'] = float(sparsity_config['weight'])
+                            # Set threshold if not already set via command line
+                            if 'threshold' in sparsity_config and args.pft_zero_threshold is None:
+                                update_kwargs['pft_zero_threshold'] = float(sparsity_config['threshold'])
+                            if update_kwargs:
+                                config.update_training_config(**update_kwargs)
+                                logger.info(f"Applied pft_zero_sparsity_config from unified config: {update_kwargs}")
+                    
                     # Extract pft_zero_sparsity_weights section (only if not already set)
                     if 'pft_zero_sparsity_weights' in unified_config and args.pft_zero_sparsity_weights_json is None:
                         sparsity_weights = unified_config['pft_zero_sparsity_weights']
@@ -610,6 +625,146 @@ def main():
                         if isinstance(activation_overrides, dict):
                             config.update_model_config(pft1d_activation_overrides=activation_overrides)
                             logger.info("Applied pft1d_activation_overrides from unified config")
+                    
+                    # Extract training_hyperparameters section (epochs, batch_size, learning_rate, optimizer, scheduler, loss weights)
+                    if 'training_hyperparameters' in unified_config:
+                        hyperparams = unified_config['training_hyperparameters']
+                        if isinstance(hyperparams, dict):
+                            update_kwargs = {}
+                            # Basic training params (CLI takes precedence)
+                            if 'num_epochs' in hyperparams and args.epochs is None:
+                                update_kwargs['num_epochs'] = int(hyperparams['num_epochs'])
+                            if 'batch_size' in hyperparams and args.batch_size is None:
+                                update_kwargs['batch_size'] = int(hyperparams['batch_size'])
+                            if 'learning_rate' in hyperparams and args.learning_rate is None:
+                                update_kwargs['learning_rate'] = float(hyperparams['learning_rate'])
+                            
+                            # Optimizer settings
+                            if 'optimizer_type' in hyperparams:
+                                update_kwargs['optimizer_type'] = str(hyperparams['optimizer_type']).lower()
+                            if 'weight_decay' in hyperparams:
+                                update_kwargs['weight_decay'] = float(hyperparams['weight_decay'])
+                            
+                            # Scheduler settings
+                            if 'use_scheduler' in hyperparams:
+                                update_kwargs['use_scheduler'] = bool(hyperparams['use_scheduler'])
+                            if 'scheduler_type' in hyperparams:
+                                update_kwargs['scheduler_type'] = str(hyperparams['scheduler_type']).lower()
+                            if 'scheduler_step_size' in hyperparams:
+                                update_kwargs['scheduler_step_size'] = int(hyperparams['scheduler_step_size'])
+                            if 'scheduler_gamma' in hyperparams:
+                                update_kwargs['scheduler_gamma'] = float(hyperparams['scheduler_gamma'])
+                            
+                            # Loss weights (CLI takes precedence)
+                            if 'scalar_loss_weight' in hyperparams and args.scalar_loss_weight is None:
+                                update_kwargs['scalar_loss_weight'] = float(hyperparams['scalar_loss_weight'])
+                            if 'vector_loss_weight' in hyperparams and args.vector_loss_weight is None:
+                                update_kwargs['vector_loss_weight'] = float(hyperparams['vector_loss_weight'])
+                            if 'matrix_loss_weight' in hyperparams and args.matrix_loss_weight is None:
+                                update_kwargs['matrix_loss_weight'] = float(hyperparams['matrix_loss_weight'])
+                            if 'xsmrpool_loss_weight' in hyperparams and args.xsmrpool_loss_weight is None:
+                                update_kwargs['xsmrpool_loss_weight'] = float(hyperparams['xsmrpool_loss_weight'])
+                            if 'litter_c_loss_weight' in hyperparams and args.litter_c_loss_weight is None:
+                                update_kwargs['litter_c_loss_weight'] = float(hyperparams['litter_c_loss_weight'])
+                            if 'litter_n_loss_weight' in hyperparams and args.litter_n_loss_weight is None:
+                                update_kwargs['litter_n_loss_weight'] = float(hyperparams['litter_n_loss_weight'])
+                            if 'litter_p_loss_weight' in hyperparams and args.litter_p_loss_weight is None:
+                                update_kwargs['litter_p_loss_weight'] = float(hyperparams['litter_p_loss_weight'])
+                            
+                            if update_kwargs:
+                                config.update_training_config(**update_kwargs)
+                                logger.info(f"Applied training_hyperparameters from unified config: {update_kwargs}")
+                    
+                    # Extract reproducibility_config section (random_seed, deterministic, train_split, normalization, dropout_p)
+                    if 'reproducibility_config' in unified_config:
+                        repro_config = unified_config['reproducibility_config']
+                        if isinstance(repro_config, dict):
+                            update_training_kwargs = {}
+                            update_data_kwargs = {}
+                            update_model_kwargs = {}
+                            
+                            # Random seed (CLI takes precedence)
+                            if 'random_seed' in repro_config and args.split_seed is None and not args.random_shuffle:
+                                seed_val = int(repro_config['random_seed'])
+                                update_training_kwargs['random_seed'] = seed_val
+                                update_data_kwargs['random_state'] = seed_val
+                            
+                            # Deterministic mode (CLI takes precedence)
+                            if 'strict_determinism' in repro_config and not args.strict_determinism:
+                                update_training_kwargs['deterministic'] = bool(repro_config['strict_determinism'])
+                            
+                            # Train split (CLI takes precedence)
+                            if 'train_split' in repro_config and args.train_split is None:
+                                update_data_kwargs['train_split'] = float(repro_config['train_split'])
+                            
+                            # Normalization - store for later application (CLI takes precedence)
+                            # Note: normalization is applied via args.normalization later, so we store it
+                            # and will check if args.normalization is default before applying
+                            if 'normalization' in repro_config:
+                                norm_val = str(repro_config['normalization']).lower()
+                                if norm_val in ['group', 'individual', 'hybrid']:
+                                    # Store in a way that can override args.normalization if it's still default
+                                    # We'll apply this after checking if normalization was explicitly set via CLI
+                                    repro_config['_normalization_from_config'] = norm_val
+                            
+                            # Dropout (CLI takes precedence)
+                            if 'dropout_p' in repro_config and args.dropout_p is None:
+                                update_model_kwargs['dropout_p'] = float(repro_config['dropout_p'])
+                            
+                            if update_training_kwargs:
+                                config.update_training_config(**update_training_kwargs)
+                            if update_data_kwargs:
+                                config.update_data_config(**update_data_kwargs)
+                            if update_model_kwargs:
+                                config.update_model_config(**update_model_kwargs)
+                            
+                            if update_training_kwargs or update_data_kwargs or update_model_kwargs:
+                                logger.info(f"Applied reproducibility_config from unified config: training={update_training_kwargs}, data={update_data_kwargs}, model={update_model_kwargs}")
+                            
+                            # Store normalization for later application (if CLI didn't explicitly set it)
+                            if 'normalization' in repro_config and args.normalization == 'individual':  # Default value
+                                norm_val = str(repro_config['normalization']).lower()
+                                if norm_val in ['group', 'individual', 'hybrid']:
+                                    # Store on args for later use
+                                    args._normalization_from_config = norm_val
+                    
+                    # Extract data_filtering_config section (tropical_only, tropical_lat_range)
+                    if 'data_filtering_config' in unified_config:
+                        filter_config = unified_config['data_filtering_config']
+                        if isinstance(filter_config, dict):
+                            update_kwargs = {}
+                            
+                            # Tropical filtering (CLI takes precedence)
+                            if 'tropical_only' in filter_config and not args.tropical_only:
+                                update_kwargs['tropical_only'] = bool(filter_config['tropical_only'])
+                            if 'tropical_lat_range' in filter_config and args.tropical_lat_range is None:
+                                lat_range = filter_config['tropical_lat_range']
+                                if isinstance(lat_range, list) and len(lat_range) == 2:
+                                    update_kwargs['tropical_lat_range'] = (float(lat_range[0]), float(lat_range[1]))
+                                elif isinstance(lat_range, str):
+                                    # Parse "min,max" format
+                                    parts = [p.strip() for p in lat_range.split(',')]
+                                    if len(parts) == 2:
+                                        update_kwargs['tropical_lat_range'] = (float(parts[0]), float(parts[1]))
+                            
+                            if update_kwargs:
+                                config.update_data_config(**update_kwargs)
+                                logger.info(f"Applied data_filtering_config from unified config: {update_kwargs}")
+                    
+                    # Extract pft_mask_config section (mask_absent_pfts and pft_presence_threshold)
+                    if 'pft_mask_config' in unified_config:
+                        mask_config = unified_config['pft_mask_config']
+                        if isinstance(mask_config, dict):
+                            update_kwargs = {}
+                            # Set mask_absent_pfts if not already set via command line
+                            if 'mask_absent_pfts' in mask_config and not hasattr(args, 'mask_absent_pfts') or args.mask_absent_pfts is None:
+                                update_kwargs['mask_absent_pfts'] = bool(mask_config['mask_absent_pfts'])
+                            # Set pft_presence_threshold if not already set via command line
+                            if 'pft_presence_threshold' in mask_config and getattr(args, 'pft_presence_threshold', None) is None:
+                                update_kwargs['pft_presence_threshold'] = float(mask_config['pft_presence_threshold'])
+                            if update_kwargs:
+                                config.update_training_config(**update_kwargs)
+                                logger.info(f"Applied pft_mask_config from unified config: {update_kwargs}")
             except Exception as e:
                 logger.warning(f"Failed to load unified training config: {e}")
         
@@ -618,18 +773,73 @@ def main():
             try:
                 config.update_training_config(variable_weights_json=args.variable_weights_json)
                 logger.info(f"Variable weights JSON file specified: {args.variable_weights_json}")
+                # So that loss scale is consistent: if this JSON contains tail_aware_weights but we did
+                # not load them via --training-config-json, apply them here (avoids ~18x loss difference).
+                if args.training_config_json is None or args.training_config_json != args.variable_weights_json:
+                    try:
+                        with open(args.variable_weights_json, 'r') as f:
+                            vw_data = json.load(f)
+                        if isinstance(vw_data, dict):
+                            if 'tail_aware_weights' in vw_data and isinstance(vw_data['tail_aware_weights'], dict):
+                                tw = vw_data['tail_aware_weights']
+                                update_kwargs = {
+                                    'tail_aware_vars': list(tw.keys()),
+                                    'tail_aware_weights': tw,
+                                }
+                                if 'tail_aware_config' in vw_data and isinstance(vw_data['tail_aware_config'], dict):
+                                    tc = vw_data['tail_aware_config']
+                                    if 'loss' in tc:
+                                        update_kwargs['tail_aware_loss'] = str(tc['loss']).lower()
+                                    if 'epsilon' in tc:
+                                        update_kwargs['tail_aware_epsilon'] = float(tc['epsilon'])
+                                # CNP ratio constraints from same JSON (e.g. use_cnp_ratio_constraints, cnp_ratio_constraint_weight)
+                                for key in ('use_cnp_ratio_constraints', 'cnp_ratio_constraint_weight', 'cnp_ratio_tolerance'):
+                                    if key in vw_data and hasattr(config.training_config, key):
+                                        if key == 'use_cnp_ratio_constraints':
+                                            update_kwargs[key] = bool(vw_data[key])
+                                        elif key == 'cnp_ratio_constraint_weight':
+                                            update_kwargs[key] = float(vw_data[key])
+                                        elif key == 'cnp_ratio_tolerance':
+                                            update_kwargs[key] = float(vw_data[key])
+                                config.update_training_config(**update_kwargs)
+                                logger.info("Applied tail_aware_vars, tail_aware_weights, and CNP ratio settings from variable_weights JSON (consistent loss scale)")
+                            
+                            # Also apply pft_zero_sparsity_config and weights if present
+                            if 'pft_zero_sparsity_config' in vw_data and isinstance(vw_data['pft_zero_sparsity_config'], dict):
+                                sparsity_config = vw_data['pft_zero_sparsity_config']
+                                sparsity_update = {}
+                                if 'weight' in sparsity_config:
+                                    sparsity_update['pft_zero_sparsity_weight'] = float(sparsity_config['weight'])
+                                if 'threshold' in sparsity_config:
+                                    sparsity_update['pft_zero_threshold'] = float(sparsity_config['threshold'])
+                                if sparsity_update:
+                                    config.update_training_config(**sparsity_update)
+                                    logger.info(f"Applied pft_zero_sparsity_config from variable_weights JSON: {sparsity_update}")
+                            
+                            if 'pft_zero_sparsity_weights' in vw_data and isinstance(vw_data['pft_zero_sparsity_weights'], dict):
+                                config.update_training_config(pft_zero_sparsity_weights=vw_data['pft_zero_sparsity_weights'])
+                                logger.info("Applied pft_zero_sparsity_weights from variable_weights JSON")
+                    except Exception as e2:
+                        logger.debug(f"Could not apply tail_aware from variable_weights JSON: {e2}")
             except Exception as e:
                 logger.warning(f"Failed to set variable weights JSON path: {e}")
         
-        # Set train/validation split
-        train_split = args.train_split if args.train_split is not None else 0.8
+        # Set train/validation split (CLI takes precedence, but may have been set from config)
+        train_split = args.train_split if args.train_split is not None else config.data_config.train_split
         config.update_data_config(train_split=train_split)
         if args.train_split is not None:
             logger.info(f"Train/validation split ratio: {train_split} (from --train-split)")
+        else:
+            logger.info(f"Train/validation split ratio: {train_split}")
         # Prefer GPU when available, otherwise CPU
         device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
         config.update_training_config(device=device_str)
-        config.update_data_config(max_files=args.max_files)
+        # Apply max_files from CLI if provided (takes precedence over CNP_IO file)
+        if args.max_files is not None:
+            config.update_data_config(max_files=args.max_files)
+            logger.info(f"Using MAX_FILES from CLI: {args.max_files}")
+        elif config.data_config.max_files is not None:
+            logger.info(f"Using MAX_FILES from CNP_IO file: {config.data_config.max_files}")
         # Turn off GPU monitoring and debug logging
         config.update_training_config(log_gpu_memory=False, log_gpu_utilization=False)
         # Override training parameters if specified
@@ -643,13 +853,22 @@ def main():
             predictions_dir=str(output_dir / "cnp_predictions"),
             use_early_stopping=False
         )
+        # Apply PFT mask settings (CLI takes precedence over config)
         if args.mask_absent_pfts:
             try:
                 config.update_training_config(mask_absent_pfts=True)
                 logger.info("Masking absent PFTs enabled (using PCT_NAT_PFT_1..16)")
             except Exception as e:
                 logger.warning(f"Failed to enable mask_absent_pfts: {e}")
-        if getattr(args, 'pft_presence_threshold', 0.0) != 0.0:
+        elif hasattr(args, 'mask_absent_pfts') and args.mask_absent_pfts is False:
+            # Explicitly disable if --no-mask-absent-pfts was used
+            try:
+                config.update_training_config(mask_absent_pfts=False)
+                logger.info("Masking absent PFTs disabled")
+            except Exception as e:
+                logger.warning(f"Failed to disable mask_absent_pfts: {e}")
+        # pft_presence_threshold: CLI takes precedence
+        if getattr(args, 'pft_presence_threshold', None) is not None:
             try:
                 config.update_training_config(pft_presence_threshold=float(args.pft_presence_threshold))
                 logger.info("PFT presence threshold for training mask: pct >= %s (inference still uses pct > 0)", args.pft_presence_threshold)
@@ -821,10 +1040,16 @@ def main():
             logger.warning("Preprocessed data is None, skipping check.")
         # Normalize data
         logger.info("Normalizing data...")
-        if args.normalization == 'group':
+        # Apply normalization from config if it was set and CLI didn't override
+        normalization_method = args.normalization
+        if hasattr(args, '_normalization_from_config') and args._normalization_from_config:
+            # Config provided normalization and CLI didn't explicitly override (default is 'individual')
+            normalization_method = args._normalization_from_config
+            logger.info(f"Using normalization from config: {normalization_method}")
+        if normalization_method == 'group':
             normalized_data = data_loader.normalize_data()
             logger.info("Applied group normalization (same as original system)")
-        elif args.normalization == 'individual':
+        elif normalization_method == 'individual':
             normalized_data = data_loader.normalize_data_individual()
             logger.info("Applied individual normalization to all variables")
             # Log after individual normalization for soil2D

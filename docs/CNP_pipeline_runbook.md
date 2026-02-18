@@ -93,6 +93,20 @@ python train_cnp_model.py --variable-list CNP_IO_demo.txt \
 - See `config/UNIFIED_CONFIG_README.md` for detailed unified config usage
 - See `config/VARIABLE_WEIGHTS_README.md` for variable weights details
 
+**Repeat experiment_2 (run_20260212_162802_experiment_2):**  
+To reproduce the same setup as the reference experiment_2 run:
+
+```bash
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config-json config/training_config_experiment_2.json \
+  --pft-zero-sparsity-weight 1.0 \
+  --epoch 100 \
+  --tropical-only
+```
+
+Data paths and file pattern come from your CNP_IO file. The run used `1_training_data_batch_*.pkl` under the paths listed in the variable list. Mask absent PFTs and other options were applied from the unified config.
+
 ### 2a) Fine-tune a pretrained model (optional)
 If you already have a trained checkpoint and want to continue training on a TVA-style dataset, use the fine-tuning helper. Populate the necessary paths in your CNP_IO file (e.g. `CNP_IO_updated9_dev_gao.txt`):
 

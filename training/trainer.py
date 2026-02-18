@@ -1263,6 +1263,22 @@ class ModelTrainer:
             print(f"   • Patience: {self.config.patience} epochs")
         print(f"   • Validation frequency: Every {self.config.validation_frequency} epoch(s)")
         
+        # Loss configuration (for reproducibility and debugging)
+        tail_vars = getattr(self.config, 'tail_aware_vars', []) or []
+        tail_loss = getattr(self.config, 'tail_aware_loss', 'log1p_mse')
+        n_tail = len(tail_vars)
+        pft1d_loss_mode = f"tail-aware ({tail_loss}) for {n_tail} vars" if n_tail > 0 else "plain MSE (tail_aware_vars empty)"
+        cnp_ratio = getattr(self.config, 'use_cnp_ratio_constraints', False)
+        vw_json = getattr(self.config, 'variable_weights_json', None) or "(none)"
+        print(f"📐 Loss configuration (reproducibility):")
+        print(f"   • variable_weights_json: {vw_json}")
+        print(f"   • PFT1D loss: {pft1d_loss_mode}")
+        print(f"   • tail_aware_loss type: {tail_loss}")
+        print(f"   • use_cnp_ratio_constraints: {cnp_ratio}")
+        if cnp_ratio:
+            print(f"   • cnp_ratio_constraint_weight: {getattr(self.config, 'cnp_ratio_constraint_weight', 1.0)}")
+        logger.info(f"Loss config: variable_weights_json={vw_json}, PFT1D_loss={pft1d_loss_mode}, tail_aware_loss={tail_loss}, use_cnp_ratio_constraints={cnp_ratio}")
+        
         print(f"{'='*60}")
         
         for epoch in range(self.config.num_epochs):
