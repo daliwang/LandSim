@@ -333,7 +333,8 @@ class ModelTrainer:
                 self.train_data['y_scalar'],
                 self.train_data['y_soil_2d'],
                 self.train_data['water'],
-                self.train_data['y_water']
+                self.train_data['y_water'],
+                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
             )
         else:
             train_dataset = TensorDataset(
@@ -345,7 +346,9 @@ class ModelTrainer:
                 self.train_data['variables_2d_soil'],
                 self.train_data['y_scalar'],
                 self.train_data['y_pft_1d'],
-                self.train_data['y_soil_2d']
+                self.train_data['y_soil_2d'],
+                # Optional mask as final feature; if absent, a placeholder will be injected in-loop
+                *( (self.train_data['pft_presence_mask'],) if 'pft_presence_mask' in self.train_data else () )
             )
         
         train_loader = DataLoader(
@@ -365,9 +368,15 @@ class ModelTrainer:
 
         for batch_idx, batch in enumerate(progress_bar):
             if 'water' in self.train_data and 'y_water' in self.train_data:
-                (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
+                if 'pft_presence_mask' in self.train_data:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water, pft_presence_mask) = batch
+                else:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
             else:
-                (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
+                if 'pft_presence_mask' in self.train_data:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
+                else:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
             # --- DEBUG: Print tensor shapes and device before model call ---
             # print(f"[DEBUG] Batch {batch_idx} tensor shapes and device:")
             # print(f"  time_series: {time_series.shape}, device: {time_series.device}")
@@ -395,6 +404,9 @@ class ModelTrainer:
             if 'water' in self.train_data and 'y_water' in self.train_data:
                 water = water.to(self.device, non_blocking=True).contiguous()
                 y_water = y_water.to(self.device, non_blocking=True).contiguous()
+            # Presence mask to device if provided
+            if 'pft_presence_mask' in self.train_data:
+                pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True).contiguous()
 
             # print(f"[DEBUG] variables_1d_pft shape before model: {variables_1d_pft.shape}")
             # if variables_1d_pft.dim() == 2 and variables_1d_pft.shape[1] == 224:
@@ -415,6 +427,22 @@ class ModelTrainer:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, water)
                 else:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+
+            # Optionally apply PFT presence mask to predictions before loss
+            if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.train_data:
+                try:
+                    vec = outputs['pft_1d']
+                    varnames = list(self.model.data_info.get('variables_1d_pft', [])) if hasattr(self.model, 'data_info') else None
+                    n_vars = len(varnames) if varnames is not None and len(varnames) > 0 else self.train_data['y_pft_1d'].size(1)
+                    n_pfts = 16
+                    if vec.dim() == 2 and vec.size(1) == n_vars * n_pfts:
+                        vec = vec.view(vec.size(0), n_vars, n_pfts)
+                    if pft_presence_mask.dim() == 2 and pft_presence_mask.size(1) == n_pfts:
+                        mask = pft_presence_mask.view(pft_presence_mask.size(0), 1, n_pfts)
+                        vec = vec * mask
+                        outputs['pft_1d'] = vec.view(vec.size(0), -1)
+                except Exception:
+                    pass
 
             # Compute loss with variable-specific weights for scalar variables
             if self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
@@ -680,7 +708,8 @@ class ModelTrainer:
                 self.test_data['y_pft_1d'],
                 self.test_data['y_soil_2d'],
                 self.test_data['water'],
-                self.test_data['y_water']
+                self.test_data['y_water'],
+                *( (self.test_data['pft_presence_mask'],) if 'pft_presence_mask' in self.test_data else () )
             )
         else:
             val_dataset = TensorDataset(
@@ -692,7 +721,8 @@ class ModelTrainer:
                 self.test_data['variables_2d_soil'],
                 self.test_data['y_scalar'],
                 self.test_data['y_pft_1d'],
-                self.test_data['y_soil_2d']
+                self.test_data['y_soil_2d'],
+                *( (self.test_data['pft_presence_mask'],) if 'pft_presence_mask' in self.test_data else () )
         )
         
         val_loader = DataLoader(
@@ -712,9 +742,15 @@ class ModelTrainer:
                 return loss.item() if hasattr(loss, 'item') else loss
             for batch_idx, batch in enumerate(progress_bar):
                 if 'water' in self.test_data and 'y_water' in self.test_data:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
+                    if 'pft_presence_mask' in self.test_data:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water, pft_presence_mask) = batch
+                    else:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, water, y_water) = batch
                 else:
-                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
+                    if 'pft_presence_mask' in self.test_data:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
+                    else:
+                        (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
                 # Move data to device and ensure contiguous
                 time_series = time_series.to(self.device, non_blocking=True).contiguous()
                 static = static.to(self.device, non_blocking=True).contiguous()
@@ -728,6 +764,8 @@ class ModelTrainer:
                 if 'water' in self.test_data and 'y_water' in self.test_data:
                     water = water.to(self.device, non_blocking=True).contiguous()
                     y_water = y_water.to(self.device, non_blocking=True).contiguous()
+                if 'pft_presence_mask' in self.test_data:
+                    pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True).contiguous()
 
                 # print(f"[DEBUG] variables_1d_pft shape before model (val): {variables_1d_pft.shape}")
                 # if variables_1d_pft.dim() == 2 and variables_1d_pft.shape[1] == 224:
@@ -746,6 +784,22 @@ class ModelTrainer:
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, water)
                     else:
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+
+                # Apply mask in validation as well for consistency
+                if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.test_data:
+                    try:
+                        vec = outputs['pft_1d']
+                        varnames = list(self.model.data_info.get('variables_1d_pft', [])) if hasattr(self.model, 'data_info') else None
+                        n_vars = len(varnames) if varnames is not None and len(varnames) > 0 else y_pft_1d.size(1)
+                        n_pfts = 16
+                        if vec.dim() == 2 and vec.size(1) == n_vars * n_pfts:
+                            vec = vec.view(vec.size(0), n_vars, n_pfts)
+                        if pft_presence_mask.dim() == 2 and pft_presence_mask.size(1) == n_pfts:
+                            mask = pft_presence_mask.view(pft_presence_mask.size(0), 1, n_pfts)
+                            vec = vec * mask
+                            outputs['pft_1d'] = vec.view(vec.size(0), -1)
+                    except Exception:
+                        pass
 
                 # Compute loss
                 loss = self._compute_loss(outputs['scalar'], y_scalar)
@@ -1048,18 +1102,32 @@ class ModelTrainer:
             }
             return empty_predictions, default_metrics
         
-        # Create evaluation data loader
-        eval_dataset = TensorDataset(
-            self.test_data['time_series'],
-            self.test_data['static'],
-            self.test_data['pft_param'],
-            self.test_data['scalar'],
-            self.test_data['variables_1d_pft'],
-            self.test_data['variables_2d_soil'],
-            self.test_data['y_scalar'],
-            self.test_data['y_pft_1d'],
-            self.test_data['y_soil_2d']
-        )
+        # Create evaluation data loader (optionally include presence mask)
+        if 'pft_presence_mask' in self.test_data:
+            eval_dataset = TensorDataset(
+                self.test_data['time_series'],
+                self.test_data['static'],
+                self.test_data['pft_param'],
+                self.test_data['scalar'],
+                self.test_data['variables_1d_pft'],
+                self.test_data['variables_2d_soil'],
+                self.test_data['y_scalar'],
+                self.test_data['y_pft_1d'],
+                self.test_data['y_soil_2d'],
+                self.test_data['pft_presence_mask']
+            )
+        else:
+            eval_dataset = TensorDataset(
+                self.test_data['time_series'],
+                self.test_data['static'],
+                self.test_data['pft_param'],
+                self.test_data['scalar'],
+                self.test_data['variables_1d_pft'],
+                self.test_data['variables_2d_soil'],
+                self.test_data['y_scalar'],
+                self.test_data['y_pft_1d'],
+                self.test_data['y_soil_2d']
+            )
         eval_loader = DataLoader(
             eval_dataset,
             batch_size=self.config.batch_size,
@@ -1079,7 +1147,11 @@ class ModelTrainer:
             'y_soil_2d': []
         }
         with torch.no_grad():
-            for time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d in eval_loader:
+            for batch in eval_loader:
+                if 'pft_presence_mask' in self.test_data:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d, pft_presence_mask) = batch
+                else:
+                    (time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil, y_scalar, y_pft_1d, y_soil_2d) = batch
                 # Move to device
                 time_series = time_series.to(self.device, non_blocking=True)
                 static = static.to(self.device, non_blocking=True)
@@ -1090,12 +1162,30 @@ class ModelTrainer:
                 y_scalar = y_scalar.to(self.device, non_blocking=True)
                 y_pft_1d = y_pft_1d.to(self.device, non_blocking=True)
                 y_soil_2d = y_soil_2d.to(self.device, non_blocking=True)
+                if 'pft_presence_mask' in self.test_data:
+                    pft_presence_mask = pft_presence_mask.to(self.device, non_blocking=True)
                 # Forward pass
                 if self.use_amp and self.scaler is not None:
                     with torch.amp.autocast('cuda'):
                         outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
                 else:
                     outputs = self.model(time_series, static, pft_param, scalar, variables_1d_pft, variables_2d_soil)
+                # Apply presence mask to predictions if enabled
+                if getattr(self.config, 'mask_absent_pfts', False) and 'pft_1d' in outputs and 'pft_presence_mask' in self.test_data:
+                    try:
+                        vec = outputs['pft_1d']
+                        # Determine n_vars and reshape
+                        varnames = list(self.model.data_info.get('variables_1d_pft', [])) if hasattr(self.model, 'data_info') else None
+                        n_vars = len(varnames) if varnames is not None and len(varnames) > 0 else y_pft_1d.size(1)
+                        n_pfts = 16
+                        if vec.dim() == 2 and vec.size(1) == n_vars * n_pfts:
+                            vec = vec.view(vec.size(0), n_vars, n_pfts)
+                        if pft_presence_mask.dim() == 2 and pft_presence_mask.size(1) == n_pfts:
+                            mask = pft_presence_mask.view(pft_presence_mask.size(0), 1, n_pfts)
+                            vec = vec * mask
+                            outputs['pft_1d'] = vec.view(vec.size(0), -1)
+                    except Exception:
+                        pass
                 all_predictions['scalar'].append(outputs['scalar'].cpu())
                 all_predictions['pft_1d'].append(outputs['pft_1d'].cpu())
                 all_predictions['soil_2d'].append(outputs['soil_2d'].cpu())

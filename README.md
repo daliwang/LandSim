@@ -76,7 +76,7 @@ Notes:
 
 ## 🔗 CNP pipeline workflow (from runbook)
 
-Follow this streamlined workflow using a user-defined `CNP_IO` list (see `docs/CNP_pipeline_runbook.md` for details):
+Follow this streamlined workflow using a user-defined `CNP_IO` list. For the fully detailed, continuously updated instructions, see `docs/CNP_pipeline_runbook.md`.
 
 1) Create your `CNP_IO` list (e.g., `CNP_IO_demo1.txt`).
 
@@ -92,8 +92,10 @@ cd cnp_results/run_YYYYMMDD_HHMMSS
 
 4) Validate predictions vs ground truth (test split):
 ```bash
-python ../../scripts/cnp_result_validationplot.py > cnp_results_validation.log 2>&1 &
+python ../../scripts/cnp_result_validationplot.py --stats-only
+python ../../scripts/generate_prediction_quality_report.py
 ```
+(details and options in `docs/CNP_pipeline_runbook.md`)
 (extra note: use check_pft1d_predictions.py and check_soil2d_predictions.py to find prediction abnormality)
 ```bash
 python ../../scripts/check_pft1d_predictions.py > check_pft1d_predictions.log 2>&1 &
@@ -154,6 +156,16 @@ python scripts/compare_cnp_runs.py \
     - Soil 2D: first N layers per variable (default 10)
     - PFT 1D: PFT1..PFTN per variable (default 16)
     - Scalar: plotted only if `--plot-scalar` (on by default)
+
+---
+
+## 📘 Pipeline runbook reference
+
+See `docs/CNP_pipeline_runbook.md` for:
+- End-to-end run instructions
+- Prediction quality report details (bad predictions CSV, HTML/PNG outputs)
+- Top-bad-only plotting and how `analysis/top_bad_plots/` is generated
+- CLI flags to customize plots and reports
 
 ---
 

@@ -132,7 +132,8 @@ def main():
         help='Output directory for results'
     )
     parser.add_argument(
-        '--epochs',
+        '--epochs', '--epoch',
+        dest='epochs',
         type=int,
         default=150,
         help='Number of training epochs'
@@ -162,6 +163,19 @@ def main():
         help='Override global dropout probability in the model (e.g., 0.0 to disable)'
     )
 
+    # Shuffling controls
+    parser.add_argument(
+        '--random-shuffle',
+        action='store_true',
+        help='Enable random shuffling for dataset rows and DataLoader (default: fixed seed shuffling)'
+    )
+    parser.add_argument(
+        '--shuffle-seed',
+        type=int,
+        default=None,
+        help='Optional seed to use when --random-shuffle is enabled (default: no fixed seed)'
+    )
+
     parser.add_argument(
         '--use-trendy1',
         action='store_true',
@@ -171,6 +185,11 @@ def main():
         '--use-trendy05',
         action='store_true',
         help='Include Trend_05_data_CNP dataset'
+    )
+    parser.add_argument(
+        '--use-tva4km',
+        action='store_true',
+        help='Include TVA4km dataset'
     )
     parser.add_argument(
         '--variable-list',
@@ -183,6 +202,35 @@ def main():
         type=str,
         default=None,
         help='Path to model config text file (e.g., CNP_model_config.txt) to override encoders/transformer/MLPs'
+    )
+    parser.add_argument(
+        '--data-paths',
+        type=str,
+        default=None,
+        help='Comma-separated list of directories containing training .pkl batches (overrides variable list)'
+    )
+    parser.add_argument(
+        '--file-pattern',
+        type=str,
+        default=None,
+        help='Glob pattern for training files (e.g., enhanced_1_training_data_batch_*.pkl)'
+    )
+    parser.add_argument(
+        '--tropical-only',
+        action='store_true',
+        help='Filter dataset to tropical latitude band before train/test split'
+    )
+    parser.add_argument(
+        '--tropical-lat-range',
+        type=str,
+        default=None,
+        help='Latitude range for tropical filter, format "min,max" (default: -23.5,23.5)'
+    )
+    parser.add_argument(
+        '--tropical-lat-column',
+        type=str,
+        default=None,
+        help='Latitude column name override (default: auto-detect from static columns)'
     )
     parser.add_argument(
         '--max-files',
@@ -203,6 +251,11 @@ def main():
         help='Extra loss weight applied to xsmrpool (non-positive pool)'
     )
     parser.add_argument(
+        '--config-only',
+        action='store_true',
+        help='Exit after building configuration; do not load data or train (for CI)'
+    )
+    parser.add_argument(
         '--litter-c-loss-weight',
         type=float,
         default=None,
@@ -220,6 +273,19 @@ def main():
         default=None,
         help='Extra loss weight multiplier for litter phosphorus vars (litr1/2/3p_vr)'
     )
+    parser.add_argument(
+        '--mask-absent-pfts',
+        dest='mask_absent_pfts',
+        action='store_true',
+        help='Zero predictions where PCT_NAT_PFT_k == 0 and exclude from loss'
+    )
+    parser.add_argument(
+        '--no-mask-absent-pfts',
+        dest='mask_absent_pfts',
+        action='store_false',
+        help='Disable masking of absent PFTs'
+    )
+    parser.set_defaults(mask_absent_pfts=True)
     
     args = parser.parse_args()
     
@@ -241,7 +307,7 @@ def main():
     elif args.normalization == 'hybrid':
         logger.info("Using hybrid normalization (selective individual/group)")
     
-    if not args.use_trendy1 and not args.use_trendy05:
+    if not args.use_trendy1 and not args.use_trendy05 and not getattr(args, 'use_tva4km', False):
         args.use_trendy1 = True
         args.use_trendy05 = False
 
@@ -256,21 +322,59 @@ def main():
         config = get_cnp_combined_config(
             use_trendy1=args.use_trendy1,
             use_trendy05=args.use_trendy05,
+            use_tva4km=args.use_tva4km,
             max_files=args.max_files,
             include_water=include_water,
             variable_list_path=args.variable_list,
             model_config_path=args.model_config
         )
+        # Optional overrides via CLI/env to avoid fixed variable list files
+        env_data_paths = os.environ.get('DATA_PATHS') or os.environ.get('CNP_DATA_PATHS')
+        env_file_pattern = os.environ.get('FILE_PATTERN') or os.environ.get('CNP_FILE_PATTERN')
+        final_data_paths = args.data_paths if args.data_paths else env_data_paths
+        final_file_pattern = args.file_pattern if args.file_pattern else env_file_pattern
+        if final_data_paths or final_file_pattern:
+            update_kwargs = {}
+            if final_data_paths:
+                # Support comma-separated paths
+                update_kwargs['data_paths'] = [p.strip() for p in str(final_data_paths).split(',') if p.strip()]
+            if final_file_pattern:
+                update_kwargs['file_pattern'] = str(final_file_pattern).strip()
+            try:
+                config.update_data_config(**update_kwargs)
+                logger.info(f"Applied data overrides: {update_kwargs}")
+            except Exception as e:
+                logger.warning(f"Failed to apply data overrides: {e}")
+        # Optional tropical-only filtering
+        if args.tropical_only:
+            tropical_kwargs = {'tropical_only': True}
+            if args.tropical_lat_range:
+                try:
+                    parts = [p.strip() for p in str(args.tropical_lat_range).split(',')]
+                    if len(parts) == 2:
+                        tropical_kwargs['tropical_lat_range'] = (float(parts[0]), float(parts[1]))
+                    else:
+                        logger.warning("Invalid --tropical-lat-range; expected format 'min,max'. Using default.")
+                except Exception:
+                    logger.warning("Failed to parse --tropical-lat-range; using default.")
+            if args.tropical_lat_column:
+                tropical_kwargs['tropical_lat_column'] = str(args.tropical_lat_column).strip()
+            try:
+                config.update_data_config(**tropical_kwargs)
+                logger.info(f"Enabled tropical filtering: {tropical_kwargs}")
+            except Exception as e:
+                logger.warning(f"Failed to apply tropical filtering config: {e}")
         if args.variable_list is not None:
             logger.info(f"Using CNP configuration from variable list file: {args.variable_list}")
         else:
             logger.info(f"Using default CNP variable configuration{' with water' if include_water else ' without water'}")
         if args.model_config is not None:
             logger.info(f"Applied model architecture overrides from: {args.model_config}")
-        # Set train/validation split to 50/50
+        # Set train/validation split
         config.update_data_config(train_split=0.8)
-        # Ensure GPU and all files
-        config.update_training_config(device='cuda')
+        # Prefer GPU when available, otherwise CPU
+        device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
+        config.update_training_config(device=device_str)
         config.update_data_config(max_files=args.max_files)
         # Turn off GPU monitoring and debug logging
         config.update_training_config(log_gpu_memory=False, log_gpu_utilization=False)
@@ -285,6 +389,12 @@ def main():
             predictions_dir=str(output_dir / "cnp_predictions"),
             use_early_stopping=False
         )
+        if args.mask_absent_pfts:
+            try:
+                config.update_training_config(mask_absent_pfts=True)
+                logger.info("Masking absent PFTs enabled (using PCT_NAT_PFT_1..16)")
+            except Exception as e:
+                logger.warning(f"Failed to enable mask_absent_pfts: {e}")
         # apply xsmrpool loss weight from CLI if provided
         if args.xsmrpool_loss_weight is not None:
             try:
@@ -306,6 +416,41 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to set litter loss weights: {e}")
         logger.info(f"Effective learning rate for this run: {effective_lr}")
+
+        # Shuffling policy: fixed vs random
+        if args.random_shuffle:
+            # Use provided shuffle seed or system randomness
+            if args.shuffle_seed is not None:
+                config.update_data_config(random_state=int(args.shuffle_seed))
+                config.update_training_config(random_seed=int(args.shuffle_seed))
+                logger.info(f"Random shuffling enabled with shuffle_seed={args.shuffle_seed}")
+            else:
+                # Remove fixed seeds to allow non-deterministic shuffling
+                # Keep a log message for provenance
+                logger.info("Random shuffling enabled with no fixed seed (non-deterministic shuffles)")
+                # Use a time-based seed for DataLoader generator consistency per run
+                import time
+                dyn_seed = int(time.time()) % (2**31 - 1)
+                config.update_data_config(random_state=dyn_seed)
+                config.update_training_config(random_seed=dyn_seed)
+        else:
+            # Keep fixed seeds for fair comparisons
+            logger.info("Fixed shuffling (seeded) enabled for fair comparison")
+
+        # If only validating configuration, exit early before heavy work (used in CI)
+        if args.config_only:
+            # Validate 2D output alignment invariant
+            assert config.data_config.y_list_columns_2d == ['Y_' + v for v in config.data_config.x_list_columns_2d], \
+                f"2D columns not aligned!\nX: {config.data_config.x_list_columns_2d}\nY: {config.data_config.y_list_columns_2d}"
+            # Log a brief summary and exit
+            logger.info("Configuration-only mode: built training/model/data configs successfully.")
+            logger.info(f"Data paths: {config.data_config.data_paths}")
+            logger.info(f"File pattern: {config.data_config.file_pattern}")
+            logger.info(f"Epochs: {config.training_config.num_epochs}, Batch size: {config.training_config.batch_size}")
+            return {
+                'status': 'ok',
+                'config_only': True
+            }
 
         # Optional strict determinism (opt-in via CLI)
         if args.strict_determinism:
@@ -351,6 +496,19 @@ def main():
         )
         # Check raw data for non-zero values after loading
         raw_data = data_loader.load_data()
+        
+        # Print all variables after loading
+        if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
+            logger.info("=" * 80)
+            logger.info("训练数据集变量列表 (Training Dataset Variables):")
+            logger.info("=" * 80)
+            logger.info(f"总变量数: {len(data_loader.df.columns)}")
+            logger.info(f"数据集形状: {data_loader.df.shape}")
+            logger.info("\n所有变量列表 (All Variables):")
+            for i, col in enumerate(sorted(data_loader.df.columns), 1):
+                logger.info(f"  {i:4d}. {col}")
+            logger.info("=" * 80)
+        
         logger.info("Checking raw data for soil2D variables...")
         for key, value in raw_data.items():
             if 'soil' in key.lower() and '2d' in key.lower():
@@ -536,12 +694,64 @@ def main():
         
         # Save model configuration
         with open(output_dir / "cnp_config.json", "w") as f:
+            # Derive per-group counts for quick comparison with CNP_IO.txt
+            di = data_info if isinstance(data_info, dict) else {}
+            time_series_cols = di.get('time_series_columns', []) or []
+            static_cols = di.get('static_columns', []) or []
+            pft_param_cols = di.get('pft_param_columns', []) or []
+            scalar_in_cols = di.get('x_list_scalar_columns', []) or []
+            scalar_out_cols = di.get('y_list_scalar_columns', []) or []
+            pft1d_in_vars = di.get('variables_1d_pft', []) or []
+            pft1d_out_vars = di.get('y_list_columns_1d', []) or []
+            soil2d_in_vars = di.get('x_list_columns_2d', []) or []
+            soil2d_out_vars = di.get('y_list_columns_2d', []) or []
+
+            group_counts = {
+                'time_series_variables': len(time_series_cols),
+                'static_columns': len(static_cols),
+                'pft_param_columns': len(pft_param_cols),
+                'scalar_variables_in': len(scalar_in_cols),
+                'scalar_variables_out': len(scalar_out_cols),
+                'pft_1d_variables_in': len(pft1d_in_vars),
+                'pft_1d_variables_out': len(pft1d_out_vars),
+                'soil_2d_variables_in': len(soil2d_in_vars),
+                'soil_2d_variables_out': len(soil2d_out_vars),
+                'total_predicted_variables': len(scalar_out_cols) + len(pft1d_out_vars) + len(soil2d_out_vars)
+            }
+
+            # Expanded prediction element counts (PFTs and Soil layers)
+            # PFTs per variable use model_config.vector_length (expected 16: PFT1..PFT16)
+            pfts_per_var = int(getattr(config.model_config, 'vector_length', 16) or 16)
+            soil_rows_per_var = int(getattr(config.model_config, 'matrix_rows', 1) or 1)
+            soil_layers_per_var = int(getattr(config.model_config, 'matrix_cols', 10) or 10)
+            prediction_element_counts = {
+                'pft_1d': {
+                    'variables_out': len(pft1d_out_vars),
+                    'pfts_per_variable': pfts_per_var,
+                    'total_elements': len(pft1d_out_vars) * pfts_per_var
+                },
+                'soil_2d': {
+                    'variables_out': len(soil2d_out_vars),
+                    'columns_per_variable': soil_rows_per_var,
+                    'layers_per_variable': soil_layers_per_var,
+                    'total_elements': len(soil2d_out_vars) * soil_rows_per_var * soil_layers_per_var
+                },
+                'scalar_1d': {
+                    'variables_out': len(scalar_out_cols)
+                }
+            }
+
             config_dict = {
                 'include_water': include_water,
                 'normalization_method': args.normalization,
                 'data_info': data_info,
+                'data_counts': group_counts,
+                'prediction_element_counts': prediction_element_counts,
                 'model_config': config.model_config.__dict__,
-                'training_config': config.training_config.__dict__
+                'training_config': config.training_config.__dict__,
+                # Model-config provenance for verification
+                'model_config_source': getattr(config, 'model_config_source', None),
+                'model_config_overrides_keys': getattr(config, 'model_config_overrides_keys', None)
             }
             json.dump(config_dict, f, indent=2)
         

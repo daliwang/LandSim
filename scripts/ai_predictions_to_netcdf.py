@@ -242,18 +242,31 @@ def load_ai_predictions(predictions_dir: Path) -> Dict[str, Any]:
     
     return preds
 
-def create_netcdf_structure(ai_preds: Dict[str, Any], variable_list: Dict[str, List[str]], 
+def _select_base_coords(ai_preds: Dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    """Select base coordinates from CSV-derived predictions."""
+    # Prefer scalar coords if available (should be full grid)
+    if 'scalar_coords' in ai_preds and ai_preds['scalar_coords'][0] is not None:
+        return ai_preds['scalar_coords']
+    # Fall back to any soil2d/pft1d coords
+    if 'soil2d_coords' in ai_preds and ai_preds['soil2d_coords']:
+        _, coords = next(iter(ai_preds['soil2d_coords'].items()))
+        if coords[0] is not None:
+            return coords
+    if 'pft1d_coords' in ai_preds and ai_preds['pft1d_coords']:
+        _, coords = next(iter(ai_preds['pft1d_coords'].items()))
+        if coords[0] is not None:
+            return coords
+    raise ValueError("No CSV coordinates found in predictions (Longitude/Latitude columns missing?)")
+
+
+def create_netcdf_structure(ai_preds: Dict[str, Any], variable_list: Dict[str, List[str]],
                            output_path: Path) -> xr.Dataset:
-    """Create NetCDF structure compatible with restart_variable_plot.py"""
+    """Create NetCDF structure compatible with restart_variable_plot.py."""
     print("Creating NetCDF structure...")
-    
-    # Get coordinates from static inverse mapping
-    if 'test_static_inverse' not in ai_preds:
-        raise ValueError("test_static_inverse.csv not found - needed for coordinates")
-    
-    static_df = ai_preds['test_static_inverse']
-    n_samples = len(static_df)
-    
+
+    lon, lat = _select_base_coords(ai_preds)
+    n_samples = len(lon)
+
     # Create coordinate variables
     coords = {
         'gridcell': np.arange(n_samples),
@@ -261,34 +274,34 @@ def create_netcdf_structure(ai_preds: Dict[str, Any], variable_list: Dict[str, L
         'column': np.arange(1),    # Only first column
         'levgrnd': np.arange(10),  # Only first 10 layers
     }
-    
+
     # Create the dataset
     ds = xr.Dataset(coords=coords)
-    
+
     # Add coordinate variables that restart_variable_plot.py expects
     # Grid coordinates: 1D arrays for gridcell dimension
-    ds['grid1d_lon'] = xr.DataArray(static_df['Longitude'].values, dims=['gridcell'])
-    ds['grid1d_lat'] = xr.DataArray(static_df['Latitude'].values, dims=['gridcell'])
-    
+    ds['grid1d_lon'] = xr.DataArray(lon, dims=['gridcell'])
+    ds['grid1d_lat'] = xr.DataArray(lat, dims=['gridcell'])
+
     # PFT coordinates: For PFT variables, we need to create proper mapping
     # Each PFT gets assigned to the first gridcell (index 1, 1-based)
-    pft_lon = np.full(16, static_df['Longitude'].iloc[0], dtype=float)
-    pft_lat = np.full(16, static_df['Latitude'].iloc[0], dtype=float)
+    pft_lon = np.full(16, float(lon[0]), dtype=float)
+    pft_lat = np.full(16, float(lat[0]), dtype=float)
     ds['pfts1d_lon'] = xr.DataArray(pft_lon, dims=['pft'])
     ds['pfts1d_lat'] = xr.DataArray(pft_lat, dims=['pft'])
-    
+
     # Column coordinates: For column variables, we need to create proper mapping
     # Each column gets assigned to the first gridcell (index 1, 1-based)
-    col_lon = np.full(1, static_df['Longitude'].iloc[0], dtype=float)
-    col_lat = np.full(1, static_df['Latitude'].iloc[0], dtype=float)
+    col_lon = np.full(1, float(lon[0]), dtype=float)
+    col_lat = np.full(1, float(lat[0]), dtype=float)
     ds['cols1d_lon'] = xr.DataArray(col_lon, dims=['column'])
     ds['cols1d_lat'] = xr.DataArray(col_lat, dims=['column'])
-    
+
     # Add gridcell indices (1-based as expected by restart_variable_plot.py)
     # All PFTs and columns are assigned to gridcell 1
     ds['pfts1d_gridcell_index'] = xr.DataArray(np.ones(16, dtype=int), dims=['pft'])
     ds['cols1d_gridcell_index'] = xr.DataArray(np.ones(1, dtype=int), dims=['column'])
-    
+
     print(f"  Created base structure with {n_samples} gridcells")
     print(f"  PFT coordinates: {pft_lon.shape} (all assigned to first gridcell)")
     print(f"  Column coordinates: {col_lon.shape} (all assigned to first gridcell)")
@@ -426,6 +439,12 @@ def _check_coords_match(coords1, coords2, label1, label2):
         raise ValueError(f"Coordinate mismatch between {label1} and {label2}")
 
 
+def _wrap_coords(lon: np.ndarray) -> np.ndarray:
+    """Wrap longitudes from 0-360 to -180-180."""
+    lon = np.asarray(lon, dtype=float)
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Convert AI predictions to NetCDF format compatible with restart_variable_plot.py'
@@ -494,32 +513,31 @@ Examples:
     # Load AI predictions
     ai_preds = load_ai_predictions(ai_predictions_dir)
 
-    # Report current lon/lat ranges from static inverse if available
-    if 'test_static_inverse' in ai_preds:
-        try:
-            _sdf = ai_preds['test_static_inverse']
-            if {'Longitude','Latitude'}.issubset(_sdf.columns):
-                lon_min, lon_max = float(pd.to_numeric(_sdf['Longitude'], errors='coerce').min()), float(pd.to_numeric(_sdf['Longitude'], errors='coerce').max())
-                lat_min, lat_max = float(pd.to_numeric(_sdf['Latitude'], errors='coerce').min()), float(pd.to_numeric(_sdf['Latitude'], errors='coerce').max())
-                print(f"  Before wrapping - grid1d_lon min/max: {lon_min}, {lon_max}")
-                print(f"  Before wrapping - grid1d_lat min/max: {lat_min}, {lat_max}")
-        except Exception as _e:
-            print(f"  Warning: Failed to compute pre-wrap lon/lat ranges: {_e}")
+    # Report current lon/lat ranges from CSV coordinates
+    try:
+        base_lon, base_lat = _select_base_coords(ai_preds)
+        print(f"  Before wrapping - grid1d_lon min/max: {float(np.min(base_lon))}, {float(np.max(base_lon))}")
+        print(f"  Before wrapping - grid1d_lat min/max: {float(np.min(base_lat))}, {float(np.max(base_lat))}")
+    except Exception as _e:
+        print(f"  Warning: Failed to compute pre-wrap lon/lat ranges: {_e}")
 
     # Optional longitude wrapping 0–360 -> -180–180
-    if getattr(args, 'wrap_longitude', False) and 'test_static_inverse' in ai_preds:
+    if getattr(args, 'wrap_longitude', False):
         try:
-            static_df = ai_preds['test_static_inverse']
-            if 'Longitude' in static_df.columns:
-                lon = pd.to_numeric(static_df['Longitude'], errors='coerce')
-                wrapped = ((lon + 180.0) % 360.0) - 180.0
-                static_df['Longitude'] = wrapped
-                ai_preds['test_static_inverse'] = static_df
-                lon_min, lon_max = float(wrapped.min()), float(wrapped.max())
-                print(f"  After wrapping - grid1d_lon min/max: {lon_min}, {lon_max}")
-                if 'Latitude' in static_df.columns:
-                    lat = pd.to_numeric(static_df['Latitude'], errors='coerce')
-                    print(f"  Latitude min/max: {float(lat.min())}, {float(lat.max())}")
+            if 'scalar_coords' in ai_preds and ai_preds['scalar_coords'][0] is not None:
+                lon, lat = ai_preds['scalar_coords']
+                ai_preds['scalar_coords'] = (_wrap_coords(lon), lat)
+            if 'pft1d_coords' in ai_preds:
+                for k, coords in ai_preds['pft1d_coords'].items():
+                    if coords[0] is not None:
+                        ai_preds['pft1d_coords'][k] = (_wrap_coords(coords[0]), coords[1])
+            if 'soil2d_coords' in ai_preds:
+                for k, coords in ai_preds['soil2d_coords'].items():
+                    if coords[0] is not None:
+                        ai_preds['soil2d_coords'][k] = (_wrap_coords(coords[0]), coords[1])
+            base_lon, base_lat = _select_base_coords(ai_preds)
+            print(f"  After wrapping - grid1d_lon min/max: {float(np.min(base_lon))}, {float(np.max(base_lon))}")
+            print(f"  Latitude min/max: {float(np.min(base_lat))}, {float(np.max(base_lat))}")
         except Exception as _e:
             print(f"  Warning: Failed to wrap longitudes: {_e}")
     

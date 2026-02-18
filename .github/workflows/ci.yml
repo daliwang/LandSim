@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git
+
+      - name: Set up venv
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt || true
+          # Ensure CPU-only PyTorch is available in CI
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio || true
+
+      - name: Quick smoke test (example dataset)
+        run: |
+          source .venv/bin/activate
+          python train_model.py
+
+      - name: Prepare dataset (download if missing)
+        env:
+          DATA_DIR: ${{ github.workspace }}/dataset/trendy1
+        run: |
+          chmod +x scripts/prepare_data.sh
+          bash scripts/prepare_data.sh "$DATA_DIR"
+
+      - name: CNP training smoke test (dataset, 1 file, 1 epoch)
+        env:
+          DATA_DIR: ${{ github.workspace }}/dataset/trendy1
+        run: |
+          source .venv/bin/activate
+          python train_cnp_model.py \
+            --epoch 1 \
+            --variable-list ./CNP_IO_updated9_dev.txt \
+            --mask-absent-pfts \
+            --model-config ./CNP_model_config_v01.txt \
+            --use-trendy1 \
+            --data-paths "$DATA_DIR" \
+            --file-pattern 'enhanced_1_training_data_batch_*.pkl' \
+            --max-files 1
+
+      - name: CNP training config validation (no data)
+        run: |
+          source .venv/bin/activate
+          python train_cnp_model.py --config-only --use-trendy1 --epoch 1 --batch-size 8

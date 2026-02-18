@@ -6,7 +6,7 @@ making it easy to modify training settings without changing the core code.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -27,6 +27,8 @@ class DataConfig:
     
     # File patterns
     file_pattern: str = "1_training_data_batch_*.pkl"
+    # Optional per-dataset file patterns keyed by absolute path
+    dataset_file_patterns: Dict[str, str] = field(default_factory=dict)
     
     # Columns to drop
     columns_to_drop: List[str] = field(default_factory=lambda: [
@@ -92,7 +94,12 @@ class DataConfig:
     
     # Data splitting
     train_split: float = 0.8
+    test_split: Optional[float] = None
     random_state: int = 42
+    # Tropical-only filtering (apply before train/test split)
+    tropical_only: bool = False
+    tropical_lat_range: Tuple[float, float] = (-23.5, 23.5)
+    tropical_lat_column: Optional[str] = None
     
     
     # File loading limits (for testing)
@@ -101,6 +108,9 @@ class DataConfig:
     # New parameter for filtering NaN in time series
     filter_time_series_nan: bool = False
     filter_column: Optional[str] = None # Added for CNP model
+    
+    # Longitude filtering - list of longitude values to drop from dataset
+    longitudes_to_drop: List[float] = field(default_factory=list)
 
 
 
@@ -109,7 +119,11 @@ class DataConfig:
 class ModelConfig:
     """Configuration for model architecture."""
     
-    # LSTM parameters
+    # Core dimensions (Dual Stream Architecture)
+    embed_dim: int = 256
+    patch_size: int = 60
+
+    # LSTM parameters (Legacy / Stream 1 variant)
     lstm_hidden_size: int = 64
     
     # Fully connected layers
@@ -230,6 +244,9 @@ class TrainingConfig:
     # PFT sparsity regularization (encourage zero predictions where targets are zero)
     pft_zero_sparsity_weight: float = 0.0  # default disabled; set >0 to enable
     pft_zero_threshold: float = 1e-8       # threshold in normalized target space for zero mask
+
+    # Mask predictions for absent PFTs using PCT_NAT_PFT (PFT0 ignored)
+    mask_absent_pfts: bool = False
 
     def get_device(self) -> torch.device:
         """Get the appropriate device for training."""
@@ -408,9 +425,11 @@ def parse_cnp_io_list(filename):
         filename (str): Path to the variable list file (e.g., CNP_IO_list_general.txt)
     Returns:
         dict: Mapping of variable group keys to lists of variable names.
+              Also includes 'longitudes_to_drop' key if specified in the file.
     """
     # Map section titles to config keys
     section_map = {
+        'LONGITUDE FILTERING': 'longitudes_to_drop',
         'TIME SERIES VARIABLES': 'time_series_variables',
         'SURFACE PROPERTIES': 'surface_properties',
         'PFT PARAMETERS': 'pft_parameters',
@@ -418,15 +437,44 @@ def parse_cnp_io_list(filename):
         'TEMPERATURE VARIABLES': 'temperature_variables',
         'SCALAR VARIABLES': 'scalar_variables',
         '1D PFT VARIABLES': 'pft_1d_variables',
-        '2D VARIABLES': 'variables_2d_soil'
+        '2D VARIABLES': 'variables_2d_soil',
+        'DATA PATHS': 'data_paths'
     }
     # Prepare result dict
     result = {v: [] for v in section_map.values()}
+    # Additional single-value keys for dataset configuration
+    result.update({
+        'trendy1_path': None,
+        'trendy05_path': None,
+        'tva4km_path': None,
+        'file_pattern': None,
+        'trendy1_file_pattern': None,
+        'trendy05_file_pattern': None,
+        'tva4km_file_pattern': None,
+        'ai_predictions_default': None,
+        'model_default': None,
+        'comparison_output_dir': None,
+        'csv_predictions_default': None,
+        'ai_restart_default': None,
+        'fallback_data_dir': None,
+        'fallback_reference_file': None,
+        'fallback_reference_filename': None
+    })
     current_section = None
 
     with open(filename) as f:
         for line in f:
             line = line.strip()
+            # Skip full-line comments and blanks (support //, #, ;)
+            if not line or line.startswith('#') or line.startswith('//') or line.startswith(';'):
+                continue
+            # Remove inline comments introduced by '#'; avoid '//' inline to not break paths
+            hash_idx = line.find('#')
+            if hash_idx != -1:
+                line = line[:hash_idx].strip()
+                if not line:
+                    continue
+            
             # Section header detection
             for section_title, key in section_map.items():
                 if line.startswith(section_title):
@@ -437,7 +485,17 @@ def parse_cnp_io_list(filename):
                 if current_section and line.startswith('•'):
                     # Remove bullet and split by comma, filter out empty strings
                     vars_ = [v.strip() for v in line[1:].split(',') if v.strip()]
-                    result[current_section].extend(vars_)
+                    
+                    # Special handling for longitude filtering - convert to floats
+                    if current_section == 'longitudes_to_drop':
+                        try:
+                            longitudes = [float(x) for x in vars_]
+                            result[current_section].extend(longitudes)
+                            logging.info(f"Parsed longitudes to drop: {longitudes}")
+                        except Exception as e:
+                            logging.warning(f"Failed to parse longitudes to drop: {e}")
+                    else:
+                        result[current_section].extend(vars_)
                 # Some variables are listed as comma-separated after a bullet
                 elif current_section and ',' in line and not line.startswith('['):
                     vars_ = [v.strip('• ').strip() for v in line.split(',') if v.strip('• ').strip()]
@@ -447,6 +505,50 @@ def parse_cnp_io_list(filename):
                     # Only add if it's not a description or exclusion
                     if re.match(r'^[A-Za-z0-9_]+$', line):
                         result[current_section].append(line)
+                # Outside of a section or in any section, allow key=value dataset config
+                # e.g., TRENDY1_PATH: /path/to/trendy1
+                #       TRENDY05_PATH = /path/to/trendy05
+                #       FILE_PATTERN: enhanced_1_training_data_batch_*.pkl
+                #       DATA_PATHS: /p1,/p2
+                if line and not line.startswith('#'):
+                    kv_match = re.match(r'(?i)^(trendy1_path|trendy05_path|tva4km_path|file_pattern|trendy1_file_pattern|trendy05_file_pattern|tva4km_file_pattern|data_paths|ai_predictions_default|model_default|comparison_output_dir|csv_predictions_default|ai_restart_default|fallback_data_dir|fallback_reference_file|fallback_reference_filename)\s*[:=]\s*(.+)$', line)
+                    if kv_match:
+                        key = kv_match.group(1).lower()
+                        val = kv_match.group(2).strip()
+                        if key == 'data_paths':
+                            # Support comma-separated list
+                            paths = [p.strip() for p in val.split(',') if p.strip()]
+                            result['data_paths'].extend(paths)
+                        elif key == 'file_pattern':
+                            result['file_pattern'] = val
+                        elif key == 'trendy1_path':
+                            result['trendy1_path'] = val
+                        elif key == 'trendy05_path':
+                            result['trendy05_path'] = val
+                        elif key == 'tva4km_path':
+                            result['tva4km_path'] = val
+                        elif key == 'trendy1_file_pattern':
+                            result['trendy1_file_pattern'] = val
+                        elif key == 'trendy05_file_pattern':
+                            result['trendy05_file_pattern'] = val
+                        elif key == 'tva4km_file_pattern':
+                            result['tva4km_file_pattern'] = val
+                        elif key == 'ai_predictions_default':
+                            result['ai_predictions_default'] = val
+                        elif key == 'model_default':
+                            result['model_default'] = val
+                        elif key == 'comparison_output_dir':
+                            result['comparison_output_dir'] = val
+                        elif key == 'csv_predictions_default':
+                            result['csv_predictions_default'] = val
+                        elif key == 'ai_restart_default':
+                            result['ai_restart_default'] = val
+                        elif key == 'fallback_data_dir':
+                            result['fallback_data_dir'] = val
+                        elif key == 'fallback_reference_file':
+                            result['fallback_reference_file'] = val
+                        elif key == 'fallback_reference_filename':
+                            result['fallback_reference_filename'] = val
     return result
 
 def parse_cnp_model_config(filename: str) -> Dict[str, Any]:
@@ -548,6 +650,7 @@ def parse_cnp_model_config(filename: str) -> Dict[str, Any]:
 def get_cnp_combined_config(
     use_trendy1: bool = True,
     use_trendy05: bool = True,
+    use_tva4km: bool = False,
     max_files: Optional[int] = None,
     include_water: bool = False,
     variable_list_path: Optional[str] = None,
@@ -565,18 +668,57 @@ def get_cnp_combined_config(
     """
     config = TrainingConfigManager()
     data_paths = []
-    file_patterns = []
-    if use_trendy1:
-        data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP")
-        file_patterns.append("enhanced_1_training_data_batch_*.pkl")
-    if use_trendy05:
-        data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
-        file_patterns.append("1_training_data_batch_*.pkl")
-    file_pattern = file_patterns[0] if len(file_patterns) == 1 else file_patterns
+    file_pattern = None
+    dataset_file_patterns: Dict[str, str] = {}
+    # If a variable list is provided, prefer dataset paths from it
+    parsed = None
+    if variable_list_path is not None:
+        try:
+            parsed = parse_cnp_io_list(variable_list_path)
+        except Exception as e:
+            logging.warning(f"Failed to parse variable list for data paths: {e}")
+    if parsed is not None:
+        # Collect from any or all of: data_paths, trendy1_path, trendy05_path, tva4km_path
+        if parsed.get('data_paths'):
+            data_paths.extend([p for p in parsed['data_paths'] if p])
+        if parsed.get('trendy1_path') and use_trendy1:
+            p = parsed['trendy1_path']
+            data_paths.append(p)
+            if parsed.get('trendy1_file_pattern'):
+                dataset_file_patterns[p] = parsed['trendy1_file_pattern']
+        if parsed.get('trendy05_path') and use_trendy05:
+            p = parsed['trendy05_path']
+            data_paths.append(p)
+            if parsed.get('trendy05_file_pattern'):
+                dataset_file_patterns[p] = parsed['trendy05_file_pattern']
+        if parsed.get('tva4km_path') and use_tva4km:
+            p = parsed['tva4km_path']
+            data_paths.append(p)
+            if parsed.get('tva4km_file_pattern'):
+                dataset_file_patterns[p] = parsed['tva4km_file_pattern']
+        if parsed.get('file_pattern'):
+            file_pattern = parsed['file_pattern']
+    # Fallback to defaults if none provided via CNP_IO
+    if not data_paths:
+        if use_trendy1:
+            data_paths.append("/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree")
+        if use_trendy05:
+            data_paths.append("/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_05_data_CNP")
+        if use_tva4km:
+            # Prefer environment variable if provided
+            env_tva = os.environ.get('TVA4KM_PATH')
+            if env_tva:
+                data_paths.append(env_tva)
+                env_pat = os.environ.get('TVA4KM_FILE_PATTERN')
+                if env_pat:
+                    dataset_file_patterns[env_tva] = env_pat
+    if file_pattern is None:
+        file_pattern = "enhanced_1_training_data_batch_*.pkl"
 
     config.update_data_config(
         data_paths=data_paths,
         file_pattern=file_pattern,
+        dataset_file_patterns=dataset_file_patterns,
         max_files=max_files,
         train_split=0.8,
         filter_column=None,
@@ -625,16 +767,38 @@ def get_cnp_combined_config(
     #        'secondp_vr' # this is not in the list, but it is in the data  
     ]
 
-    # If a variable list file is provided, parse it
+    # If a variable list file is provided, use it for variable groups; otherwise use defaults
+    longitudes_to_drop = []
     if variable_list_path is not None:
-        parsed = parse_cnp_io_list(variable_list_path)
-        time_series_columns = parsed.get('time_series_variables', default_time_series)
-        surface_properties = parsed.get('surface_properties', default_surface)
-        pft_parameters = parsed.get('pft_parameters', default_pft_parameters)
-        water_variables = parsed.get('water_variables', default_water)
-        scalar_variables = parsed.get('scalar_variables', default_scalar)
-        pft_1d_variables = parsed.get('pft_1d_variables', default_pft_1d)
-        variables_2d_soil = parsed.get('variables_2d_soil', default_2d_soil)
+        if parsed is None:
+            try:
+                parsed = parse_cnp_io_list(variable_list_path)
+            except Exception as _e:
+                logging.warning(f"Failed to parse variable list at {variable_list_path}: {_e}")
+                parsed = None
+        if parsed is not None:
+            time_series_columns = parsed.get('time_series_variables', default_time_series)
+            surface_properties = parsed.get('surface_properties', default_surface)
+            pft_parameters = parsed.get('pft_parameters', default_pft_parameters)
+            water_variables = parsed.get('water_variables', default_water)
+            scalar_variables = parsed.get('scalar_variables', default_scalar)
+            pft_1d_variables = parsed.get('pft_1d_variables', default_pft_1d)
+            variables_2d_soil = parsed.get('variables_2d_soil', default_2d_soil)
+            longitudes_to_drop = parsed.get('longitudes_to_drop', [])
+            try:
+                logging.info(f"Applied variable groups from {variable_list_path}: "
+                             f"ts={len(time_series_columns)}, static={len(surface_properties)}, pft_params={len(pft_parameters)}, "
+                             f"scalar={len(scalar_variables)}, pft1d={len(pft_1d_variables)}, soil2d={len(variables_2d_soil)}")
+            except Exception:
+                pass
+        else:
+            time_series_columns = default_time_series
+            surface_properties = default_surface
+            pft_parameters = default_pft_parameters
+            water_variables = default_water
+            scalar_variables = default_scalar
+            pft_1d_variables = default_pft_1d
+            variables_2d_soil = default_2d_soil
     else:
         time_series_columns = default_time_series
         surface_properties = default_surface
@@ -650,7 +814,8 @@ def get_cnp_combined_config(
         pft_param_columns=pft_parameters,
         x_list_scalar_columns=scalar_variables,
         x_list_columns_1d=pft_1d_variables,
-        x_list_columns_2d=variables_2d_soil
+        x_list_columns_2d=variables_2d_soil,
+        longitudes_to_drop=longitudes_to_drop
     )
     if include_water:
         data_config_kwargs['x_list_water_columns'] = water_variables
@@ -731,6 +896,12 @@ def get_cnp_combined_config(
                 if applicable:
                     config.update_model_config(**applicable)
                     logging.info(f"Applied {len(applicable)} ModelConfig overrides from {model_config_path}")
+                    # Record metadata for downstream verification
+                    try:
+                        setattr(config, 'model_config_overrides_keys', sorted(list(applicable.keys())))
+                        setattr(config, 'model_config_source', model_config_path)
+                    except Exception:
+                        pass
         except Exception as e:
             logging.warning(f"Could not apply model config overrides from {model_config_path}: {e}")
     

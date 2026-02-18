@@ -96,13 +96,46 @@ class DataLoaderIndividual:
             if count > 0:
                 logger.info(f"  {col}: {count}")
 
+    def _resolve_lat_column(self) -> Optional[str]:
+        """Resolve latitude column name from config or common patterns."""
+        candidates = []
+        lat_override = getattr(self.data_config, 'tropical_lat_column', None)
+        if lat_override:
+            candidates.append(lat_override)
+        # Prefer static columns that look like latitude
+        for col in getattr(self.data_config, 'static_columns', []) or []:
+            if 'lat' in str(col).lower():
+                candidates.append(col)
+        # Common column names
+        candidates.extend(['lat', 'latitude', 'LAT', 'Latitude', 'LATITUDE'])
+        for col in candidates:
+            if col in self.df.columns:
+                return col
+        return None
+
     def load_data(self) -> pd.DataFrame:
         """Load data from configured paths and patterns."""
         df_list = []
         logger.info("Loading data from multiple paths...")
+        logger.info(f"data_paths: {self.data_config.data_paths}")
+        logger.info(f"file_pattern: {self.data_config.file_pattern}")
+        logger.info(f"dataset_file_patterns: {getattr(self.data_config, 'dataset_file_patterns', {})}")
         for path in self.data_config.data_paths:
             # Resolve files matching pattern
-            files = list(Path(path).glob(self.data_config.file_pattern))
+            # Support per-dataset file patterns if provided
+            try:
+                per_dataset_patterns = getattr(self.data_config, 'dataset_file_patterns', {}) or {}
+            except Exception:
+                per_dataset_patterns = {}
+            # Normalize path for matching (resolve to absolute path)
+            path_normalized = str(Path(path).resolve())
+            # Try both normalized and original path as keys
+            pattern = per_dataset_patterns.get(path_normalized, 
+                      per_dataset_patterns.get(path, self.data_config.file_pattern))
+            logger.info(f"Searching in path: {path} (normalized: {path_normalized}), using pattern: {pattern}")
+            path_obj = Path(path)
+            logger.info(f"Path exists: {path_obj.exists()}, is_dir: {path_obj.is_dir()}")
+            files = list(path_obj.glob(pattern))
             # Deterministic ordering for test runs
             if getattr(self.data_config, 'sort_file_list', True):
                 files = sorted(files, key=lambda p: p.name)
@@ -116,8 +149,10 @@ class DataLoaderIndividual:
                 logger.info(f"Limited to {len(files)} files due to max_files={self.data_config.max_files}")
             
             # Load each file
-            for file_path in files:
+            total_files = len(files)
+            for idx, file_path in enumerate(files, 1):
                 try:
+                    logger.info(f"Loading file {idx}/{total_files}: {file_path.name}")
                     # Check file extension and use appropriate loading method
                     if str(file_path).endswith('.pkl'):
                         df_chunk = pd.read_pickle(file_path)
@@ -132,7 +167,7 @@ class DataLoaderIndividual:
                     
                     # Load all files - zeros are valid data in soil science
                     df_list.append(df_chunk)
-                    logger.debug(f"Loaded {len(df_chunk)} samples from {file_path}")
+                    logger.info(f"Loaded {len(df_chunk)} samples from {file_path.name} (total samples so far: {sum(len(df) for df in df_list)})")
                         
                 except Exception as e:
                     logger.error(f"Failed to load {file_path}: {e}")
@@ -145,11 +180,67 @@ class DataLoaderIndividual:
         self.df = pd.concat(df_list, ignore_index=True)
         logger.info(f"Successfully loaded {len(self.df)} samples")
         
+        # Print all variables/columns in the dataset
+        logger.info("=" * 80)
+        logger.info("所有数据集变量列表 (All Dataset Variables):")
+        logger.info("=" * 80)
+        logger.info(f"总变量数: {len(self.df.columns)}")
+        logger.info(f"数据集形状: {self.df.shape}")
+        logger.info("\n变量列表 (按字母顺序):")
+        for i, col in enumerate(sorted(self.df.columns), 1):
+            logger.info(f"  {i:4d}. {col}")
+        logger.info("=" * 80)
+        
         return self.df
-    
+
     def preprocess_data(self):
         """Preprocess the loaded data."""
         logger.info("Starting data preprocessing...")
+        
+        # Filter samples by longitude if specified
+        if hasattr(self.data_config, 'longitudes_to_drop') and self.data_config.longitudes_to_drop:
+            if 'Longitude' in self.df.columns:
+                original_size = len(self.df)
+                longitudes_to_drop = self.data_config.longitudes_to_drop
+                logger.info(f"Filtering samples with longitudes: {longitudes_to_drop}")
+                
+                # Create a mask for samples to keep (those NOT in the drop list)
+                # Use a tolerance for floating point comparison
+                tolerance = 0.01
+                mask = ~self.df['Longitude'].apply(
+                    lambda lon: any(abs(lon - drop_lon) < tolerance for drop_lon in longitudes_to_drop)
+                )
+                
+                self.df = self.df[mask].reset_index(drop=True)
+                filtered_size = len(self.df)
+                dropped_count = original_size - filtered_size
+                logger.info(f"Longitude filtering: {original_size} samples -> {filtered_size} samples (dropped {dropped_count} samples)")
+            else:
+                logger.warning("'Longitude' column not found in dataset. Cannot apply longitude filtering.")
+
+        # Optional tropical-only filtering by latitude
+        if getattr(self.data_config, 'tropical_only', False):
+            lat_col = self._resolve_lat_column()
+            if lat_col is None:
+                logger.warning("Tropical filter enabled but no latitude column found. Skipping tropical filtering.")
+            else:
+                lat_range = getattr(self.data_config, 'tropical_lat_range', (-23.5, 23.5))
+                try:
+                    lat_min, lat_max = float(lat_range[0]), float(lat_range[1])
+                except Exception:
+                    lat_min, lat_max = -23.5, 23.5
+                    logger.warning("Invalid tropical_lat_range; falling back to [-23.5, 23.5].")
+                original_size = len(self.df)
+                lat_vals = pd.to_numeric(self.df[lat_col], errors='coerce')
+                mask = lat_vals.between(lat_min, lat_max, inclusive='both')
+                self.df = self.df[mask].reset_index(drop=True)
+                filtered_size = len(self.df)
+                logger.info(
+                    f"Tropical filtering on '{lat_col}': {original_size} -> {filtered_size} "
+                    f"(lat range [{lat_min}, {lat_max}])"
+                )
+                if filtered_size == 0:
+                    logger.warning("Tropical filter removed all samples. Check latitude column and range.")
         
         # Drop specified columns
         if hasattr(self.data_config, 'filter_columns') and self.data_config.filter_columns:
@@ -165,9 +256,26 @@ class DataLoaderIndividual:
         for col in self.data_config.time_series_columns:
             if col in self.df.columns:
                 # Ensure time series data is properly formatted
-                self.df[col] = self.df[col].apply(
-                    lambda x: np.array(x, dtype=np.float32) if isinstance(x, (list, np.ndarray)) else np.zeros(self.data_config.time_series_length, dtype=np.float32)
-                )
+                def _to_ts_and_truncate(x):
+                    # Convert to numpy array (float32) and truncate/pad to configured time_series_length
+                    target_len = int(getattr(self.data_config, 'time_series_length', 240))
+                    if isinstance(x, (list, np.ndarray)):
+                        arr = np.array(x, dtype=np.float32).flatten()
+                        # Prefer latest 20-year window (last 20 years)
+                        if arr.size >= target_len:
+                            arr = arr[-target_len:]
+                        else:
+                            # pad to target_len with zeros at the beginning (to align with latest data)
+                            pad = target_len - arr.size
+                            if pad > 0:
+                                arr = np.pad(arr, (pad, 0), mode='constant')
+                        # ensure no NaN/Inf
+                        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                        return arr
+                    # Fallback to zeros of target length
+                    return np.zeros(target_len, dtype=np.float32)
+
+                self.df[col] = self.df[col].apply(_to_ts_and_truncate)
         
         # Process list columns
         logger.info("Processing list columns...")
@@ -402,6 +510,17 @@ class DataLoaderIndividual:
             'y_water': y_water_tensor,
             'scalers': self.scalers
         }
+        # Add per-sample PFT mask derived from raw PCT_NAT_PFT_1..16 (1 where >0, else 0)
+        try:
+            pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
+            if all(c in self.df.columns for c in pct_cols):
+                pct = self.df[pct_cols].values.astype(np.float32)
+                mask = (pct > 0.0).astype(np.float32)  # shape [N,16]
+                ret['pft_presence_mask'] = torch.tensor(mask, dtype=self.preprocessing_config.data_type)
+            else:
+                logger.warning("Some PCT_NAT_PFT_1..16 columns are missing; pft_presence_mask not created")
+        except Exception as _e:
+            logger.warning(f"Failed to create pft_presence_mask: {_e}")
         # Optional dump after normalization (group)
         if os.getenv('DUMP_ALL_PFT_SOIL', '0') == '1':
             try:
@@ -462,9 +581,13 @@ class DataLoaderIndividual:
         assert scalar_data.shape[1] == len(self.data_config.x_list_scalar_columns), 'Mismatch in scalar feature count!'
         assert variables_2d_soil.shape[1] == len(self.data_config.x_list_columns_2d), 'Mismatch in 2D soil feature count!'
         assert pft_param_data.shape[1] == len(self.data_config.pft_param_columns), 'Mismatch in PFT param feature count!'
-        assert y_scalar_data.shape[1] == len(self.data_config.y_list_scalar_columns), 'Mismatch in y_scalar feature count!'
-        assert y_pft_1d_data.shape[1] == len(self.data_config.y_list_columns_1d), 'Mismatch in y_pft_1d variable count!'
-        assert y_soil_2d.shape[1] == len(self.data_config.y_list_columns_2d), 'Mismatch in y_soil_2d feature count!'
+        # Only assert Y variables if they were normalized (training mode)
+        if y_scalar_data is not None:
+            assert y_scalar_data.shape[1] == len(self.data_config.y_list_scalar_columns), 'Mismatch in y_scalar feature count!'
+        if y_pft_1d_data is not None:
+            assert y_pft_1d_data.shape[1] == len(self.data_config.y_list_columns_1d), 'Mismatch in y_pft_1d variable count!'
+        if y_soil_2d is not None:
+            assert y_soil_2d.shape[1] == len(self.data_config.y_list_columns_2d), 'Mismatch in y_soil_2d feature count!'
 
         # Store all scalers
         self.scalers = {
@@ -488,6 +611,22 @@ class DataLoaderIndividual:
             'individual_y_soil_2d': self.individual_scalers['y_soil_2d'],
         }
         
+        # debug
+        # logger.info(" Debug data stats after normalization:")
+        # _print_stats("time_series_data", time_series_data)
+        # _print_stats("static_data", static_data)
+        # _print_stats("pft_param_data", pft_param_data)
+        # _print_stats("scalar_data", scalar_data)
+        # _print_stats("variables_1d_pft", pft_1d_data)
+        # _print_stats("variables_2d_soil", variables_2d_soil)
+        # _print_stats("y_scalar", y_scalar_data)
+        # _print_stats("y_pft_1d", y_pft_1d_data)
+        # _print_stats("y_soil_2d", y_soil_2d)
+        # _print_stats("water", water_tensor)
+        # _print_stats("y_water", y_water_tensor)
+        # logger.info(" Debug checking soil 2D stats after normalization:")
+        # _check_soil_2d_stats("variables_2d_soil", variables_2d_soil)
+        # _check_soil_2d_stats("y_soil_2d", y_soil_2d)
         ret = {
             'time_series_data': time_series_data,
             'static_data': static_data,
@@ -495,13 +634,30 @@ class DataLoaderIndividual:
             'scalar_data': scalar_data,
             'variables_1d_pft': pft_1d_data,
             'variables_2d_soil': variables_2d_soil,
-            'y_scalar': y_scalar_data,
-            'y_pft_1d': y_pft_1d_data,
-            'y_soil_2d': y_soil_2d,
             'water': water_tensor,
             'y_water': y_water_tensor,
             'scalers': self.scalers
         }
+        
+        # Only add Y variables if they were normalized (training mode) or exist (inference mode)
+        if y_scalar_data is not None:
+            ret['y_scalar'] = y_scalar_data
+        if y_pft_1d_data is not None:
+            ret['y_pft_1d'] = y_pft_1d_data
+        if y_soil_2d is not None:
+            ret['y_soil_2d'] = y_soil_2d
+        
+        # Add per-sample PFT mask derived from raw PCT_NAT_PFT_1..16 (1 where >0, else 0)
+        try:
+            pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
+            if all(c in self.df.columns for c in pct_cols):
+                pct = self.df[pct_cols].values.astype(np.float32)
+                mask = (pct > 0.0).astype(np.float32)  # shape [N,16]
+                ret['pft_presence_mask'] = torch.tensor(mask, dtype=self.preprocessing_config.data_type)
+            else:
+                logger.warning("Some PCT_NAT_PFT_1..16 columns are missing; pft_presence_mask not created")
+        except Exception as _e:
+            logger.warning(f"Failed to create pft_presence_mask: {_e}")
         # Optional dump after normalization (individual)
         if os.getenv('DUMP_ALL_PFT_SOIL', '0') == '1':
             try:
@@ -829,6 +985,8 @@ class DataLoaderIndividual:
         for i, col in enumerate(static_columns):
             assert col in self.df.columns, f"Static column '{col}' missing in DataFrame!"
         static_data = self.df[static_columns].values
+        # Clean NaN/Inf
+        static_data = np.nan_to_num(static_data, nan=0.0, posinf=0.0, neginf=0.0)
         scaler = self._get_scaler(self.preprocessing_config.static_normalization)
         static_normalized = scaler.fit_transform(static_data)
         return torch.tensor(static_normalized, dtype=self.preprocessing_config.data_type), scaler
@@ -842,6 +1000,8 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"Scalar column '{col}' missing in DataFrame!"
         
         scalar_data = self.df[scalar_columns].values
+        # Clean NaN/Inf
+        scalar_data = np.nan_to_num(scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use group normalization
         scaler = self._get_scaler(self.preprocessing_config.target_normalization)
@@ -858,6 +1018,8 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"y_scalar column '{col}' missing in DataFrame!"
         
         y_scalar_data = self.df[y_scalar_columns].values
+        # Clean NaN/Inf
+        y_scalar_data = np.nan_to_num(y_scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use group normalization
         scaler = self._get_scaler(self.preprocessing_config.target_normalization)
@@ -874,6 +1036,7 @@ class DataLoaderIndividual:
             assert col in self.df.columns, f"Scalar column '{col}' missing in DataFrame!"
         
         scalar_data = self.df[scalar_columns].values
+        scalar_data = np.nan_to_num(scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use individual normalization (fit+transform or transform-only)
         if transform_only:
@@ -888,10 +1051,18 @@ class DataLoaderIndividual:
         y_scalar_columns = self.data_config.y_list_scalar_columns
         logger.info(f"Normalizing y_scalar data with columns: {y_scalar_columns}")
         
+        # For inference mode, skip if columns don't exist
+        if transform_only:
+            missing_cols = [col for col in y_scalar_columns if col not in self.df.columns]
+            if missing_cols:
+                logger.info(f"Inference mode: Y_scalar columns {missing_cols} missing in DataFrame. Skipping normalization.")
+                return None, None
+        
         for i, col in enumerate(y_scalar_columns):
             assert col in self.df.columns, f"y_scalar column '{col}' missing in DataFrame!"
         
         y_scalar_data = self.df[y_scalar_columns].values
+        y_scalar_data = np.nan_to_num(y_scalar_data, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Use individual normalization (fit+transform or transform-only)
         if transform_only:
@@ -905,10 +1076,20 @@ class DataLoaderIndividual:
         """Normalize 1D list data individually using IndividualScalerManager."""
         logger.info(f"Normalizing 1D list data with columns: {columns}")
         
+        # For inference mode with Y variables, skip if columns don't exist
+        is_y = columns == self.data_config.y_list_columns_1d
+        if transform_only and is_y:
+            missing_cols = [col for col in columns if col not in self.df.columns]
+            if missing_cols:
+                logger.info(f"Inference mode: Y_pft_1d columns {missing_cols} missing in DataFrame. Skipping normalization.")
+                return None, None
+        
         for i, col in enumerate(columns):
             assert col in self.df.columns, f"1D column '{col}' missing in DataFrame!"
         
         col_data = [np.vstack(self.df[col].values) for col in columns]
+        # Clean NaN/Inf in stacked data
+        col_data = [np.nan_to_num(cd, nan=0.0, posinf=0.0, neginf=0.0) for cd in col_data]
         data = np.stack(col_data, axis=1)  # shape: (samples, features, length)
         
         # Handle PFT0 dropping for compatibility with model expectations
@@ -1063,6 +1244,14 @@ class DataLoaderIndividual:
         """Normalize 2D list data individually using IndividualScalerManager."""
         logger.info(f"Normalizing 2D list data with columns: {columns}")
         
+        # For inference mode with Y variables, skip if columns don't exist
+        is_y = columns == self.data_config.y_list_columns_2d
+        if transform_only and is_y:
+            missing_cols = [col for col in columns if col not in self.df.columns]
+            if missing_cols:
+                logger.info(f"Inference mode: Y_soil_2d columns {missing_cols} missing in DataFrame. Skipping normalization.")
+                return None, None
+        
         for i, col in enumerate(columns):
             assert col in self.df.columns, f"2D column '{col}' missing in DataFrame!"
         
@@ -1075,6 +1264,7 @@ class DataLoaderIndividual:
             for val in values:
                 if isinstance(val, (list, np.ndarray)):
                     val_array = np.array(val)
+                    val_array = np.nan_to_num(val_array, nan=0.0, posinf=0.0, neginf=0.0)
                     if val_array.shape[1] == 15:  # Has 15 layers
                         # Extract first column and top 10 layers immediately
                         extracted = val_array[0:1, 0:10]  # Shape: (1, 10)
@@ -1197,18 +1387,26 @@ class DataLoaderIndividual:
             for col in pft_param_columns:
                 val = row[col]
                 if isinstance(val, (list, np.ndarray)) and len(val) == num_pfts:
-                    row_vectors.append(np.array(val, dtype=np.float32))
+                    arr = np.array(val, dtype=np.float32)
+                    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+                    row_vectors.append(arr)
                 else:
                     row_vectors.append(np.zeros(num_pfts, dtype=np.float32))
             row_matrix = np.stack(row_vectors, axis=0)  # [44, 17]
             param_matrix.append(row_matrix)
         param_matrix = np.stack(param_matrix, axis=0)  # [batch, 44, 17]
         assert param_matrix.shape[1:] == (num_params, num_pfts), f"pft_param_data shape {param_matrix.shape} does not match [batch, 44, 17]"
-        # Flatten for normalization
-        flat_param_matrix = param_matrix.reshape(param_matrix.shape[0], -1)
+
         scaler = self._get_scaler(self.preprocessing_config.list_1d_normalization)
-        flat_param_matrix_norm = scaler.fit_transform(flat_param_matrix)
-        param_matrix_norm = flat_param_matrix_norm.reshape(param_matrix.shape)
+        param_matrix_norm = np.empty_like(param_matrix)
+
+        for i in range(num_params):
+            X = param_matrix[:, i, :]
+            X_norm = scaler.fit_transform(X.T)
+            if np.all(X_norm == 0):
+                logger.warning(f"{pft_param_columns[i]}: After normalization, the value is all zeros\n")
+            param_matrix_norm[:, i, :] = X_norm.T
+
         pft_param_data = torch.tensor(param_matrix_norm, dtype=self.preprocessing_config.data_type)
         return pft_param_data, scaler
 
@@ -1399,14 +1597,36 @@ class DataLoaderIndividual:
         test_data = {}
         
         total_samples = len(self.df)
-        train_size = int(self.data_config.train_split * total_samples)
-        test_size = total_samples - train_size
         
-        logger.info(f"Data splitting details:")
-        logger.info(f"  - Total samples: {total_samples}")
-        logger.info(f"  - Train split ratio: {self.data_config.train_split}")
-        logger.info(f"  - Train size: {train_size}")
-        logger.info(f"  - Test size: {test_size}")
+        # 如果设置了 test_split，分别使用 train_split 和 test_split 计算
+        # 否则使用原来的逻辑：test_size = total_samples - train_size
+        if self.data_config.test_split is not None:
+            train_size = int(self.data_config.train_split * total_samples)
+            test_size = int(self.data_config.test_split * total_samples)
+            
+            # 验证比例是否合理
+            total_ratio = self.data_config.train_split + self.data_config.test_split
+            if total_ratio > 1.0:
+                logger.warning(
+                    f"Train split ({self.data_config.train_split}) + Test split ({self.data_config.test_split}) = {total_ratio} > 1.0. "
+                    f"Adjusting test_split to {1.0 - self.data_config.train_split}"
+                )
+                test_size = int((1.0 - self.data_config.train_split) * total_samples)
+            
+            unused_size = total_samples - train_size - test_size
+            logger.info(f"Data splitting details:")
+            logger.info(f"  - Total samples: {total_samples}")
+            logger.info(f"  - Train split ratio: {self.data_config.train_split} ({train_size} samples)")
+            logger.info(f"  - Test split ratio: {self.data_config.test_split} ({test_size} samples)")
+            logger.info(f"  - Unused data: {unused_size} samples ({(1.0 - self.data_config.train_split - self.data_config.test_split)*100:.1f}%)")
+        else:
+            train_size = int(self.data_config.train_split * total_samples)
+            test_size = total_samples - train_size
+            
+            logger.info(f"Data splitting details:")
+            logger.info(f"  - Total samples: {total_samples}")
+            logger.info(f"  - Train split ratio: {self.data_config.train_split} ({train_size} samples)")
+            logger.info(f"  - Test size: {test_size} samples (剩余部分)")
 
         # Expose split indices for downstream use (e.g., location validation)
         # Matches the contiguous slicing used below
@@ -1446,25 +1666,28 @@ class DataLoaderIndividual:
         train_data['scalar'] = train_list_scalar
         test_data['scalar'] = test_list_scalar 
 
-        # Split y_scalar (target)
-        y_scalar = normalized_data['y_scalar']
-        train_data['y_scalar'] = y_scalar[:train_size]
-        test_data['y_scalar'] = y_scalar[train_size:]
+        # Split y_scalar (target) - skip if not present (inference mode)
+        if 'y_scalar' in normalized_data and normalized_data['y_scalar'] is not None:
+            y_scalar = normalized_data['y_scalar']
+            train_data['y_scalar'] = y_scalar[:train_size]
+            test_data['y_scalar'] = y_scalar[train_size:]
 
         # Split variables_1d_pft (input)
         variables_1d_pft = normalized_data['variables_1d_pft']
         train_data['variables_1d_pft'] = variables_1d_pft[:train_size]
         test_data['variables_1d_pft'] = variables_1d_pft[train_size:]
         
-        # Split y_pft_1d (target)
-        y_pft_1d = normalized_data['y_pft_1d']
-        train_data['y_pft_1d'] = y_pft_1d[:train_size]
-        test_data['y_pft_1d'] = y_pft_1d[train_size:]
+        # Split y_pft_1d (target) - skip if not present (inference mode)
+        if 'y_pft_1d' in normalized_data and normalized_data['y_pft_1d'] is not None:
+            y_pft_1d = normalized_data['y_pft_1d']
+            train_data['y_pft_1d'] = y_pft_1d[:train_size]
+            test_data['y_pft_1d'] = y_pft_1d[train_size:]
 
-        # Split y_soil_2d (target)
-        y_soil_2d = normalized_data['y_soil_2d']
-        train_data['y_soil_2d'] = y_soil_2d[:train_size]
-        test_data['y_soil_2d'] = y_soil_2d[train_size:]
+        # Split y_soil_2d (target) - skip if not present (inference mode)
+        if 'y_soil_2d' in normalized_data and normalized_data['y_soil_2d'] is not None:
+            y_soil_2d = normalized_data['y_soil_2d']
+            train_data['y_soil_2d'] = y_soil_2d[:train_size]
+            test_data['y_soil_2d'] = y_soil_2d[train_size:]
 
         # Split variables_2d_soil (input)
         variables_2d_soil = normalized_data['variables_2d_soil']
@@ -1478,6 +1701,15 @@ class DataLoaderIndividual:
         if 'y_water' in normalized_data and normalized_data['y_water'] is not None:
             train_data['y_water'] = normalized_data['y_water'][:train_size]
             test_data['y_water'] = normalized_data['y_water'][train_size:]
+
+        # Split PFT presence mask if present
+        if 'pft_presence_mask' in normalized_data:
+            ppm = normalized_data['pft_presence_mask']
+            try:
+                train_data['pft_presence_mask'] = ppm[:train_size]
+                test_data['pft_presence_mask'] = ppm[train_size:]
+            except Exception:
+                logger.warning("pft_presence_mask present but could not be split; skipping")
         
         logger.info(f"Split completed:")
         logger.info(f"  - Train time_series shape: {train_time_series.shape}")
@@ -1497,6 +1729,9 @@ class DataLoaderIndividual:
             final_keys.append('water')
             final_keys.append('y_water')
 
+        # Optionally include presence mask
+        if 'pft_presence_mask' in train_data:
+            final_keys.append('pft_presence_mask')
         train_data = {k: v for k, v in train_data.items() if k in final_keys}
         test_data = {k: v for k, v in test_data.items() if k in final_keys}
         
@@ -1507,72 +1742,6 @@ class DataLoaderIndividual:
             'test_size': test_size
         }
 
-    def _normalize_list_1d(self, columns: List[str]) -> Tuple[torch.Tensor, Any]:
-        """Normalize 1D list data in the order defined by columns."""
-        logger.info(f"Normalizing 1D list data with columns: {columns}")
-        for i, col in enumerate(columns):
-            assert col in self.df.columns, f"1D column '{col}' missing in DataFrame!"
-        col_data = [np.vstack(self.df[col].values) for col in columns]
-        data = np.stack(col_data, axis=1)  # shape: (samples, features, length)
-        n_samples, n_features, n_length = data.shape
-        data_reshaped = data.reshape(n_samples, -1)
-        scaler = self._get_scaler(self.preprocessing_config.list_1d_normalization)
-        data_normalized = scaler.fit_transform(data_reshaped)
-        data_normalized = data_normalized.reshape(n_samples, n_features, n_length)
-        return torch.tensor(data_normalized, dtype=self.preprocessing_config.data_type), scaler
-
-    def _normalize_list_2d(self, columns: List[str]) -> Tuple[torch.Tensor, Any]:
-        """Normalize 2D list data in the order defined by columns (group path).
-
-        Extract FIRST GROUP (column) -> top 10 layers for consistency with inspector/individual.
-        """
-        logger.info(f"Normalizing 2D list data with columns: {columns}")
-        for i, col in enumerate(columns):
-            assert col in self.df.columns, f"2D column '{col}' missing in DataFrame!"
-        
-        # Extract first column and top 10 layers directly for consistent shapes
-        col_data = []
-        for col in columns:
-            values = self.df[col].values
-            standardized_samples = []
-            
-            for val in values:
-                try:
-                    if isinstance(val, (list, tuple)) and len(val) > 0 and isinstance(val[0], (list, tuple, np.ndarray)):
-                        arr = np.array(val[0], dtype=float).reshape(1, -1)
-                    else:
-                        arr = np.array(val, dtype=object)
-                        if getattr(arr, 'ndim', 1) == 2 and arr.shape[0] >= 1:
-                            arr = np.array(arr[0, :], dtype=float).reshape(1, -1)
-                        elif getattr(arr, 'ndim', 1) == 1 and len(arr) >= 1 and not isinstance(arr[0], (list, tuple, np.ndarray)):
-                            arr = np.array(arr, dtype=float).reshape(1, -1)
-                        else:
-                            arr = None
-                    if arr is None:
-                        standardized_samples.append(np.zeros((1, 10)))
-                    else:
-                        # take top 10 layers
-                        out = np.zeros((1, 10), dtype=float)
-                        take = min(10, arr.shape[1])
-                        if take > 0:
-                            out[:, :take] = arr[:, :take]
-                        standardized_samples.append(out)
-                except Exception:
-                    standardized_samples.append(np.zeros((1, 10)))
-            
-            col_data.append(np.stack(standardized_samples))
-        
-        data = np.stack(col_data, axis=1)  # shape: (samples, features, 1, 10)
-        
-        # Data is already in the correct shape: (samples, variables, 1, 10)
-        # No need for additional extraction since we did it during loading
-        
-        n_samples, n_features, n_rows, n_cols = data.shape
-        data_reshaped = data.reshape(n_samples, -1)
-        scaler = self._get_scaler(self.preprocessing_config.list_2d_normalization)
-        data_normalized = scaler.fit_transform(data_reshaped)
-        data_normalized = data_normalized.reshape(n_samples, n_features, n_rows, n_cols)
-        return torch.tensor(data_normalized, dtype=self.preprocessing_config.data_type), scaler
 
     def get_data_info(self) -> Dict[str, Any]:
         """Get information about the loaded data for configuration and logging."""
@@ -1590,3 +1759,30 @@ class DataLoaderIndividual:
             'data_shape': self.df.shape if hasattr(self, 'df') else None
         }
         return data_info
+
+def _print_stats(name, tensor):
+    if tensor is None:
+        logger.info(f"{name}: None")
+        return
+    # 对 PyTorch Tensor
+    if hasattr(tensor, "max"):
+        logger.info(f"{name} -> min: {tensor.min().item():.6f}, max: {tensor.max().item():.6f}, mean: {tensor.mean().item():.6f}, shape={tuple(tensor.shape)}")
+    else:
+        # 对 numpy
+        arr = np.asarray(tensor)
+        logger.info(f"{name} -> min: {arr.min():.6f}, max: {arr.max():.6f}, mean: {arr.mean():.6f}, shape={arr.shape}")
+
+def _check_soil_2d_stats(name, tensor):
+    if tensor is None:
+        logger.info(f"{name}: None")
+        return
+    x = tensor.squeeze(2)
+    grid_cells, n_vars, n_layers = x.shape
+    nonzero_mask = (x != 0).float()          # [1000, 3, 10]
+    nonzero_ratio = nonzero_mask.mean(dim=0) # [3, 10]
+    max_vals = x.max(dim=0).values
+    min_vals = x.min(dim=0).values 
+    mean_vals = x.mean(dim=0)
+    q25_vals = torch.quantile(x, 0.25, dim=0) 
+    q75_vals = torch.quantile(x, 0.75, dim=0)
+    logger.info(f"{name} -> grid_cells: {grid_cells}, n_vars: {n_vars}, n_layers: {n_layers}, nonzero_ratio: {nonzero_ratio}, max_vals: {max_vals}, min_vals: {min_vals}, mean_vals: {mean_vals}, q25_vals: {q25_vals}, q75_vals: {q75_vals}")

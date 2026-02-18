@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -19,14 +20,123 @@ def plot_gt_vs_pred(gt, pred, title, save_path):
     plt.savefig(save_path)
     plt.close()
 
-def main_with_flag(results_dir, plot_scatter, plot_loss):
+def _parse_top_bad_report(report_path):
+    """Parse quality_summary_report.txt to extract variables and associated PFT indices or layer numbers.
+
+    Returns a mapping: { variable: { 'pfts': set[int], 'layers': set[int] } }
+    """
+    selection = {}
+    if not os.path.exists(report_path):
+        print(f"Top-bad report not found: {report_path}")
+        return selection
+
+    in_section = False
+    try:
+        with open(report_path, 'r') as f:
+            for line in f:
+                stripped = line.strip('\n')
+                header = stripped.strip()
+                # Detect start of section (support both old and new headings)
+                if header.startswith('Top variables by bad-count'):
+                    in_section = True
+                    continue
+                # Section ends at next heading or blank line followed by a heading; we keep it simple
+                if in_section and header.startswith('## '):
+                    break
+                if in_section and stripped.startswith('  '):
+                    # Example formats:
+                    #   ppool: 15; pfts: 1, 2, 3, ...
+                    #   smin_no3_vr: 10; layers: 1, 2, ...
+                    #   var: 5
+                    m = re.match(r"\s+([A-Za-z0-9_]+):\s*([0-9]+)(;.*)?$", stripped)
+                    if not m:
+                        continue
+                    var = m.group(1)
+                    details = m.group(3) or ''
+                    pfts = set()
+                    layers = set()
+                    if 'pfts:' in details:
+                        m_p = re.search(r"pfts:\s*([0-9,\s]+)", details)
+                        if m_p:
+                            nums = [n.strip() for n in m_p.group(1).split(',') if n.strip()]
+                            for n in nums:
+                                try:
+                                    pfts.add(int(n))
+                                except Exception:
+                                    pass
+                    if 'layers:' in details:
+                        m_l = re.search(r"layers:\s*([0-9,\s]+)", details)
+                        if m_l:
+                            nums = [n.strip() for n in m_l.group(1).split(',') if n.strip()]
+                            for n in nums:
+                                try:
+                                    layers.add(int(n))
+                                except Exception:
+                                    pass
+                    selection[var] = { 'pfts': pfts, 'layers': layers }
+    except Exception as e:
+        print(f"Failed to parse top-bad report {report_path}: {e}")
+        return {}
+    return selection
+
+def _parse_worst_vars_report(report_path):
+    """Parse quality_summary_report.txt to extract variables from
+    the '## Variables with Worst Predictions' section.
+    Returns a mapping { variable: { 'pfts': set(), 'layers': set() } }
+    """
+    selection = {}
+    if not os.path.exists(report_path):
+        print(f"Worst-variables report not found: {report_path}")
+        return selection
+    in_section = False
+    try:
+        with open(report_path, 'r') as f:
+            for line in f:
+                stripped = line.strip('\n')
+                header = stripped.strip()
+                if header.startswith('## Variables with Worst Predictions'):
+                    in_section = True
+                    continue
+                # Section ends at next heading
+                if in_section and header.startswith('## '):
+                    break
+                if in_section and stripped and not stripped.startswith('#'):
+                    # Expected line format: "<var>: <good>% good, <ok>% ok, <bad>% bad"
+                    m = re.match(r"\s*([A-Za-z0-9_]+):\s*", stripped)
+                    if not m:
+                        continue
+                    var = m.group(1)
+                    selection[var] = { 'pfts': set(), 'layers': set() }
+    except Exception as e:
+        print(f"Failed to parse worst variables section {report_path}: {e}")
+        return {}
+    return selection
+
+def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top_bad_report=None, plots_dir_override=None, worst_only=False):
     # Create plots subdirectory
-    plots_dir = os.path.join(results_dir, "plots")
+    plots_dir = plots_dir_override or os.path.join(results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
     
     # NEW: Create stats file
     stats_path = os.path.join(results_dir, "validation_stats.csv")
     stats_data = []
+
+    # Optional: restrict plotting to selected variables (top-bad or worst list)
+    selection = None
+    if top_bad_only or worst_only:
+        report_path = top_bad_report or os.path.join(results_dir, 'analysis', 'quality_summary_report.txt')
+        if worst_only:
+            selection = _parse_worst_vars_report(report_path)
+            if selection:
+                print(f"Plotting restricted to worst variables from: {report_path}")
+        if (not selection) and top_bad_only:
+            selection = _parse_top_bad_report(report_path)
+            if selection:
+                print(f"Plotting restricted to top-bad variables from: {report_path}")
+        # If neither parser returned a selection, proceed unrestricted
+        if not selection:
+            print("No selections parsed from report; proceeding without restriction.")
+            selection = None
     
     # Check for new directory structure first
     pft_gt_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_ground_truth')
@@ -35,7 +145,7 @@ def main_with_flag(results_dir, plot_scatter, plot_loss):
     # Handle 1D data with new structure
     if os.path.exists(pft_gt_dir) and os.path.exists(pft_pred_dir):
         print("Using new 1D directory structure")
-        analyze_1d_new_structure(results_dir, '1D', plots_dir, stats_data, plot_scatter)
+        analyze_1d_new_structure(results_dir, '1D', plots_dir, stats_data, plot_scatter, selection)
     else:
         # Fall back to old single-file format
         print("Using legacy 1D single-file format")
@@ -51,7 +161,7 @@ def main_with_flag(results_dir, plot_scatter, plot_loss):
     scalar_pred = os.path.join(results_dir, 'cnp_predictions', 'predictions_scalar.csv')
     if os.path.exists(scalar_gt) and os.path.exists(scalar_pred):
         print("Analyzing scalar data...")
-        analyze_pair(scalar_gt, scalar_pred, 'Scalar', plots_dir, stats_data, per_column=True, plot_scatter=plot_scatter)
+        analyze_pair(scalar_gt, scalar_pred, 'Scalar', plots_dir, stats_data, per_column=True, plot_scatter=plot_scatter, selection=selection)
     else:
         print("Scalar data files not found")
     
@@ -60,7 +170,7 @@ def main_with_flag(results_dir, plot_scatter, plot_loss):
     soil_pred_dir = os.path.join(results_dir, 'cnp_predictions', 'soil_2d_predictions')
     if os.path.exists(soil_gt_dir) and os.path.exists(soil_pred_dir):
         print("Using new 2D directory structure")
-        analyze_2d_new_structure(results_dir, '2D', plots_dir, stats_data, plot_scatter)
+        analyze_2d_new_structure(results_dir, '2D', plots_dir, stats_data, plot_scatter, selection)
     else:
         # Fall back to old single-file format
         print("Using legacy 2D single-file format")
@@ -93,12 +203,20 @@ def main_with_flag(results_dir, plot_scatter, plot_loss):
     else:
         print("test_metrics.csv not found.")
 
-def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=False, plot_scatter=True):
+def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=False, plot_scatter=True, selection=None):
     gt = pd.read_csv(gt_path)
     pred = pd.read_csv(pred_path)
     if per_column:
         # Per-column comparison for scalar
         for col in gt.columns:
+            # Normalize variable name by stripping Y_ for selection matching
+            col_norm = col[2:] if isinstance(col, str) and col.startswith('Y_') else col
+            # Skip Latitude/Longitude if top-bad-only was requested (selection provided)
+            if selection is not None and str(col_norm) in ('Latitude', 'Longitude'):
+                continue
+            # If selection provided, only include scalar variables present in selection
+            if selection is not None and col_norm not in selection:
+                continue
             if col in pred.columns:
                 print(f"Analyzing variable: {col}")
                 gt_col = gt[col].values.flatten()
@@ -177,7 +295,7 @@ def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=Fals
         })
         return {'rmse': rmse, 'mae': mae, 'r2': r2}
 
-def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True):
+def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True, selection=None):
     """Analyze 1D data using the new directory structure with individual variable files"""
     gt_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_ground_truth')
     pred_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_predictions')
@@ -205,6 +323,9 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             print(f"Missing prediction file for {var_name}: {pred_file}")
             continue
         
+        # Skip if restricting to top-bad variables and this variable is not selected
+        if selection is not None and var_name not in selection:
+            continue
         print(f"Analyzing variable: {var_name}")
         
         # Read data
@@ -227,6 +348,18 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
         print(f"  {var_name}: {num_pfts} PFT columns")
         
         for pft_idx, col_name in enumerate(gt_data.columns):
+            # If selection provided, attempt to parse PFT index from col_name like 'Y_var_pftX'
+            if selection is not None:
+                sel = selection.get(var_name, None)
+                if sel is not None and sel['pfts']:
+                    pft_match = re.search(r"pft(\d+)$", col_name)
+                    if pft_match:
+                        try:
+                            pft_num = int(pft_match.group(1))
+                            if pft_num not in sel['pfts']:
+                                continue
+                        except Exception:
+                            pass
             gt_col = gt_data[col_name].values
             pred_col = pred_data[col_name].values
             
@@ -279,7 +412,7 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 'pred_sum': pred_stats['sum']
             })
 
-def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True):
+def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True, selection=None):
     """Legacy function for old single-file 1D format - kept for compatibility"""
     gt = pd.read_csv(gt_path)
     pred = pd.read_csv(pred_path)
@@ -314,6 +447,9 @@ def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
     pred_reshaped = pred.values.reshape(num_samples, num_vars, num_pfts)
     # For each variable and each PFT column, compare
     for i, var in enumerate(variable_names):
+        # Skip if restricting to top-bad variables and this variable is not selected
+        if selection is not None and var not in selection:
+            continue
         print(f"Analyzing variable: {var}")
         for j in range(num_pfts):
             gt_col = gt_reshaped[:, i, j]
@@ -348,7 +484,7 @@ def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
                 'pred_sum': pred_stats['sum']
             })
 
-def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True):
+def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True, selection=None):
     """Analyze 2D data using the new directory structure with individual variable files"""
     gt_dir = os.path.join(results_dir, 'cnp_predictions', 'soil_2d_ground_truth')
     pred_dir = os.path.join(results_dir, 'cnp_predictions', 'soil_2d_predictions')
@@ -376,6 +512,9 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             print(f"Missing prediction file for {var_name}: {pred_file}")
             continue
             
+        # Skip if restricting to top-bad variables and this variable is not selected
+        if selection is not None and var_name not in selection:
+            continue
         print(f"Analyzing 2D variable: {var_name}")
         
         # Read data
@@ -413,6 +552,11 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
         layers_to_analyze = 10
         
         for layer_idx in range(layers_to_analyze):
+            # If selection provided, enforce layer filtering (1-based indexing in report)
+            if selection is not None:
+                sel = selection.get(var_name, None)
+                if sel is not None and sel['layers'] and (layer_idx + 1) not in sel['layers']:
+                    continue
             # Calculate the correct column index: first_column * 10 + layer
             # If only 10 columns exist, each column is a layer
             col_idx = layer_idx if num_columns == 1 else (first_column_idx * 10 + layer_idx)
@@ -487,7 +631,7 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
         except Exception as e:
             print(f"  Skipped overall plot for {var_name}: {e}")
 
-def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True):
+def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True, selection=None):
     """Legacy function for old single-file 2D format - kept for compatibility"""
     gt = pd.read_csv(gt_path)
     pred = pd.read_csv(pred_path)
@@ -517,8 +661,16 @@ def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
     pred_reshaped = pred.values.reshape(num_samples, num_vars, num_columns, num_layers_per_column)
     # For each variable, analyze all 10 layers of the first column
     for i, var in enumerate(variable_names):
+        # Skip if restricting to top-bad variables and this variable is not selected
+        if selection is not None and var not in selection:
+            continue
         print(f"Analyzing 2D variable: {var}")
         for j in range(10):  # Changed from 15 to 10 to analyze all predicted layers
+            # If selection provided, enforce layer filtering (1-based indexing in report)
+            if selection is not None:
+                sel = selection.get(var, None)
+                if sel is not None and sel['layers'] and (j + 1) not in sel['layers']:
+                    continue
             gt_col = gt_reshaped[:, i, 0, j]  # First column (index 0), all 10 layers
             pred_col = pred_reshaped[:, i, 0, j]  # First column (index 0), all 10 layers
             
@@ -581,6 +733,10 @@ if __name__ == '__main__':
     parser.add_argument('--no-plot-loss', action='store_false', dest='plot_loss', help='Do not plot train/val loss curve')
     # NEW: Stats-only mode disables all plots but still computes and saves statistics
     parser.add_argument('--stats-only', action='store_true', help='Only compute and save statistics CSV; do not generate any plots')
+    # NEW: Restrict plotting to top-bad or worst variables from summary report
+    parser.add_argument('--top-bad-only', action='store_true', help='Plot only variables listed in the quality summary top-bad section')
+    parser.add_argument('--worst-only', action='store_true', help='Plot only variables listed under \"Variables with Worst Predictions\"')
+    parser.add_argument('--top-bad-report', type=str, default=None, help='Path to quality_summary_report.txt (defaults to results_dir/analysis/quality_summary_report.txt)')
     
     parser.set_defaults(plot_scatter=True, plot_loss=True)
     args = parser.parse_args()
@@ -593,4 +749,4 @@ if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Using current directory as results directory")
     
-    main_with_flag(args.results_dir, args.plot_scatter, args.plot_loss)
+    main_with_flag(args.results_dir, args.plot_scatter, args.plot_loss, args.top_bad_only, args.top_bad_report, worst_only=getattr(args, 'worst_only', False))

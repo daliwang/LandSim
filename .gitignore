@@ -1,0 +1,6 @@
+# Ignore result and cache folders
+cnp_results/
+__pycache__/
+*.pyc
+logs/
+CNP_IO_updated9_dev.txt

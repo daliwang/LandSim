@@ -111,6 +111,62 @@ def _extract_variables_from_config(config_path: Path) -> dict:
         return None
 
 
+# New: load model_config from cnp_config.json for exact architecture reuse
+def _load_training_model_config_from_config(model_path: Path) -> dict:
+    """Load model_config dict from cnp_config.json in the training run directory."""
+    import json
+    try:
+        model_dir = Path(model_path).parent
+        # Search current and parent directories for cnp_config.json
+        candidate_paths = [model_dir / 'cnp_config.json'] + [p / 'cnp_config.json' for p in model_dir.parents]
+        for config_path in candidate_paths:
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        cfg = json.load(f)
+                    if isinstance(cfg, dict) and 'model_config' in cfg and isinstance(cfg['model_config'], dict):
+                        logging.info(f"Loaded model_config from {config_path}")
+                        return cfg['model_config']
+                except Exception as e:
+                    logging.warning(f"Failed reading model_config from {config_path}: {e}")
+                break
+        logging.warning("No model_config found in cnp_config.json near model path")
+    except Exception as e:
+        logging.warning(f"Error discovering model_config: {e}")
+    return None
+
+
+
+# Load training model architecture from cnp_config.json
+def _load_training_model_config(model_path: Path) -> dict:
+    """Load model_config (architecture) from cnp_config.json in the training run directory."""
+    import json
+    try:
+        model_dir = Path(model_path).parent
+        # Search model dir then parents
+        search_dirs = [model_dir] + list(model_dir.parents)
+        for d in search_dirs:
+            config_path = d / 'cnp_config.json'
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r') as f:
+                        cfg = json.load(f)
+                    mc = cfg.get('model_config')
+                    if isinstance(mc, dict) and mc:
+                        logging.info(f"Loaded training model_config from {config_path}")
+                        return mc
+                    else:
+                        logging.warning(f"model_config missing in {config_path}")
+                        return None
+                except Exception as e:
+                    logging.warning(f"Failed reading model_config from {config_path}: {e}")
+                    return None
+        logging.warning("No cnp_config.json found to load model_config (searched model dir and parents)")
+        return None
+    except Exception as e:
+        logging.warning(f"Error discovering training model_config: {e}")
+        return None
+
 
 
 
@@ -140,7 +196,8 @@ def run_inference_all(
     strict_loading: bool = True,
     debug_vars: bool = False,
     loader: str = 'auto',
-    mask_pft_with_gt: bool = False
+    mask_pft_with_gt: bool = False,
+    mask_absent_pfts: bool = True
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
@@ -187,9 +244,32 @@ def run_inference_all(
         variable_list_path=variable_list,
         model_config_path=model_config
     )
+    try:
+        config.update_training_config(mask_absent_pfts=bool(mask_absent_pfts))
+        logging.info(f"mask_absent_pfts set to {bool(mask_absent_pfts)}")
+    except Exception as e:
+        logging.warning(f"Failed to set mask_absent_pfts on training_config: {e}")
     if model_config is not None and use_training_config:
         logging.warning("--model-config provided along with --use-training-config; training config will still govern variables and scalers. Model overrides only affect architecture sizing.")
     
+    # Apply model_config from training cnp_config.json if requested
+    json_model_config = None
+    if use_training_config:
+        json_model_config = _load_training_model_config_from_config(Path(model_path))
+        if isinstance(json_model_config, dict):
+            applied = 0
+            for k, v in json_model_config.items():
+                if hasattr(config.model_config, k):
+                    try:
+                        setattr(config.model_config, k, v)
+                        applied += 1
+                    except Exception as e:
+                        logging.warning(f"Failed applying model_config.{k} from JSON: {e}")
+                else:
+                    # Some fields may be added dynamically later; log and skip
+                    logging.info(f"Ignoring unknown ModelConfig key in JSON: {k}")
+            logging.info(f"Applied {applied} model_config fields from training JSON")
+
     # CRITICAL FIX: Apply the loaded variable configuration to ensure model compatibility
     if variables is not None:
         logging.info("Applying variable configuration to model config...")
@@ -215,10 +295,13 @@ def run_inference_all(
         logging.info(f"  PFT 1D variables: {len(config.data_config.x_list_columns_1d)} variables")
         logging.info(f"  2D soil variables: {len(config.data_config.x_list_columns_2d)} variables")
         
-        # Update model configuration for output dimensions
-        config.model_config.scalar_output_size = len(config.data_config.x_list_scalar_columns)
-        config.model_config.vector_output_size = len(config.data_config.x_list_columns_1d)
-        config.model_config.matrix_output_size = len(config.data_config.x_list_columns_2d)
+        # Update model configuration for output dimensions only if not provided by JSON
+        if not (isinstance(json_model_config, dict) and 'scalar_output_size' in json_model_config):
+            config.model_config.scalar_output_size = len(config.data_config.x_list_scalar_columns)
+        if not (isinstance(json_model_config, dict) and 'vector_output_size' in json_model_config):
+            config.model_config.vector_output_size = len(config.data_config.x_list_columns_1d)
+        if not (isinstance(json_model_config, dict) and 'matrix_output_size' in json_model_config):
+            config.model_config.matrix_output_size = len(config.data_config.x_list_columns_2d)
         
         logging.info(f"Updated model output dimensions:")
         logging.info(f"  Scalar output size: {config.model_config.scalar_output_size}")
@@ -226,6 +309,28 @@ def run_inference_all(
         logging.info(f"  Matrix output size: {config.model_config.matrix_output_size}")
     else:
         logging.info("Using default configuration - no variable override applied")
+    
+    # CRITICAL FIX: Apply training architecture (model_config) so weights match exactly
+    if use_training_config:
+        training_model_cfg = _load_training_model_config(Path(model_path))
+        if training_model_cfg:
+            logging.info("Applying training model_config (architecture) from cnp_config.json...")
+            # Set attributes present in config.model_config
+            for key, value in training_model_cfg.items():
+                try:
+                    if hasattr(config.model_config, key):
+                        setattr(config.model_config, key, value)
+                except Exception as e:
+                    logging.warning(f"Failed to apply model_config key '{key}': {e}")
+            # Re-log a few critical dimensions
+            try:
+                logging.info(
+                    f"Architecture summary: lstm_hidden_size={getattr(config.model_config, 'lstm_hidden_size', 'NA')}, "
+                    f"pft_1d_fc_size={getattr(config.model_config, 'pft_1d_fc_size', 'NA')}, "
+                    f"transformer_layers={getattr(config.model_config, 'transformer_layers', 'NA')}"
+                )
+            except Exception:
+                pass
     
     # Update data config with provided paths and pattern
     config.data_config.data_paths = [data_paths]
@@ -599,6 +704,21 @@ def run_inference_all(
             logging.warning("Training scaler 'static' not found; leaving static unnormalized")
         static_t = torch.tensor(static_mat, dtype=dtype)
 
+        # PFT presence mask (from raw PCT_NAT_PFT_1..16) if requested
+        pft_presence_mask_t = None
+        if mask_absent_pfts:
+            try:
+                pct_cols = [f'PCT_NAT_PFT_{i}' for i in range(1, 17)]
+                if all(c in df.columns for c in pct_cols):
+                    pct = df[pct_cols].values.astype(np.float32)
+                    mask = (pct > 0.0).astype(np.float32)
+                    pft_presence_mask_t = torch.tensor(mask, dtype=dtype)
+                    logging.info("Created pft_presence_mask from PCT_NAT_PFT_1..16 (fallback path)")
+                else:
+                    logging.warning("PCT_NAT_PFT_1..16 columns missing; pft_presence_mask not created (fallback path)")
+            except Exception as e:
+                logging.warning(f"Failed to create pft_presence_mask in fallback path: {e}")
+
         # PFT param
         pp_cols = config.data_config.pft_param_columns
         num_pfts = 17
@@ -802,7 +922,7 @@ def run_inference_all(
             logging.warning("Training scaler 'y_soil_2d' not found; leaving y_soil_2d unnormalized (group)")
         y_soil_2d_t = torch.tensor(y_soil2d, dtype=dtype)
 
-        return {
+        ret = {
             'time_series_data': time_series_t,
             'static_data': static_t,
             'pft_param_data': pft_param_t,
@@ -815,6 +935,9 @@ def run_inference_all(
             'water': None,
             'y_water': None,
         }
+        if pft_presence_mask_t is not None:
+            ret['pft_presence_mask'] = pft_presence_mask_t
+        return ret
 
     # Normalize using training scalers by default (no refit), or refit if requested
     logging.info("Normalizing data using training-compatible method...")
@@ -844,6 +967,11 @@ def run_inference_all(
     # For inference, we use the test data (which contains all data when train_split=0.0)
     test_data = split_data['test']
     logging.info(f"Using test data for inference: {len(test_data)} data types")
+    if mask_absent_pfts:
+        if isinstance(test_data, dict) and 'pft_presence_mask' in test_data:
+            logging.info("pft_presence_mask available; mask_absent_pfts will be applied during evaluation")
+        else:
+            logging.warning("mask_absent_pfts enabled but pft_presence_mask missing; mask may not be applied")
     
     # Convert test_data to model_inputs format expected by the model
     model_inputs = {}
@@ -1037,6 +1165,32 @@ def run_inference_all(
                     model_inputs.get('variables_2d_soil')
                 )
     
+    # Optionally apply PFT absence mask before saving predictions
+    if mask_absent_pfts and isinstance(test_data, dict) and 'pft_presence_mask' in test_data and isinstance(predictions, dict) and 'pft_1d' in predictions:
+        try:
+            vec = predictions['pft_1d']
+            mask = test_data['pft_presence_mask']
+            if isinstance(vec, torch.Tensor) and isinstance(mask, torch.Tensor):
+                mask = mask.to(vec.device, non_blocking=True)
+                n_pfts = 16
+                # Determine number of variables
+                varnames = data_info.get('variables_1d_pft', []) if isinstance(data_info, dict) else []
+                if vec.dim() == 2:
+                    n_vars = len(varnames) if varnames else (vec.size(1) // n_pfts)
+                    vec = vec.view(vec.size(0), n_vars, n_pfts)
+                    reshaped = True
+                else:
+                    reshaped = False
+                if mask.dim() == 2:
+                    mask = mask.view(mask.size(0), 1, n_pfts)
+                vec = vec * mask
+                predictions['pft_1d'] = vec.view(vec.size(0), -1) if reshaped else vec
+                logging.info("Applied pft_presence_mask to PFT1D predictions before saving")
+        except Exception as e:
+            logging.warning(f"Failed to apply pft_presence_mask to predictions: {e}")
+    elif mask_absent_pfts:
+        logging.warning("mask_absent_pfts enabled but pft_presence_mask not available; predictions not masked")
+
     logging.info("Inference completed successfully")
     
     # Save results
@@ -1084,11 +1238,17 @@ def run_inference_all(
                     lat_idx = maybe_static_cols.index(lat_name)
                     longitude_values = maybe_static[:, lon_idx]
                     latitude_values = maybe_static[:, lat_idx]
-            # Fallback: use loader DataFrame if available
-            if (longitude_values is None or latitude_values is None) and hasattr(_loader, 'df') and isinstance(_loader.df, pd.DataFrame):
+            # Stronger preference: if the loader DataFrame has explicit coordinates, use those.
+            # This ensures we respect the exact site(s) selected for inference, even if static inverse lacks or mislabels coords.
+            if hasattr(_loader, 'df') and isinstance(_loader.df, pd.DataFrame):
                 if 'Longitude' in _loader.df.columns and 'Latitude' in _loader.df.columns:
-                    longitude_values = _loader.df['Longitude'].values[-len(test_data['static']):] if isinstance(test_data, dict) and 'static' in test_data else _loader.df['Longitude'].values
-                    latitude_values = _loader.df['Latitude'].values[-len(test_data['static']):] if isinstance(test_data, dict) and 'static' in test_data else _loader.df['Latitude'].values
+                    if isinstance(test_data, dict) and 'static' in test_data:
+                        n = len(test_data['static'])
+                        longitude_values = _loader.df['Longitude'].values[-n:]
+                        latitude_values = _loader.df['Latitude'].values[-n:]
+                    else:
+                        longitude_values = _loader.df['Longitude'].values
+                        latitude_values = _loader.df['Latitude'].values
         except Exception as _e_loc:
             logging.warning(f"Failed to prepare location vectors: {_e_loc}")
 
@@ -1168,6 +1328,16 @@ def run_inference_all(
                 except Exception:
                     gt_mask_per_var = None
 
+            # PFT presence mask (from PCT_NAT_PFT_1..16), applied after inverse transform
+            pft_presence_mask_np = None
+            if mask_absent_pfts and isinstance(test_data, dict) and 'pft_presence_mask' in test_data and hasattr(test_data['pft_presence_mask'], 'numel'):
+                try:
+                    ppm = test_data['pft_presence_mask'].detach().cpu().numpy()
+                    if ppm.ndim == 2 and ppm.shape[1] == num_pfts:
+                        pft_presence_mask_np = ppm
+                except Exception:
+                    pft_presence_mask_np = None
+
             # Write predictions per variable (denormalized when possible)
             for v in range(num_variables):
                 var_name = var_names[v]
@@ -1201,6 +1371,12 @@ def run_inference_all(
                     if gt_mask_per_var is not None and v < gt_mask_per_var.shape[1]:
                         mask_v = gt_mask_per_var[:, v, :]
                         var_predictions_original = var_predictions_original * mask_v.astype(var_predictions_original.dtype)
+                except Exception:
+                    pass
+                # Apply PFT presence mask (after inverse transform)
+                try:
+                    if pft_presence_mask_np is not None and pft_presence_mask_np.shape == var_predictions_original.shape:
+                        var_predictions_original = var_predictions_original * pft_presence_mask_np.astype(var_predictions_original.dtype)
                 except Exception:
                     pass
                 
@@ -1462,6 +1638,9 @@ def main():
     parser.add_argument("--debug-vars", action='store_true', help="Print detailed variable names and sample values during preprocessing/inference")
     parser.add_argument("--loader", choices=['auto','pandas','individual'], default='auto', help="Data loader to use (default: auto)")
     parser.add_argument("--mask-pft-with-gt", action='store_true', default=False, help="Mask PFT1D predictions by GT non-zero mask when available")
+    parser.add_argument("--mask-absent-pfts", dest="mask_absent_pfts", action="store_true", help="Mask absent PFTs using PCT_NAT_PFT_1..16 when available")
+    parser.add_argument("--no-mask-absent-pfts", dest="mask_absent_pfts", action="store_false", help="Disable masking of absent PFTs")
+    parser.set_defaults(mask_absent_pfts=True)
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
     args = parser.parse_args()
     
@@ -1482,6 +1661,7 @@ def main():
             , debug_vars=args.debug_vars
             , loader=args.loader
             , mask_pft_with_gt=args.mask_pft_with_gt
+            , mask_absent_pfts=args.mask_absent_pfts
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         
