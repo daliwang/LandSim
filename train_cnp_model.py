@@ -57,14 +57,16 @@ from scripts.run_inference_all import verify_locations
 
 def setup_logging(log_file: str, level: str = 'INFO') -> None:
     """Set up logging configuration with a specific log file."""
-    logging.basicConfig(
-        level=getattr(logging, level.upper()),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file)
-        ]
-    )
+    level_value = getattr(logging, level.upper(), logging.INFO)
+    fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    handlers = [
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(log_file)
+    ]
+    try:
+        logging.basicConfig(level=level_value, format=fmt, handlers=handlers, force=True)
+    except TypeError:
+        logging.basicConfig(level=level_value, format=fmt, handlers=handlers)
 
 
 def set_global_determinism(seed: int) -> None:
@@ -135,8 +137,8 @@ def main():
         '--epochs', '--epoch',
         dest='epochs',
         type=int,
-        default=150,
-        help='Number of training epochs'
+        default=None,
+        help='Number of training epochs (default: use value from --training-config-json, or 50)'
     )
     parser.add_argument(
         '--batch-size',
@@ -406,9 +408,9 @@ def main():
     output_dir = Path(args.output_dir) / f"run_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Setup logging with timestamped log file in output directory
+    # Setup logging with timestamped log file in output directory (default INFO so log file is populated)
     log_file = output_dir / f"cnp_training_{timestamp}.log"
-    setup_logging(str(log_file), args.log_level if args.log_level else 'WARNING')
+    setup_logging(str(log_file), args.log_level or 'INFO')
     logger = logging.getLogger(__name__)
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Normalization method: {args.normalization}")
@@ -655,20 +657,20 @@ def main():
                             if 'scheduler_gamma' in hyperparams:
                                 update_kwargs['scheduler_gamma'] = float(hyperparams['scheduler_gamma'])
                             
-                            # Loss weights (CLI takes precedence)
-                            if 'scalar_loss_weight' in hyperparams and args.scalar_loss_weight is None:
+                            # Loss weights (CLI takes precedence; use getattr so missing CLI args don't crash)
+                            if 'scalar_loss_weight' in hyperparams and getattr(args, 'scalar_loss_weight', None) is None:
                                 update_kwargs['scalar_loss_weight'] = float(hyperparams['scalar_loss_weight'])
-                            if 'vector_loss_weight' in hyperparams and args.vector_loss_weight is None:
+                            if 'vector_loss_weight' in hyperparams and getattr(args, 'vector_loss_weight', None) is None:
                                 update_kwargs['vector_loss_weight'] = float(hyperparams['vector_loss_weight'])
-                            if 'matrix_loss_weight' in hyperparams and args.matrix_loss_weight is None:
+                            if 'matrix_loss_weight' in hyperparams and getattr(args, 'matrix_loss_weight', None) is None:
                                 update_kwargs['matrix_loss_weight'] = float(hyperparams['matrix_loss_weight'])
-                            if 'xsmrpool_loss_weight' in hyperparams and args.xsmrpool_loss_weight is None:
+                            if 'xsmrpool_loss_weight' in hyperparams and getattr(args, 'xsmrpool_loss_weight', None) is None:
                                 update_kwargs['xsmrpool_loss_weight'] = float(hyperparams['xsmrpool_loss_weight'])
-                            if 'litter_c_loss_weight' in hyperparams and args.litter_c_loss_weight is None:
+                            if 'litter_c_loss_weight' in hyperparams and getattr(args, 'litter_c_loss_weight', None) is None:
                                 update_kwargs['litter_c_loss_weight'] = float(hyperparams['litter_c_loss_weight'])
-                            if 'litter_n_loss_weight' in hyperparams and args.litter_n_loss_weight is None:
+                            if 'litter_n_loss_weight' in hyperparams and getattr(args, 'litter_n_loss_weight', None) is None:
                                 update_kwargs['litter_n_loss_weight'] = float(hyperparams['litter_n_loss_weight'])
-                            if 'litter_p_loss_weight' in hyperparams and args.litter_p_loss_weight is None:
+                            if 'litter_p_loss_weight' in hyperparams and getattr(args, 'litter_p_loss_weight', None) is None:
                                 update_kwargs['litter_p_loss_weight'] = float(hyperparams['litter_p_loss_weight'])
                             
                             if update_kwargs:
@@ -707,8 +709,8 @@ def main():
                                     # We'll apply this after checking if normalization was explicitly set via CLI
                                     repro_config['_normalization_from_config'] = norm_val
                             
-                            # Dropout (CLI takes precedence)
-                            if 'dropout_p' in repro_config and args.dropout_p is None:
+                            # Dropout (CLI takes precedence; skip if null in JSON)
+                            if 'dropout_p' in repro_config and args.dropout_p is None and repro_config['dropout_p'] is not None:
                                 update_model_kwargs['dropout_p'] = float(repro_config['dropout_p'])
                             
                             if update_training_kwargs:
@@ -842,10 +844,11 @@ def main():
             logger.info(f"Using MAX_FILES from CNP_IO file: {config.data_config.max_files}")
         # Turn off GPU monitoring and debug logging
         config.update_training_config(log_gpu_memory=False, log_gpu_utilization=False)
-        # Override training parameters if specified
+        # Override training parameters if specified (CLI overrides config; if CLI not set, use config)
         effective_lr = args.learning_rate if args.learning_rate is not None else config.training_config.learning_rate
+        effective_epochs = args.epochs if args.epochs is not None else config.training_config.num_epochs
         config.update_training_config(
-            num_epochs=args.epochs,  
+            num_epochs=effective_epochs,
             batch_size=args.batch_size,
             learning_rate=effective_lr,
             model_save_path=str(output_dir / "cnp_model.pt"),
