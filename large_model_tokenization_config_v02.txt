@@ -1,0 +1,58 @@
+# Larger CNP Model configuration (tokenization-focused)
+# Intended as a heavier model than defaults.
+# Format: key = value. Lists can be comma-separated or Python lists.
+# Section headers (in brackets) are optional and ignored by the parser.
+
+[ENCODERS]
+# Time series tokenization (months per token)
+patch_size = 30
+
+# LSTM encoder
+lstm_hidden_size = 128
+
+# Fully connected layers
+fc_hidden_size = 64
+static_fc_size = 128
+
+# PFT parameters (enable CNN)
+use_cnn_for_pft_param = true
+pft_param_cnn_channels = [64, 128, 256]
+pft_param_cnn_kernel_size = 3
+pft_param_cnn_padding = 1
+pft_param_size = 44
+num_pfts = 17
+
+# Water encoder
+water_fc_size = 64
+
+# Scalar encoder
+scalar_fc_size = 128
+
+# 1D PFT encoder
+pft_1d_fc_size = 128
+
+[SOIL2D_CNN]
+conv_channels = [64, 128, 256]
+conv_kernel_size = 3
+conv_padding = 1
+
+[TRANSFORMER]
+# Feature fusion transformer
+embed_dim = 384
+num_tokens = 8
+token_dim = 384
+transformer_layers = 6
+transformer_heads = 8
+
+# Global dropout probability
+dropout_p = 0.1
+
+[OUTPUTS]
+# Output geometry (do not set scalar/vector/matrix sizes here)
+vector_length = 16
+matrix_rows = 1
+matrix_cols = 10
+
+# Usage:
+#   python train_cnp_model.py --model-config large_model_tokenization_config_v02.txt
+#   python scripts/run_inference_all.py --model-config large_model_tokenization_config_v02.txt

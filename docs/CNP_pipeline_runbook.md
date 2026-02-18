@@ -26,6 +26,87 @@ python train_cnp_model.py --variable-list CNP_IO_demo.txt --epoch 100 \
   --tropical-only --tropical-lat-range -23.5,23.5 --tropical-lat-column Latitude
 ```
 
+### 2b) Configure Training Parameters (Optional)
+
+You can customize training behavior using a unified configuration JSON file that consolidates all user-defined settings:
+
+**Unified Config File (Recommended):**
+Create a single JSON file (`config/training_config_unified.json`) with all training parameters:
+
+```json
+{
+  "variable_weights": {
+    "pft1d_weights": {"cpool": 2.0, "npool": 2.0, "tlai": 3.0},
+    "soil2d_weights": {"primp_vr": 3.0, "litr2p_vr": 5.0},
+    "scalar_weights": {"GPP": 1.5, "NPP": 1.5}
+  },
+  "tail_aware_weights": {
+    "cpool": 5.0,
+    "deadstemc": 5.0,
+    "litr2p_vr": 5.0
+  },
+  "pft_zero_sparsity_weights": {
+    "cpool": 1.0,
+    "deadstemc": 1.0
+  },
+  "pft1d_activation_overrides": {
+    "cpool": "abs",
+    "deadstemc": "abs"
+  }
+}
+```
+
+Then use it during training:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt \
+  --training-config-json config/training_config_unified.json \
+  --epoch 100
+```
+
+**Individual Config Files (Legacy, Still Supported):**
+You can also use separate JSON files for each configuration type:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt \
+  --variable-weights-json config/variable_weights_config.json \
+  --tail-aware-weights-json list1_tail_weights.json \
+  --pft-zero-sparsity-weights-json pft_zero_weights.json \
+  --pft1d-activation-overrides-json pft1d_activation_overrides.json \
+  --epoch 100
+```
+
+**Mixing Unified + Individual Files:**
+You can use unified config as a base and override specific sections:
+```bash
+python train_cnp_model.py --variable-list CNP_IO_demo.txt \
+  --training-config-json config/training_config_unified.json \
+  --tail-aware-weights-json custom_tail_weights.json \
+  --epoch 100
+```
+
+**Configuration Sections:**
+- `variable_weights`: Per-variable loss weights for PFT1D, Soil2D, and Scalar outputs
+- `tail_aware_weights`: Multipliers for tail-aware loss on heavy-tailed variables
+- `pft_zero_sparsity_weights`: Weights for PFT zero sparsity penalty
+- `pft1d_activation_overrides`: Per-variable activation function overrides
+
+**Documentation:**
+- See `config/UNIFIED_CONFIG_README.md` for detailed unified config usage
+- See `config/VARIABLE_WEIGHTS_README.md` for variable weights details
+
+**Repeat experiment_2 (run_20260212_162802_experiment_2):**  
+To reproduce the same setup as the reference experiment_2 run:
+
+```bash
+python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config-json config/training_config_experiment_2.json \
+  --pft-zero-sparsity-weight 1.0 \
+  --epoch 100 \
+  --tropical-only
+```
+
+Data paths and file pattern come from your CNP_IO file. The run used `1_training_data_batch_*.pkl` under the paths listed in the variable list. Mask absent PFTs and other options were applied from the unified config.
+
 ### 2a) Fine-tune a pretrained model (optional)
 If you already have a trained checkpoint and want to continue training on a TVA-style dataset, use the fine-tuning helper. Populate the necessary paths in your CNP_IO file (e.g. `CNP_IO_updated9_dev_gao.txt`):
 
@@ -60,7 +141,7 @@ cd cnp_results/run_YYYYMMDD_HHMMSS  # e.g., cnp_results/run_20250815_205419
 Generates quick statistics and a prediction quality report. The report now also creates filtered plots for the “top variables by bad-count”.
 
 ```bash
-python ../../scripts/cnp_result_validationplot.py --stats-only
+python ../../scripts/cnp_result_validationplot.py --stats-only && \
 python ../../scripts/generate_prediction_quality_report.py
 ```
 
@@ -103,8 +184,16 @@ Options and behavior:
 Creates a folder `cnp_inference_entire_dataset` with AI predictions for the entire dataset.
 
 ```bash
-python ../../scripts/run_inference_all.py > run_inference_all.log 2>&1 &
+python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset > run_inference_all.log 2>&1 &
 ```
+
+**CNP stoichiometric ratio enforcement (optional):** To enforce C:N and C:P ratios by deriving N/P from C predictions after inference, add `--derive-np-from-c`:
+
+```bash
+python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c > run_inference_all.log 2>&1 &
+```
+
+This overwrites N/P prediction files with stoichiometrically consistent values. Training should still use the full CNP variable list. See **CNP ratio and derivation docs** below.
 
 ### 6) Export AI predictions to NetCDF
 Creates a NetCDF file containing all AI predictions for plotting and comparison:
@@ -140,7 +229,10 @@ python ../../scripts/ai_predictions_to_restart.py > ai_predictions_to_restart.lo
 ```
 
 Outputs a new restart file derived from
-`original_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc`.
+default= `20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc`
+old file is :`original_20250408_trendytest_ICB1850CNPRDCTCBC.elm.r.0021-01-01-00000.nc`.
+
+
 
 #### 8.1) Tropical-only merge into a global restart file
 If your inference was generated with `--tropical-only`, you can overwrite only tropical gridcells in a global restart file while keeping non-tropical regions unchanged.
@@ -227,3 +319,20 @@ python scripts/extract_elm_restart_point.py \
   --lon -84.208336(Target longitude coordinate) \
   --output-file single_point_extracted.nc
 ```
+
+---
+
+### CNP stoichiometry and derivation (docs)
+
+Documentation for enforcing C:N and C:P ratios and deriving N/P from C at inference:
+
+| Doc | Description |
+|-----|-------------|
+| `docs/CNP_RATIO_ENFORCEMENT_USAGE.md` | **How to enable** ratio enforcement: `--derive-np-from-c`, standalone script, validation |
+| `docs/CNP_DERIVATION_CLARIFICATION.md` | Why train full CNP (not C-only) and derive N/P at inference |
+| `docs/CNP_DERIVATION_APPROACH.md` | Rationale and benefits of the derivation approach |
+| `docs/CNP_DERIVATION_IMPLEMENTATION.md` | Implementation details and ratio definitions |
+| `docs/DERIVATION_RESULTS_INTERPRETATION.md` | How to interpret derivation and ratio validation results |
+| `docs/CNP_STOICHIOMETRIC_RELATIONSHIPS.md` | Underlying CNP ratio relationships and target variables |
+
+Scripts: `scripts/derive_np_from_c.py`, `scripts/validate_cnp_ratios.py`.

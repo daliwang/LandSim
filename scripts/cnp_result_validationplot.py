@@ -7,6 +7,18 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import json
 from glob import glob
 
+# Canonical definitions: "All layers" = 10 layers; "All PFTs" = PFT 1 through PFT 16 only (not others).
+NUM_LAYERS = 10   # All layers (soil/2D) = exactly 10 layers
+NUM_PFTS = 16     # All PFTs (1D) = pft1 to pft16 only
+
+# Plot output subfolders (under plots/ or top_bad_plots/):
+#   aggregate_all  - one scatter per variable combining all PFTs (1D) or all layers (2D)
+#   aggregate_bad  - one scatter per variable combining only bad/selected PFTs or layers (when using top-bad report)
+#   by_pft_layer   - one scatter per PFT (1D), per layer (2D), or per scalar variable
+SUBDIR_ALLLAYER = "aggregate_all"
+SUBDIR_BADLAYER = "aggregate_bad"
+SUBDIR_INDIVIDUAL = "by_pft_layer"
+
 def plot_gt_vs_pred(gt, pred, title, save_path):
     plt.figure(figsize=(6,6))
     plt.scatter(gt, pred, alpha=0.5)
@@ -113,9 +125,11 @@ def _parse_worst_vars_report(report_path):
     return selection
 
 def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top_bad_report=None, plots_dir_override=None, worst_only=False):
-    # Create plots subdirectory
+    # Create plots subdirectory and subfolders for organization
     plots_dir = plots_dir_override or os.path.join(results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
+    for sub in (SUBDIR_ALLLAYER, SUBDIR_BADLAYER, SUBDIR_INDIVIDUAL):
+        os.makedirs(os.path.join(plots_dir, sub), exist_ok=True)
     
     # NEW: Create stats file
     stats_path = os.path.join(results_dir, "validation_stats.csv")
@@ -206,13 +220,22 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
 def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=False, plot_scatter=True, selection=None):
     gt = pd.read_csv(gt_path)
     pred = pd.read_csv(pred_path)
+    # Drop coordinate columns so they are never included in scatter plots or metrics
+    _coord_cols = ['long', 'lat', 'Long', 'Lat', 'Longitude', 'Latitude']
+    for c in _coord_cols:
+        if c in gt.columns:
+            gt = gt.drop(columns=[c])
+        if c in pred.columns:
+            pred = pred.drop(columns=[c])
     if per_column:
+        # Coordinate columns to never include in scatter plots or metrics
+        coord_cols = {'long', 'lat', 'Long', 'Lat', 'Longitude', 'Latitude'}
         # Per-column comparison for scalar
         for col in gt.columns:
             # Normalize variable name by stripping Y_ for selection matching
             col_norm = col[2:] if isinstance(col, str) and col.startswith('Y_') else col
-            # Skip Latitude/Longitude if top-bad-only was requested (selection provided)
-            if selection is not None and str(col_norm) in ('Latitude', 'Longitude'):
+            # Always skip coordinate columns - do not include in any scatter variable plots
+            if str(col) in coord_cols or str(col_norm) in coord_cols:
                 continue
             # If selection provided, only include scalar variables present in selection
             if selection is not None and col_norm not in selection:
@@ -237,7 +260,7 @@ def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=Fals
                 
                 # Conditionally plot
                 if plot_scatter:
-                    plot_gt_vs_pred(gt_col, pred_col, f"{label} {col} GT vs Pred", os.path.join(out_dir, f"{label}_{col}_gt_vs_pred.png"))
+                    plot_gt_vs_pred(gt_col, pred_col, f"{label} {col} GT vs Pred", os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_{col}_gt_vs_pred.png"))
                 
                 # Collect stats
                 stats_data.append({
@@ -277,7 +300,7 @@ def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=Fals
         
         # Conditionally plot
         if plot_scatter:
-            plot_gt_vs_pred(gt_flat, pred_flat, f"{label} GT vs Pred", os.path.join(out_dir, f"{label}_gt_vs_pred.png"))
+            plot_gt_vs_pred(gt_flat, pred_flat, f"{label} GT vs Pred", os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_gt_vs_pred.png"))
         
         # Collect stats
         stats_data.append({
@@ -323,16 +346,12 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             print(f"Missing prediction file for {var_name}: {pred_file}")
             continue
         
-        # Skip if restricting to top-bad variables and this variable is not selected
-        if selection is not None and var_name not in selection:
-            continue
-        print(f"Analyzing variable: {var_name}")
-        
-        # Read data
+        # Read data (needed for both per-PFT and AllPFTs)
         gt_data = pd.read_csv(gt_file)
         pred_data = pd.read_csv(pred_file)
-        # Drop 'long' and 'lat' columns if present
-        for col in ['long', 'lat']:
+        # Drop coordinate columns so they are not included in scatter plots or metrics
+        coord_cols = ['long', 'lat', 'Long', 'Lat', 'Longitude', 'Latitude']
+        for col in coord_cols:
             if col in gt_data.columns:
                 gt_data = gt_data.drop(columns=[col])
             if col in pred_data.columns:
@@ -342,12 +361,21 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
         if gt_data.shape != pred_data.shape:
             print(f"Shape mismatch for {var_name}: GT {gt_data.shape} vs Pred {pred_data.shape}")
             continue
+
+        # When using selection (top-bad only): skip this variable for per-PFT plots if not selected,
+        # but we still generate the AllPFTs plot for every variable so AllPFTs are never "missing".
+        in_selection = selection is None or var_name in selection
+        if in_selection:
+            print(f"Analyzing variable: {var_name}")
         
-        # Analyze each PFT column (assuming columns are PFTs)
+        # Analyze each PFT column (only for selected variables when selection is set)
         num_pfts = gt_data.shape[1]
-        print(f"  {var_name}: {num_pfts} PFT columns")
+        if in_selection:
+            print(f"  {var_name}: {num_pfts} PFT columns")
         
         for pft_idx, col_name in enumerate(gt_data.columns):
+            if not in_selection:
+                continue  # Only plot per-PFT for selected variables; AllPFTs still generated below
             # If selection provided, attempt to parse PFT index from col_name like 'Y_var_pftX'
             if selection is not None:
                 sel = selection.get(var_name, None)
@@ -393,7 +421,7 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 plot_gt_vs_pred(
                     gt_valid, pred_valid, 
                     f"{label} {col_name} GT vs Pred", 
-                    os.path.join(out_dir, f"{label}_{col_name}_gt_vs_pred.png")
+                    os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_{col_name}_gt_vs_pred.png")
                 )
             
             # Collect stats
@@ -411,13 +439,86 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 'pred_max': pred_stats['max'],
                 'pred_sum': pred_stats['sum']
             })
+        
+        # When not in top-bad mode: provide overall scatter across all PFTs (aggregate_all).
+        # When selection is set (top_bad_plots), skip so we only get aggregate_bad and by_pft_layer.
+        if selection is None:
+            try:
+                pft_cols = []
+                for col in gt_data.columns:
+                    m = re.search(r"pft(\d+)$", col)
+                    if m and 1 <= int(m.group(1)) <= NUM_PFTS:
+                        pft_cols.append(col)
+                if pft_cols and all(c in pred_data.columns for c in pft_cols):
+                    gt_all_pfts = gt_data[pft_cols].values.flatten()
+                    pred_all_pfts = pred_data[pft_cols].values.flatten()
+                else:
+                    gt_all_pfts = gt_data.values.flatten()
+                    pred_all_pfts = pred_data.values.flatten()
+                valid_mask = ~(np.isnan(gt_all_pfts) | np.isnan(pred_all_pfts))
+                if np.sum(valid_mask) >= 3 and plot_scatter:
+                    plot_gt_vs_pred(
+                        gt_all_pfts[valid_mask], pred_all_pfts[valid_mask],
+                        f"{label} {var_name} AllPFTs (pft1–pft{NUM_PFTS}) GT vs Pred",
+                        os.path.join(out_dir, SUBDIR_ALLLAYER, f"{label}_{var_name}_AllPFTs_gt_vs_pred.png")
+                    )
+            except Exception as e:
+                print(f"  Skipped aggregated AllPFTs plot for {var_name}: {e}")
+
+        # When selection (top-bad) is used: also plot just the bad PFTs aggregated together.
+        if selection is not None and var_name in selection and plot_scatter:
+            sel = selection.get(var_name, None)
+            if sel and sel.get('pfts'):
+                try:
+                    bad_pft_nums = sorted(sel['pfts'])
+                    pft_cols = []
+                    for col in gt_data.columns:
+                        m = re.search(r"pft(\d+)$", col)
+                        if m:
+                            pft_num = int(m.group(1))
+                            if pft_num in bad_pft_nums:
+                                pft_cols.append(col)
+                    if pft_cols and all(c in pred_data.columns for c in pft_cols):
+                        gt_bad = gt_data[pft_cols].values.flatten()
+                        pred_bad = pred_data[pft_cols].values.flatten()
+                        valid_mask = ~(np.isnan(gt_bad) | np.isnan(pred_bad))
+                        if np.sum(valid_mask) >= 3:
+                            pft_str = ",".join(str(p) for p in bad_pft_nums)
+                            plot_gt_vs_pred(
+                                gt_bad[valid_mask], pred_bad[valid_mask],
+                                f"{label} {var_name} BadPFTs (pfts {pft_str}) GT vs Pred",
+                                os.path.join(out_dir, SUBDIR_BADLAYER, f"{label}_{var_name}_BadPFTs_gt_vs_pred.png")
+                            )
+                except Exception as e:
+                    print(f"  Skipped BadPFTs plot for {var_name}: {e}")
+            
+            # Also generate aggregate_all plot for this bad variable (all PFTs, not just bad ones)
+            try:
+                pft_cols_all = []
+                for col in gt_data.columns:
+                    m = re.search(r"pft(\d+)$", col)
+                    if m and 1 <= int(m.group(1)) <= NUM_PFTS:
+                        pft_cols_all.append(col)
+                if pft_cols_all and all(c in pred_data.columns for c in pft_cols_all):
+                    gt_all_pfts = gt_data[pft_cols_all].values.flatten()
+                    pred_all_pfts = pred_data[pft_cols_all].values.flatten()
+                    valid_mask = ~(np.isnan(gt_all_pfts) | np.isnan(pred_all_pfts))
+                    if np.sum(valid_mask) >= 3:
+                        plot_gt_vs_pred(
+                            gt_all_pfts[valid_mask], pred_all_pfts[valid_mask],
+                            f"{label} {var_name} AllPFTs (pft1–pft{NUM_PFTS}) GT vs Pred",
+                            os.path.join(out_dir, SUBDIR_ALLLAYER, f"{label}_{var_name}_AllPFTs_gt_vs_pred.png")
+                        )
+            except Exception as e:
+                print(f"  Skipped aggregate_all AllPFTs plot for {var_name}: {e}")
 
 def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True, selection=None):
     """Legacy function for old single-file 1D format - kept for compatibility"""
     gt = pd.read_csv(gt_path)
     pred = pd.read_csv(pred_path)
-    # Drop 'long' and 'lat' columns if present
-    for col in ['long', 'lat']:
+    # Drop coordinate columns so they are not included in scatter plots or metrics
+    coord_cols = ['long', 'lat', 'Long', 'Lat', 'Longitude', 'Latitude']
+    for col in coord_cols:
         if col in gt.columns:
             gt = gt.drop(columns=[col])
         if col in pred.columns:
@@ -435,7 +536,7 @@ def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
         print(f'[ERROR] cnp_config.json not found in {results_dir}!')
         return
     num_vars = len(variable_names)
-    num_pfts = 16  # pft0 is dropped in training
+    num_pfts = NUM_PFTS  # All PFTs = pft1 to pft16 only (pft0 is dropped in training)
     num_samples = gt.shape[0]
     expected_cols = num_vars * num_pfts
     print(f"[DEBUG] 1D: num_samples={num_samples}, num_vars={num_vars}, num_pfts={num_pfts}, expected_cols={expected_cols}, actual_cols={gt.shape[1]}")
@@ -452,6 +553,11 @@ def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
             continue
         print(f"Analyzing variable: {var}")
         for j in range(num_pfts):
+            # If selection provided, enforce PFT filtering (1-based indexing in report)
+            if selection is not None:
+                sel = selection.get(var, None)
+                if sel is not None and sel['pfts'] and (j + 1) not in sel['pfts']:
+                    continue
             gt_col = gt_reshaped[:, i, j]
             pred_col = pred_reshaped[:, i, j]
             # Use column name if available
@@ -467,7 +573,7 @@ def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
             print(f"  Pred - min: {pred_stats['min']:.6g}, max: {pred_stats['max']:.6g}, sum: {pred_stats['sum']:.6g}")
             # Plot using column name
             if plot_scatter:
-                plot_gt_vs_pred(gt_col, pred_col, f"{label} {col_name} GT vs Pred", os.path.join(out_dir, f"{label}_{col_name}_gt_vs_pred.png"))
+                plot_gt_vs_pred(gt_col, pred_col, f"{label} {col_name} GT vs Pred", os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_{col_name}_gt_vs_pred.png"))
             # Collect stats
             stats_data.append({
                 'type': '1D',
@@ -532,24 +638,24 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             print(f"Shape mismatch for {var_name}: GT {gt_data.shape} vs Pred {pred_data.shape}")
             continue
         
-        # 2D data has 1 columns × 10 layers = 10 total columns (only first 10 layers predicted)
+        # 2D data: All layers = NUM_LAYERS (10) only.
         total_columns = gt_data.shape[1]
-        expected_columns = 1 * 10  # 10
+        expected_columns = 1 * NUM_LAYERS  # 10 layers
         
         if total_columns != expected_columns:
             print(f"  Warning: Expected {expected_columns} columns for 2D data, but found {total_columns}")
-            if total_columns % 10 != 0:
-                print(f"  Error: Number of columns ({total_columns}) is not divisible by 10")
+            if total_columns % NUM_LAYERS != 0:
+                print(f"  Error: Number of columns ({total_columns}) is not divisible by {NUM_LAYERS}")
                 continue
-            num_columns = total_columns // 10
-            print(f"  Assuming {num_columns} columns with 10 layers each")
+            num_columns = total_columns // NUM_LAYERS
+            print(f"  Assuming {num_columns} columns with {NUM_LAYERS} layers each")
         else:
             num_columns = 1
-            print(f"  {var_name}: {num_columns} columns, each with 10 layers ({total_columns} total columns)")
+            print(f"  {var_name}: {num_columns} columns, each with {NUM_LAYERS} layers ({total_columns} total columns)")
         
-        # Analyze all 10 layers of the first column (new prediction format stores only first column)
+        # Analyze all NUM_LAYERS (10) layers of the first column (new prediction format stores only first column)
         first_column_idx = 0
-        layers_to_analyze = 10
+        layers_to_analyze = NUM_LAYERS
         
         for layer_idx in range(layers_to_analyze):
             # If selection provided, enforce layer filtering (1-based indexing in report)
@@ -557,9 +663,8 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 sel = selection.get(var_name, None)
                 if sel is not None and sel['layers'] and (layer_idx + 1) not in sel['layers']:
                     continue
-            # Calculate the correct column index: first_column * 10 + layer
-            # If only 10 columns exist, each column is a layer
-            col_idx = layer_idx if num_columns == 1 else (first_column_idx * 10 + layer_idx)
+            # Calculate the correct column index: first_column * NUM_LAYERS + layer
+            col_idx = layer_idx if num_columns == 1 else (first_column_idx * NUM_LAYERS + layer_idx)
             if col_idx >= total_columns:
                 print(f"    Warning: Column index {col_idx} out of range for {total_columns} columns")
                 continue
@@ -597,7 +702,7 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 plot_gt_vs_pred(
                     gt_valid, pred_valid, 
                     f"{label} {var_name} Layer{layer_idx+1} GT vs Pred", 
-                    os.path.join(out_dir, f"{label}_{var_name}_Layer{layer_idx+1}_gt_vs_pred.png")
+                    os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_{var_name}_Layer{layer_idx+1}_gt_vs_pred.png")
                 )
             
             # Collect stats
@@ -616,20 +721,57 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 'pred_sum': pred_stats['sum']
             })
 
-        # Also provide an overall scatter across all 10 layers of the first column
-        try:
-            gt_firstcol = gt_data.iloc[:, 0:10].values.flatten()
-            pred_firstcol = pred_data.iloc[:, 0:10].values.flatten()
-            valid_mask = ~(np.isnan(gt_firstcol) | np.isnan(pred_firstcol))
-            if np.sum(valid_mask) >= 3:
-                if plot_scatter:
+        # When not in top-bad mode: overall scatter across all layers (aggregate_all).
+        # When selection is set (top_bad_plots), skip so we only get aggregate_bad and by_pft_layer.
+        if selection is None:
+            try:
+                gt_firstcol = gt_data.iloc[:, 0:NUM_LAYERS].values.flatten()
+                pred_firstcol = pred_data.iloc[:, 0:NUM_LAYERS].values.flatten()
+                valid_mask = ~(np.isnan(gt_firstcol) | np.isnan(pred_firstcol))
+                if np.sum(valid_mask) >= 3 and plot_scatter:
                     plot_gt_vs_pred(
                         gt_firstcol[valid_mask], pred_firstcol[valid_mask],
-                        f"{label} {var_name} FirstCol(10 layers) GT vs Pred",
-                        os.path.join(out_dir, f"{label}_{var_name}_FirstCol_AllLayers_gt_vs_pred.png")
+                        f"{label} {var_name} FirstCol({NUM_LAYERS} layers) GT vs Pred",
+                        os.path.join(out_dir, SUBDIR_ALLLAYER, f"{label}_{var_name}_FirstCol_AllLayers_gt_vs_pred.png")
                     )
-        except Exception as e:
-            print(f"  Skipped overall plot for {var_name}: {e}")
+            except Exception as e:
+                print(f"  Skipped overall plot for {var_name}: {e}")
+
+        # When selection (top-bad) is used: also plot just the bad layers aggregated together.
+        if selection is not None and var_name in selection and plot_scatter:
+            sel = selection.get(var_name, None)
+            if sel and sel.get('layers'):
+                try:
+                    bad_layer_nums = sorted(sel['layers'])
+                    # Layer numbers in report are 1-based; columns are 0-based
+                    col_indices = [l - 1 for l in bad_layer_nums if 1 <= l <= NUM_LAYERS]
+                    if col_indices:
+                        gt_bad = gt_data.iloc[:, col_indices].values.flatten()
+                        pred_bad = pred_data.iloc[:, col_indices].values.flatten()
+                        valid_mask = ~(np.isnan(gt_bad) | np.isnan(pred_bad))
+                        if np.sum(valid_mask) >= 3:
+                            layer_str = ",".join(str(l) for l in bad_layer_nums)
+                            plot_gt_vs_pred(
+                                gt_bad[valid_mask], pred_bad[valid_mask],
+                                f"{label} {var_name} BadLayers ({layer_str}) GT vs Pred",
+                                os.path.join(out_dir, SUBDIR_BADLAYER, f"{label}_{var_name}_BadLayers_gt_vs_pred.png")
+                            )
+                except Exception as e:
+                    print(f"  Skipped BadLayers plot for {var_name}: {e}")
+            
+            # Also generate aggregate_all plot for this bad variable (all layers, not just bad ones)
+            try:
+                gt_all_layers = gt_data.iloc[:, 0:NUM_LAYERS].values.flatten()
+                pred_all_layers = pred_data.iloc[:, 0:NUM_LAYERS].values.flatten()
+                valid_mask = ~(np.isnan(gt_all_layers) | np.isnan(pred_all_layers))
+                if np.sum(valid_mask) >= 3:
+                    plot_gt_vs_pred(
+                        gt_all_layers[valid_mask], pred_all_layers[valid_mask],
+                        f"{label} {var_name} FirstCol({NUM_LAYERS} layers) GT vs Pred",
+                        os.path.join(out_dir, SUBDIR_ALLLAYER, f"{label}_{var_name}_FirstCol_AllLayers_gt_vs_pred.png")
+                    )
+            except Exception as e:
+                print(f"  Skipped aggregate_all AllLayers plot for {var_name}: {e}")
 
 def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot_scatter=True, selection=None):
     """Legacy function for old single-file 2D format - kept for compatibility"""
@@ -649,7 +791,7 @@ def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
         return
     num_vars = len(variable_names)
     num_columns = 18  # 2D soil data has 18 columns
-    num_layers_per_column = 10  # Each column has 10 layers (only first 10 predicted)
+    num_layers_per_column = NUM_LAYERS  # All layers = 10 only
     num_samples = gt.shape[0]
     expected_cols = num_vars * num_columns * num_layers_per_column
     print(f"[DEBUG] 2D: num_samples={num_samples}, num_vars={num_vars}, num_columns={num_columns}, layers_per_column={num_layers_per_column}, expected_cols={expected_cols}, actual_cols={gt.shape[1]}")
@@ -665,7 +807,7 @@ def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
         if selection is not None and var not in selection:
             continue
         print(f"Analyzing 2D variable: {var}")
-        for j in range(10):  # Changed from 15 to 10 to analyze all predicted layers
+        for j in range(NUM_LAYERS):  # All layers = 10 only
             # If selection provided, enforce layer filtering (1-based indexing in report)
             if selection is not None:
                 sel = selection.get(var, None)
@@ -686,7 +828,7 @@ def analyze_2d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
             print(f"  Pred - min: {pred_stats['min']:.6g}, max: {pred_stats['max']:.6g}, sum: {pred_stats['sum']:.6g}")
             
             if plot_scatter:
-                plot_gt_vs_pred(gt_col, pred_col, f"{label} {var} Layer{j+1} GT vs Pred", os.path.join(out_dir, f"{label}_{var}_Layer{j+1}_gt_vs_pred.png"))
+                plot_gt_vs_pred(gt_col, pred_col, f"{label} {var} Layer{j+1} GT vs Pred", os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_{var}_Layer{j+1}_gt_vs_pred.png"))
             # Collect stats
             stats_data.append({
                 'type': '2D',

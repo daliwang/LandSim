@@ -12,8 +12,8 @@ from typing import Optional, List
 
 def main():
     parser = argparse.ArgumentParser(description='Generate prediction quality report from validation statistics')
-    parser.add_argument('--input', default="./validation_stats.csv",
-                        help='Path to validation statistics CSV file')
+    parser.add_argument('input', nargs='?', default="./validation_stats.csv",
+                        help='Path to validation statistics CSV file (default: ./validation_stats.csv)')
     parser.add_argument('--output-dir', default=None,
                         help='Directory to save output files (default: same directory as input + /analysis)')
     parser.add_argument('--training-config', default=None,
@@ -58,6 +58,14 @@ def main():
     # Plot only variables listed in "Variables with Worst Predictions"
     parser.add_argument('--worst-only', dest='worst_only', action='store_true', default=False,
                         help='Plot only variables in the "Variables with Worst Predictions" section')
+    parser.add_argument('--worst-filter-bad-only', dest='worst_filter_bad_only', action='store_true', default=True,
+                        help='Filter worst variables to only include those with bad predictions (bad_pct > 0). Default: True')
+    parser.add_argument('--no-worst-filter-bad-only', dest='worst_filter_bad_only', action='store_false',
+                        help='Include all variables in worst list, even if 0%% bad (sorted by good_pct)')
+    parser.add_argument('--worst-min-good-pct', type=float, default=None,
+                        help='Include variables in worst list with good_pct below this threshold (e.g., 50.0 for <50%% good)')
+    parser.add_argument('--worst-vars-list', type=str, default=None,
+                        help='Comma-separated list of specific variables to include in worst list (e.g., "cpool,npool,ppool")')
     args = parser.parse_args()
     
     # Set up input and output paths
@@ -337,6 +345,47 @@ def main():
             top_bad_out = str((output_dir / 'top_bad_plots').resolve())
             (output_dir / 'top_bad_plots').mkdir(parents=True, exist_ok=True)
 
+            # Pre-write "Top variables by bad-count" to the report so the plot script can read it
+            # (the full report is written later; this ensures top_bad selection is available when plotting)
+            if not args.worst_only and not bad_df.empty:
+                try:
+                    report_path = output_dir / 'quality_summary_report.txt'
+                    with open(report_path, 'w') as _pref:
+                        _pref.write("# Prediction Quality Summary Report\n\n")
+                        _pref.write("Top variables by bad-count (with PFT indices or layer numbers):\n")
+                        bad_by_var = bad_df.groupby('variable').size().sort_values(ascending=False).head(25)
+                        for v, c in bad_by_var.items():
+                            sub = bad_df[bad_df['variable'] == v]
+                            pft_indices = []
+                            for val in sub['pft'].dropna().unique():
+                                if isinstance(val, str) and 'pft' in val:
+                                    try:
+                                        idx = ''.join(ch for ch in val.split('pft')[-1] if ch.isdigit())
+                                        if idx:
+                                            pft_indices.append(int(idx))
+                                    except Exception:
+                                        continue
+                            pft_indices = sorted(set(pft_indices))
+                            layer_numbers = []
+                            for lay in sub['layer'].dropna().unique():
+                                try:
+                                    li = int(lay) if float(lay).is_integer() else float(lay)
+                                    layer_numbers.append(li)
+                                except Exception:
+                                    continue
+                            layer_numbers = sorted(set(layer_numbers))
+                            details_parts = []
+                            if pft_indices:
+                                details_parts.append("pfts: " + ", ".join(str(i) for i in pft_indices))
+                            if layer_numbers:
+                                details_parts.append("layers: " + ", ".join(str(i) for i in layer_numbers))
+                            details = ("; " + " ".join(details_parts)) if details_parts else ""
+                            _pref.write(f"  {v}: {c}{details}\n")
+                        _pref.write("\n")
+                    print(f"Wrote top-bad section for plot selection: {report_path}")
+                except Exception as _e:
+                    print(f"Warning: Failed to pre-write top-bad section: {_e}")
+
             # If worst-only requested, pre-write a minimal 'Variables with Worst Predictions' section
             if args.worst_only:
                 try:
@@ -382,7 +431,7 @@ def main():
                     print(f"Top-bad plots saved to: {top_bad_out}")
                     try:
                         # Count the number of PNGs generated for quick reporting
-                        top_bad_plot_count = len(list((output_dir / 'top_bad_plots').glob('*.png')))
+                        top_bad_plot_count = len(list((output_dir / 'top_bad_plots').rglob('*.png')))
                         print(f"Top-bad plot count: {top_bad_plot_count}")
                     except Exception:
                         top_bad_plot_count = 0
@@ -510,11 +559,107 @@ def main():
         if 'good_pct' in variable_summary.columns:
             _vs2 = variable_summary.copy()
             _vs2['good_pct'] = _vs2['good_pct'].fillna(0)
-            _vs2['ok_pct'] = _vs2.get('ok_pct', 0)
-            _vs2['bad_pct'] = _vs2.get('bad_pct', 0)
-            worst_vars = _vs2.nsmallest(15, 'good_pct')
+            if 'ok_pct' in _vs2.columns:
+                _vs2['ok_pct'] = _vs2['ok_pct'].fillna(0)
+            else:
+                _vs2['ok_pct'] = 0
+            if 'bad_pct' in _vs2.columns:
+                _vs2['bad_pct'] = _vs2['bad_pct'].fillna(0)
+            else:
+                _vs2['bad_pct'] = 0
+            
+            # Apply filtering based on user options
+            _vs2_filtered = _vs2.copy()
+            
+            # Filter 1: By default, only include variables with bad predictions (bad_pct > 0)
+            if args.worst_filter_bad_only:
+                if 'bad_pct' in _vs2_filtered.columns:
+                    _vs2_filtered = _vs2_filtered[_vs2_filtered['bad_pct'] > 0].copy()
+            
+            # Filter 2: Include variables with good_pct below threshold if specified
+            if args.worst_min_good_pct is not None:
+                _vs2_filtered = _vs2_filtered[_vs2_filtered['good_pct'] < args.worst_min_good_pct].copy()
+            
+            # Filter 3: Include specific variables if list provided
+            if args.worst_vars_list:
+                var_list = [v.strip() for v in args.worst_vars_list.split(',')]
+                # Add specified variables even if they don't meet other filters
+                specified_vars = _vs2[_vs2.index.isin(var_list)].copy()
+                _vs2_filtered = pd.concat([_vs2_filtered, specified_vars]).drop_duplicates()
+            
+            # Sort by bad_pct (highest first), then by good_pct (lowest first) for tie-breaking
+            if 'bad_pct' in _vs2_filtered.columns and len(_vs2_filtered) > 0:
+                worst_vars = _vs2_filtered.nlargest(15, 'bad_pct').nsmallest(15, 'good_pct')
+            elif len(_vs2_filtered) > 0:
+                worst_vars = _vs2_filtered.nsmallest(15, 'good_pct')
+            else:
+                worst_vars = pd.DataFrame()
+            
             for var_name, row in worst_vars.iterrows():
                 f.write(f"{var_name}: {row.get('good_pct', 0):.1f}% good, {row.get('ok_pct', 0):.1f}% ok, {row.get('bad_pct', 0):.1f}% bad\n")
+        
+        # Group all variables by dominant quality category
+        f.write("\n## All Variables Grouped by Quality Category\n")
+        if 'good_pct' in variable_summary.columns:
+            _vs3 = variable_summary.copy()
+            _vs3['good_pct'] = _vs3['good_pct'].fillna(0)
+            if 'ok_pct' in _vs3.columns:
+                _vs3['ok_pct'] = _vs3['ok_pct'].fillna(0)
+            else:
+                _vs3['ok_pct'] = 0
+            if 'bad_pct' in _vs3.columns:
+                _vs3['bad_pct'] = _vs3['bad_pct'].fillna(0)
+            else:
+                _vs3['bad_pct'] = 0
+            
+            # Determine dominant category for each variable (highest percentage)
+            def get_dominant_category(row):
+                good_pct = row['good_pct'] if 'good_pct' in row.index else 0
+                ok_pct = row['ok_pct'] if 'ok_pct' in row.index else 0
+                bad_pct = row['bad_pct'] if 'bad_pct' in row.index else 0
+                if good_pct >= ok_pct and good_pct >= bad_pct:
+                    return 'good'
+                elif ok_pct >= bad_pct:
+                    return 'ok'
+                else:
+                    return 'bad'
+            
+            _vs3['dominant_category'] = _vs3.apply(get_dominant_category, axis=1)
+            
+            # Group variables by category
+            good_vars = _vs3[_vs3['dominant_category'] == 'good'].sort_values('good_pct', ascending=False)
+            ok_vars = _vs3[_vs3['dominant_category'] == 'ok'].sort_values('ok_pct', ascending=False)
+            bad_vars = _vs3[_vs3['dominant_category'] == 'bad'].sort_values('bad_pct', ascending=False)
+            
+            f.write(f"\n### Good Variables ({len(good_vars)} total)\n")
+            if len(good_vars) > 0:
+                for var_name, row in good_vars.iterrows():
+                    good_val = row['good_pct'] if 'good_pct' in row.index else 0
+                    ok_val = row['ok_pct'] if 'ok_pct' in row.index else 0
+                    bad_val = row['bad_pct'] if 'bad_pct' in row.index else 0
+                    f.write(f"{var_name}: {good_val:.1f}% good, {ok_val:.1f}% ok, {bad_val:.1f}% bad\n")
+            else:
+                f.write("None\n")
+            
+            f.write(f"\n### OK Variables ({len(ok_vars)} total)\n")
+            if len(ok_vars) > 0:
+                for var_name, row in ok_vars.iterrows():
+                    good_val = row['good_pct'] if 'good_pct' in row.index else 0
+                    ok_val = row['ok_pct'] if 'ok_pct' in row.index else 0
+                    bad_val = row['bad_pct'] if 'bad_pct' in row.index else 0
+                    f.write(f"{var_name}: {good_val:.1f}% good, {ok_val:.1f}% ok, {bad_val:.1f}% bad\n")
+            else:
+                f.write("None\n")
+            
+            f.write(f"\n### Bad Variables ({len(bad_vars)} total)\n")
+            if len(bad_vars) > 0:
+                for var_name, row in bad_vars.iterrows():
+                    good_val = row['good_pct'] if 'good_pct' in row.index else 0
+                    ok_val = row['ok_pct'] if 'ok_pct' in row.index else 0
+                    bad_val = row['bad_pct'] if 'bad_pct' in row.index else 0
+                    f.write(f"{var_name}: {good_val:.1f}% good, {ok_val:.1f}% ok, {bad_val:.1f}% bad\n")
+            else:
+                f.write("None\n")
         
         # Report variables missing from the stats but present in training
         if expected_vars:
@@ -742,6 +887,128 @@ def main():
                     <td>{row.get('bad_pct', 0):.1f}%</td>
                 </tr>
         """
+    
+    # Add all variables grouped by quality category
+    html_content += """
+            </table>
+            
+            <h2>All Variables Grouped by Quality Category</h2>
+    """
+    
+    # Prepare grouped variables data
+    _vs_html = variable_summary.copy()
+    if 'good_pct' in _vs_html.columns:
+        _vs_html['good_pct'] = _vs_html['good_pct'].fillna(0)
+        if 'ok_pct' in _vs_html.columns:
+            _vs_html['ok_pct'] = _vs_html['ok_pct'].fillna(0)
+        else:
+            _vs_html['ok_pct'] = 0
+        if 'bad_pct' in _vs_html.columns:
+            _vs_html['bad_pct'] = _vs_html['bad_pct'].fillna(0)
+        else:
+            _vs_html['bad_pct'] = 0
+        
+        # Determine dominant category
+        def get_dominant_category_html(row):
+            good_pct = row['good_pct'] if 'good_pct' in row.index else 0
+            ok_pct = row['ok_pct'] if 'ok_pct' in row.index else 0
+            bad_pct = row['bad_pct'] if 'bad_pct' in row.index else 0
+            if good_pct >= ok_pct and good_pct >= bad_pct:
+                return 'good'
+            elif ok_pct >= bad_pct:
+                return 'ok'
+            else:
+                return 'bad'
+        
+        _vs_html['dominant_category'] = _vs_html.apply(get_dominant_category_html, axis=1)
+        
+        good_vars_html = _vs_html[_vs_html['dominant_category'] == 'good'].sort_values('good_pct', ascending=False)
+        ok_vars_html = _vs_html[_vs_html['dominant_category'] == 'ok'].sort_values('ok_pct', ascending=False)
+        bad_vars_html = _vs_html[_vs_html['dominant_category'] == 'bad'].sort_values('bad_pct', ascending=False)
+        
+        # Good variables table
+        html_content += f"""
+            <h3>Good Variables ({len(good_vars_html)} total)</h3>
+            <table>
+                <tr>
+                    <th>Variable</th>
+                    <th>Good (%)</th>
+                    <th>OK (%)</th>
+                    <th>Bad (%)</th>
+                </tr>
+        """
+        if len(good_vars_html) > 0:
+            for var_name, row in good_vars_html.iterrows():
+                good_val = row['good_pct'] if 'good_pct' in row.index else 0
+                ok_val = row['ok_pct'] if 'ok_pct' in row.index else 0
+                bad_val = row['bad_pct'] if 'bad_pct' in row.index else 0
+                html_content += f"""
+                    <tr>
+                        <td>{var_name}</td>
+                        <td>{good_val:.1f}%</td>
+                        <td>{ok_val:.1f}%</td>
+                        <td>{bad_val:.1f}%</td>
+                    </tr>
+                """
+        else:
+            html_content += "<tr><td colspan='4'>None</td></tr>"
+        html_content += "</table>"
+        
+        # OK variables table
+        html_content += f"""
+            <h3>OK Variables ({len(ok_vars_html)} total)</h3>
+            <table>
+                <tr>
+                    <th>Variable</th>
+                    <th>Good (%)</th>
+                    <th>OK (%)</th>
+                    <th>Bad (%)</th>
+                </tr>
+        """
+        if len(ok_vars_html) > 0:
+            for var_name, row in ok_vars_html.iterrows():
+                good_val = row['good_pct'] if 'good_pct' in row.index else 0
+                ok_val = row['ok_pct'] if 'ok_pct' in row.index else 0
+                bad_val = row['bad_pct'] if 'bad_pct' in row.index else 0
+                html_content += f"""
+                    <tr>
+                        <td>{var_name}</td>
+                        <td>{good_val:.1f}%</td>
+                        <td>{ok_val:.1f}%</td>
+                        <td>{bad_val:.1f}%</td>
+                    </tr>
+                """
+        else:
+            html_content += "<tr><td colspan='4'>None</td></tr>"
+        html_content += "</table>"
+        
+        # Bad variables table
+        html_content += f"""
+            <h3>Bad Variables ({len(bad_vars_html)} total)</h3>
+            <table>
+                <tr>
+                    <th>Variable</th>
+                    <th>Good (%)</th>
+                    <th>OK (%)</th>
+                    <th>Bad (%)</th>
+                </tr>
+        """
+        if len(bad_vars_html) > 0:
+            for var_name, row in bad_vars_html.iterrows():
+                good_val = row['good_pct'] if 'good_pct' in row.index else 0
+                ok_val = row['ok_pct'] if 'ok_pct' in row.index else 0
+                bad_val = row['bad_pct'] if 'bad_pct' in row.index else 0
+                html_content += f"""
+                    <tr>
+                        <td>{var_name}</td>
+                        <td>{good_val:.1f}%</td>
+                        <td>{ok_val:.1f}%</td>
+                        <td>{bad_val:.1f}%</td>
+                    </tr>
+                """
+        else:
+            html_content += "<tr><td colspan='4'>None</td></tr>"
+        html_content += "</table>"
     
     # Add missing variables section if available
     if expected_vars:

@@ -547,6 +547,24 @@ class CNPCombinedModel(nn.Module):
         n_vars = len(pft_1d_varnames)
         n_pfts = getattr(self, 'vector_length', 16)
 
+        def _apply_pft1d_activation(var_name: str, x: torch.Tensor) -> torch.Tensor:
+            activation = getattr(self.model_config, 'pft1d_activation', 'abs')
+            overrides = getattr(self.model_config, 'pft1d_activation_overrides', {}) or {}
+            key = var_name
+            if key in overrides:
+                activation = overrides[key]
+            elif f'Y_{key}' in overrides:
+                activation = overrides[f'Y_{key}']
+            activation = str(activation).lower()
+            if activation == 'relu':
+                return torch.relu(x)
+            if activation == 'softplus':
+                return torch.nn.functional.softplus(x)
+            if activation == 'linear':
+                return x
+            # default abs
+            return torch.abs(x)
+
         if pft_out.dim() == 2 and pft_out.shape[1] == n_vars * n_pfts:
             pft_reshaped = pft_out.view(-1, n_vars, n_pfts)
             processed_slices = []
@@ -557,10 +575,10 @@ class CNPCombinedModel(nn.Module):
                     else:
                         processed_slices.append(torch.clamp(pft_reshaped[:, i, :], max=0.0).unsqueeze(1))
                 else:
-                    processed_slices.append(torch.relu(pft_reshaped[:, i, :]).unsqueeze(1))
+                    processed_slices.append(_apply_pft1d_activation(var_name, pft_reshaped[:, i, :]).unsqueeze(1))
             pft_final = torch.cat(processed_slices, dim=1)
             outputs['pft_1d'] = pft_final.view(-1, n_vars * n_pfts)
         else:
-            outputs['pft_1d'] = torch.relu(pft_out) # Simple ReLU fallback
+            outputs['pft_1d'] = _apply_pft1d_activation('default', pft_out)
 
         return outputs
