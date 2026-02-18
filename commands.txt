@@ -161,3 +161,9 @@ python train_cnp_model.py \
   --training-config config/training_config_experiment_2_plus.json \
   --epoch 80 \
   --tropical-only
+
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_2.json \
+  --tropical-only
