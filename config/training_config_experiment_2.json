@@ -1,0 +1,131 @@
+{
+  "training_hyperparameters": {
+    "num_epochs": 100,
+    "batch_size": 128,
+    "learning_rate": 0.0001,
+    "optimizer_type": "adam",
+    "weight_decay": 0.0,
+    "use_scheduler": false,
+    "xsmrpool_loss_weight": 10.0,
+    "litter_c_loss_weight": 1.0,
+    "litter_n_loss_weight": 1.0,
+    "litter_p_loss_weight": 1.0,
+    "scalar_loss_weight": 1.0,
+    "vector_loss_weight": 1.0,
+    "matrix_loss_weight": 1.0
+  },
+  "reproducibility_config": {
+    "random_seed": 42,
+    "strict_determinism": false,
+    "train_split": 0.8,
+    "normalization": "individual",
+    "dropout_p": null
+  },
+  "data_filtering_config": {
+    "tropical_only": true,
+    "tropical_lat_range": [-23.5, 23.5]
+  },
+  "variable_weights": {
+    "pft1d_weights": {
+      "cpool": 6,
+      "npool": 8,
+      "ppool": 8,
+      "totvegc": 6,
+      "leafc": 6,
+      "leafn": 6,
+      "leafp": 6,
+      "leafc_storage": 5,
+      "leafn_storage": 5,
+      "leafp_storage": 5,
+      "deadstemc": 6,
+      "deadstemn": 6,
+      "deadstemp": 5,
+      "frootc": 4,
+      "frootn": 4,
+      "frootp": 4,
+      "frootc_storage": 3,
+      "frootn_storage": 3,
+      "frootp_storage": 3,
+      "tlai": 4
+    },
+    "soil2d_weights": {
+      "primp_vr": 9,
+      "litr2c_vr": 8,
+      "litr2p_vr": 8,
+      "litr2n_vr": 8,
+      "soil1c_vr": 7,
+      "soil1n_vr": 7,
+      "soil1p_vr": 7,
+      "litr3n_vr": 5,
+      "labilep_vr": 5,
+      "secondp_vr": 2.5,
+      "solutinorganicp_vr": 5,
+      "litr3p_vr": 5
+    },
+    "scalar_weights": {
+      "GPP": 1.5,
+      "NPP": 1.5,
+      "AR": 1.2,
+      "HR": 1.2
+    }
+  },
+  "tail_aware_config": {
+    "loss": "log1p_mse",
+    "epsilon": 1e-8
+  },
+  "tail_aware_weights": {
+    "cpool": 6,
+    "deadstemc": 6,
+    "deadcrootc": 5,
+    "livestemc": 5,
+    "livecrootc": 5,
+    "npool": 8,
+    "ppool": 8,
+    "totvegc": 6,
+    "leafc": 6,
+    "leafn": 6,
+    "leafp": 6,
+    "leafc_storage": 5,
+    "leafn_storage": 5,
+    "leafp_storage": 5,
+    "deadstemp": 5,
+    "deadstemn": 6,
+    "frootc": 4,
+    "frootn": 4,
+    "frootp": 4,
+    "labilep": 5,
+    "labilep_vr": 5,
+    "primp_vr": 9,
+    "litr2c_vr": 8,
+    "litr2p_vr": 8,
+    "litr2n_vr": 8,
+    "litr3c_vr": 5,
+    "litr3p_vr": 5,
+    "litr3n_vr": 5,
+    "soil1c_vr": 7,
+    "soil1n_vr": 7,
+    "soil1p_vr": 7
+  },
+  "pft_mask_config": {
+    "mask_absent_pfts": true,
+    "pft_presence_threshold": 0.0
+  },
+  "pft_zero_sparsity_config": {
+    "weight": 1.0,
+    "threshold": 1e-8
+  },
+  "pft_zero_sparsity_weights": {
+    "cpool": 2,
+    "deadstemc": 1,
+    "deadcrootc": 1,
+    "livestemc": 1,
+    "livecrootc": 1
+  },
+  "pft1d_activation_overrides": {
+    "cpool": "abs",
+    "deadstemc": "abs",
+    "deadcrootc": "abs",
+    "livestemc": "abs",
+    "livecrootc": "abs"
+  }
+}

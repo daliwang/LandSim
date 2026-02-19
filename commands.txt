@@ -112,7 +112,7 @@ python train_cnp_model.py \
   --variable-list CNP_IO_updated9_dev_dw.txt \
   --training-config-json config/training_config_experiment_2.json \
   --pft-zero-sparsity-weight 1.0 \
-  --epoch 50 \
+  --epoch 80 \
   --tropical-only \
   2>&1 | tee training_cpool_experiment.log &
 
@@ -160,4 +160,10 @@ python train_cnp_model.py \
   --variable-list CNP_IO_updated9_dev_dw.txt \
   --training-config config/training_config_experiment_2_plus.json \
   --epoch 80 \
+  --tropical-only
+
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw_repeat.txt \
+  --training-config config/training_config_experiment_2_repeat.json \
   --tropical-only
