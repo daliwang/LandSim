@@ -197,7 +197,10 @@ def run_inference_all(
     debug_vars: bool = False,
     loader: str = 'auto',
     mask_pft_with_gt: bool = False,
-    mask_absent_pfts: bool = True
+    mask_absent_pfts: bool = True,
+    tropical_only: bool = False,
+    tropical_lat_range: tuple = None,
+    tropical_lat_column: str = None
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
@@ -244,6 +247,18 @@ def run_inference_all(
         variable_list_path=variable_list,
         model_config_path=model_config
     )
+    # Optional tropical-only filtering (apply before data loading)
+    if tropical_only:
+        tropical_kwargs = {'tropical_only': True}
+        if isinstance(tropical_lat_range, tuple) and len(tropical_lat_range) == 2:
+            tropical_kwargs['tropical_lat_range'] = tropical_lat_range
+        if tropical_lat_column:
+            tropical_kwargs['tropical_lat_column'] = str(tropical_lat_column).strip()
+        try:
+            config.update_data_config(**tropical_kwargs)
+            logging.info(f"Enabled tropical filtering: {tropical_kwargs}")
+        except Exception as e:
+            logging.warning(f"Failed to apply tropical filtering config: {e}")
     try:
         config.update_training_config(mask_absent_pfts=bool(mask_absent_pfts))
         logging.info(f"mask_absent_pfts set to {bool(mask_absent_pfts)}")
@@ -1642,12 +1657,26 @@ def main():
     parser.add_argument("--no-mask-absent-pfts", dest="mask_absent_pfts", action="store_false", help="Disable masking of absent PFTs")
     parser.set_defaults(mask_absent_pfts=True)
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
+    parser.add_argument("--tropical-only", action='store_true', help="Filter dataset to tropical latitude band before inference")
+    parser.add_argument("--tropical-lat-range", type=str, default=None, help='Latitude range for tropical filter, format "min,max" (default: -23.5,23.5)')
+    parser.add_argument("--tropical-lat-column", type=str, default=None, help="Latitude column name override (default: auto-detect from static columns)")
     args = parser.parse_args()
     
     # Setup logging
     logging.basicConfig(level=logging.INFO)
     
     try:
+        tropical_lat_range = None
+        if args.tropical_lat_range:
+            try:
+                parts = [p.strip() for p in str(args.tropical_lat_range).split(',')]
+                if len(parts) == 2:
+                    tropical_lat_range = (float(parts[0]), float(parts[1]))
+                else:
+                    logging.warning("Invalid --tropical-lat-range; expected format 'min,max'. Using default.")
+            except Exception:
+                logging.warning("Failed to parse --tropical-lat-range; using default.")
+
         output_path = run_inference_all(
             model_path=args.model,
             data_paths=args.data_paths,
@@ -1662,6 +1691,9 @@ def main():
             , loader=args.loader
             , mask_pft_with_gt=args.mask_pft_with_gt
             , mask_absent_pfts=args.mask_absent_pfts
+            , tropical_only=args.tropical_only
+            , tropical_lat_range=tropical_lat_range
+            , tropical_lat_column=args.tropical_lat_column
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         
