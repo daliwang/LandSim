@@ -210,5 +210,5 @@ python ../../scripts/ai_model_comparison_plot.py \
   --ai-predictions comparison_results/ai_predictions_for_plotting_cnpratio.nc \
   --model ../../ELM_data/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc \
   --output-dir ./ai_vs_restart_all_plots \
-  --variable-list ../../CNP_IO_updated9_dev_dw.txt --variable-all \
+  --variable-list ../../CNP_IO_updated9_dev_dw.txt  \
    > ai_model_all_comparison.log 2>&1 &

@@ -802,10 +802,13 @@ Examples:
         ds_model = xr.open_dataset(args.model)
 
     # Determine variable selection behavior
+    # Use variable list when: --variables all, or --variable-list given without --variables (use all vars from that file), or --stats-only + --variable-list
     requested_all = False
     if args.variables:
         requested_all = (len(args.variables) == 1 and str(args.variables[0]).lower() == 'all')
     if args.stats_only and args.variable_list:
+        requested_all = True
+    if args.variable_list and '--variables' not in sys.argv:
         requested_all = True
 
     variable_category_map = build_variable_category_map(args.variable_list) if args.variable_list else {}

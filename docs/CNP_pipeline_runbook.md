@@ -145,6 +145,22 @@ python ../../scripts/cnp_result_validationplot.py --stats-only && \
 python ../../scripts/generate_prediction_quality_report.py
 ```
 
+### 4.0.1) Validate predictions in `cnp_inference_entire_dataset` (inference subdirectory)
+If inference wrote outputs under a subdirectory (e.g. `cnp_inference_entire_dataset/` with `cnp_predictions/` inside it), run validation by passing that directory. From the **run** directory (e.g. `cnp_results/run_YYYYMMDD_HHMMSS`):
+
+```bash
+# One-time: copy run config into the inference dir so validation can read variable lists (if not already there)
+cp cnp_config.json cnp_inference_entire_dataset/ 2>/dev/null || true
+
+# Stats + quality report for the inference subdirectory
+python ../../scripts/cnp_result_validationplot.py cnp_inference_entire_dataset --stats-only && \
+python ../../scripts/generate_prediction_quality_report.py cnp_inference_entire_dataset/validation_stats.csv
+```
+
+- First command writes `cnp_inference_entire_dataset/validation_stats.csv`.
+- Second reads that CSV and writes `cnp_inference_entire_dataset/analysis/` (quality report, plots, `quality_summary_report.txt`, `top_bad_plots/`, etc.).
+- Replace `cnp_inference_entire_dataset` with your actual inference subdirectory name if different.
+
 ### 4.1) Highlight a site in all scatter plots (optional)
 Highlight a given site (lon/lat) in every GT vs Pred scatter plot. The site will be marked as a red star.
 
