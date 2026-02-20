@@ -1,4 +1,50 @@
 #!/usr/bin/env python3
+"""
+Compare AI CNP predictions with reference (model) or with CSV exports.
+
+Design:
+  - Primary: AI predictions NetCDF vs model (ELM) NetCDF.
+    Use --ai-predictions and --model (and --compare-to model to avoid CSV).
+
+  - Optional: AI predictions NetCDF vs CSV predictions (same run, two formats).
+    Use --csv-predictions for a consistency check. Use --compare-to csv or auto.
+
+How AI vs model comparison works (different internal formats):
+
+  The AI NetCDF and the model restart NetCDF do not have the same internal
+  layout. The script bridges them as follows.
+
+  Required for both:
+    - grid1d_lon, grid1d_lat (1D arrays of length n_gridcell)
+    - Same variable names (e.g. cwdc_vr, tlai) for the fields to compare
+
+  AI NetCDF (e.g. from ai_predictions_to_netcdf.py):
+    - One gridcell per land point; dimension "gridcell".
+    - Scalars: (gridcell).
+    - PFT variables: (pft, gridcell) with pft size 16.
+    - Soil/column variables: (column, levgrnd, gridcell) with column size 1,
+      levgrnd size 10 (one column per gridcell).
+
+  Model (ELM) NetCDF:
+    - Many columns and PFT instances; each is linked to a gridcell via
+      cols1d_gridcell_index and pfts1d_gridcell_index (1-based or 0-based).
+    - Scalars: often (gridcell).
+    - Column variables: (column, levgrnd) — column index maps to gridcell.
+    - PFT variables: (pft) — pft index maps to gridcell.
+
+  The script:
+    1. Builds a spatial mapping: for each AI gridcell (lon, lat), finds the
+       closest model gridcell (nearest-neighbor).
+    2. For each model gridcell g: gets AI value from the AI gridcell that
+       maps to g; gets model value from the model’s column/pft indices for g
+       (e.g. first column and PFT 1–16 for that gridcell).
+    3. Plots and stats are on the model grid (one value per model gridcell).
+
+  So the AI NetCDF must be in the “plotting” format produced by
+  ai_predictions_to_netcdf.py (grid1d_lon/lat, gridcell, pft/gridcell,
+  column/levgrnd/gridcell). If your AI NetCDF has a different layout, convert
+  it first or extend this script to support that layout.
+"""
 import os
 import numpy as np
 import xarray as xr
@@ -21,19 +67,20 @@ from config.training_config import parse_cnp_io_list
 
 # Default paths
 FALLBACK_AI_PREDICTIONS = './comparison_results/ai_predictions_for_plotting.nc'
-FALLBACK_MODEL = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+#FALLBACK_MODEL = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+FALLBACK_MODEL = '/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc'
 FALLBACK_OUTPUT_DIR = "./ai_model_comparison_plots"
 FALLBACK_CSV_PREDICTIONS = './cnp_inference_entire_dataset/cnp_predictions'
 
 # Default variables to plot unless '--variables all' is used
-VARIABLES = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc']
+VARIABLES = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc', 'cpool', 'npool', 'ppool', 'primp_vr', 'secondp_vr', 'litr2c_vr', 'litr2n_vr', 'litr2p_vr', 'soil1c_vr', 'soil1n_vr', 'soil1p_vr']
 
 # Layers for column-type variables (AI has 10 layers, model has 15)
-LEVGRND_LAYERS = [0, 4, 9]  # Layers 0, 4, 9 (corresponding to AI layers 1, 5, 10)
+LEVGRND_LAYERS = [0,1,2,3,4,5,6,7,8,9]  # Layers 0, 4, 9 (corresponding to AI layers 1, 5, 10)
 
 # PFTs to plot (AI has PFT1-16, model has PFT0-16)
 # Note: AI PFT0 = Model PFT1, AI PFT1 = Model PFT2, etc.
-PFT_PICK_LIST = [0, 1, 2, 3, 4]  # PFT1, PFT2, PFT3, PFT4, PFT5 (0-indexed, so 0=PFT1, 1=PFT2, etc.)
+PFT_PICK_LIST = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # PFT1, PFT2, PFT3, PFT4, PFT5 (0-indexed, so 0=PFT1, 1=PFT2, etc.)
 
 CSV_LONGITUDE_NAMES = ("Longitude", "Long", "long", "lon", "LON")
 CSV_LATITUDE_NAMES = ("Latitude", "Lat", "lat", "LAT")
@@ -706,11 +753,15 @@ Examples:
         return fallback
 
     args.ai_predictions = _resolve_default(args.ai_predictions, 'ai_predictions_default', FALLBACK_AI_PREDICTIONS)
+    user_provided_model = (args.model is not None)
     args.model = _resolve_default(args.model, 'model_default', FALLBACK_MODEL)
     args.output_dir = _resolve_default(args.output_dir, 'comparison_output_dir', FALLBACK_OUTPUT_DIR)
     args.csv_predictions = _resolve_default(args.csv_predictions, 'csv_predictions_default', FALLBACK_CSV_PREDICTIONS)
 
-    use_csv_predictions = bool(args.csv_predictions)
+    # If user passed --model (or --restart-file), compare to that file; otherwise use CSV if path exists
+    use_csv_predictions = bool(args.csv_predictions) and not user_provided_model
+    if getattr(args, 'restart_file', None):
+        use_csv_predictions = False
     if args.stats_only:
         args.no_plot = True
 
@@ -807,7 +858,7 @@ Examples:
                     ds_ai.close(); ds_model.close()
                     return
     else:
-        forced = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc']
+        forced = list(VARIABLES)
         if use_csv_predictions:
             selected = [
                 v for v in forced

@@ -167,3 +167,48 @@ python train_cnp_model.py \
   --variable-list CNP_IO_updated9_dev_dw_repeat.txt \
   --training-config config/training_config_experiment_2_repeat.json \
   --tropical-only
+
+  python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c > run_inference_all.log 2>&1 &
+
+
+    python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_2_global.json \
+    2>&1 | tee cnp_experiment2_global.log &
+
+    python ../../scripts/cnp_result_validationplot.py --stats-only && \
+    python ../../scripts/generate_prediction_quality_report.py
+
+    python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c > run_inference_all.log 2>&1 &
+
+
+        python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_3_global.json \
+    2>&1 | tee cnp_experiment3_global.log &
+
+  python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c > run_inference_all.log 2>&1 &
+
+  ln -s /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260219_132504_experiment3_global_repeat_unifiedconfig/cnp_inference_entire_dataset_cnpratio cnp_inference_entire_dataset
+
+  python ../../scripts/ai_predictions_to_netcdf.py  > ai_prediction_to_netcdf.log 2>&1    
+
+  python ../../scripts/ai_model_comparison_plot.py \
+  --ai-predictions /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260219_132504_experiment3_global_repeat_unifiedconfig/comparison_results/ai_predictions_for_plotting_cnpratio.nc \
+  --output-dir ./ai_cnpratio_model_comparison_plots
+
+  compare with CSV file by default (quality check)
+
+
+  python ../../scripts/ai_model_comparison_plot.py \
+  --ai-predictions comparison_results/ai_predictions_for_plotting_cnpratio.nc \
+  --model ../../ELM_data/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc \
+  --output-dir ./ai_vs_restart_plots
+
+
+python ../../scripts/ai_model_comparison_plot.py \
+  --ai-predictions comparison_results/ai_predictions_for_plotting_cnpratio.nc \
+  --model ../../ELM_data/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc \
+  --output-dir ./ai_vs_restart_all_plots \
+  --variable-list ../../CNP_IO_updated9_dev_dw.txt --variable-all \
+   > ai_model_all_comparison.log 2>&1 &

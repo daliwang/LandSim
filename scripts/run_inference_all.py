@@ -252,6 +252,27 @@ def run_inference_all(
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
+    # Resolve model path: training may save cnp_model.pt in run root or model.pth in cnp_predictions/
+    model_path = str(Path(model_path).resolve())
+    p = Path(model_path)
+    if not p.exists():
+        candidates = [
+            p.parent / "cnp_model.pt",
+            p.parent.parent / "cnp_model.pt",
+            p.parent / "cnp_predictions" / "model.pth",  # when run from run dir with --model model.pth
+            p.parent.parent / "cnp_predictions" / "model.pth",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                model_path = str(candidate.resolve())
+                logging.info(f"Model not found at original path; using {model_path}")
+                break
+        else:
+            raise ValueError(
+                f"Model file not found at {model_path}. "
+                "Tried cnp_model.pt and cnp_predictions/model.pth in same/parent dirs. Use --model path/to/cnp_model.pt or path/to/cnp_predictions/model.pth"
+            )
+    
     # Handle variable list: either use provided CNP_IO file or auto-detect from training config
     variables = None
     
@@ -408,7 +429,16 @@ def run_inference_all(
         logging.info(f"Using provided scalers directory: {scalers_dir}")
     else:
         scalers_dir = model_dir / 'scalers'
-        logging.info(f"Auto-detected scalers directory: {scalers_dir}")
+        # Training saves scalers under cnp_predictions/scalers; fallback if not next to model
+        if not scalers_dir.exists():
+            alt = model_dir / 'cnp_predictions' / 'scalers'
+            if alt.exists():
+                scalers_dir = alt
+                logging.info(f"Auto-detected scalers directory: {scalers_dir} (cnp_predictions/scalers)")
+            else:
+                logging.info(f"Auto-detected scalers directory: {scalers_dir}")
+        else:
+            logging.info(f"Auto-detected scalers directory: {scalers_dir}")
     
     uses_individual = False
     try:
