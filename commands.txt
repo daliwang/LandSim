@@ -212,3 +212,13 @@ python ../../scripts/ai_model_comparison_plot.py \
   --output-dir ./ai_vs_restart_all_plots \
   --variable-list ../../CNP_IO_updated9_dev_dw.txt  \
    > ai_model_all_comparison.log 2>&1 &
+
+
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260219_132504_experiment3_global_repeat_unifiedconfig/cnp_inference_entire_dataset
+
+# Copy config from parent so validation can read variable lists
+cp ../cnp_config.json . 2>/dev/null || true
+
+# Same as runbook: current dir is the “results” dir
+python ../../../scripts/cnp_result_validationplot.py . --stats-only && \
+python ../../../scripts/generate_prediction_quality_report.py
