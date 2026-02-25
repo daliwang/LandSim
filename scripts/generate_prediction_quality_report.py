@@ -66,6 +66,8 @@ def main():
                         help='Include variables in worst list with good_pct below this threshold (e.g., 50.0 for <50%% good)')
     parser.add_argument('--worst-vars-list', type=str, default=None,
                         help='Comma-separated list of specific variables to include in worst list (e.g., "cpool,npool,ppool")')
+    parser.add_argument('--no-natveg-filter', dest='natveg_filter', action='store_false', default=True,
+                        help='Do not apply PFT/2D filter for top-bad plots (plot all gridcells). Default: natveg filter is ON.')
     args = parser.parse_args()
     
     # Set up input and output paths
@@ -299,15 +301,56 @@ def main():
         if valid_rmse_rel > 0:
             print(f"  RMSE_rel: min={rmse_rel_vals.min():.6f}, max={rmse_rel_vals.max():.6f}")
     
-    # Create scatter plot
-    scatter = plt.scatter(
-        scatter_df['r2'], 
-        scatter_df['rmse_rel'], 
-        c=scatter_df['prediction_quality'].map({'good': 0, 'ok': 1, 'bad': 2}),
-        cmap=plt.cm.viridis,
-        alpha=0.7,
-        s=50
-    )
+    # Create scatter plot: quality colors (Good/OK/Bad); PFT variables with coverage <2% in a different color
+    from matplotlib.lines import Line2D
+    has_pft_low = 'pft_pct_low' in scatter_df.columns and scatter_df['pft_pct_low'].any()
+    if has_pft_low:
+        # Plot non-low-PFT points with quality colors
+        mask_normal = ~scatter_df['pft_pct_low'].fillna(False)
+        if mask_normal.any():
+            plt.scatter(
+                scatter_df.loc[mask_normal, 'r2'],
+                scatter_df.loc[mask_normal, 'rmse_rel'],
+                c=scatter_df.loc[mask_normal, 'prediction_quality'].map({'good': 0, 'ok': 1, 'bad': 2}),
+                cmap=plt.cm.viridis,
+                alpha=0.7,
+                s=50,
+                label='_nolegend_'
+            )
+        # Overlay PFT coverage <2% points in distinct color
+        mask_low = scatter_df['pft_pct_low'].fillna(False)
+        if mask_low.any():
+            plt.scatter(
+                scatter_df.loc[mask_low, 'r2'],
+                scatter_df.loc[mask_low, 'rmse_rel'],
+                c='gray',
+                alpha=0.8,
+                s=60,
+                edgecolors='black',
+                linewidths=0.5,
+                label='PFT coverage <2%',
+                zorder=5
+            )
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(0), markersize=10, label='Good'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(0.5), markersize=10, label='OK'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(1.0), markersize=10, label='Bad'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='gray', markeredgecolor='black', markersize=10, label='PFT coverage <2%'),
+        ]
+    else:
+        scatter = plt.scatter(
+            scatter_df['r2'],
+            scatter_df['rmse_rel'],
+            c=scatter_df['prediction_quality'].map({'good': 0, 'ok': 1, 'bad': 2}),
+            cmap=plt.cm.viridis,
+            alpha=0.7,
+            s=50
+        )
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(0), markersize=10, label='Good'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(0.5), markersize=10, label='OK'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(1.0), markersize=10, label='Bad'),
+        ]
     
     # Add threshold lines
     plt.axhline(y=thresholds['good']['rmse_rel'], color='green', linestyle='--', alpha=0.7)
@@ -324,13 +367,6 @@ def main():
     if args.force_xlim_01:
         plt.xlim(0, 1)
     
-    # Create custom legend
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(0), markersize=10, label='Good'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(0.5), markersize=10, label='OK'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor=plt.cm.viridis(1.0), markersize=10, label='Bad'),
-    ]
     plt.legend(handles=legend_elements)
     
     plt.grid(True, alpha=0.3)
@@ -427,7 +463,8 @@ def main():
                                        top_bad_only=not args.worst_only,
                                        top_bad_report=str(output_dir / 'quality_summary_report.txt'),
                                        plots_dir_override=top_bad_out,
-                                       worst_only=args.worst_only)
+                                       worst_only=args.worst_only,
+                                       use_natveg_filter=getattr(args, 'natveg_filter', True))
                     print(f"Top-bad plots saved to: {top_bad_out}")
                     try:
                         # Count the number of PNGs generated for quick reporting

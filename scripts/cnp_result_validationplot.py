@@ -11,6 +11,11 @@ from glob import glob
 NUM_LAYERS = 10   # All layers (soil/2D) = exactly 10 layers
 NUM_PFTS = 16     # All PFTs (1D) = pft1 to pft16 only
 
+# Minimum gridcells after natveg filter to apply the filter; below this, we keep unfiltered data to avoid unstable metrics.
+MIN_GRIDCELLS_FOR_NATVEG_FILTER = 10
+# Minimum valid (non-NaN) gt/pred pairs to generate a plot for a PFT or layer.
+MIN_VALID_PAIRS_FOR_PLOT = 3
+
 # Plot output subfolders (under plots/ or top_bad_plots/):
 #   aggregate_all  - one scatter per variable combining all PFTs (1D) or all layers (2D)
 #   aggregate_bad  - one scatter per variable combining only bad/selected PFTs or layers (when using top-bad report)
@@ -91,6 +96,52 @@ def _parse_top_bad_report(report_path):
         return {}
     return selection
 
+def _load_gridcell_metadata(results_dir):
+    """Load gridcell-level PCT_NATVEG and PCT_NAT_PFT_* from test_static_inverse.csv if present.
+    Returns a DataFrame with same row order as GT/pred CSVs, or None if not available.
+    Used to exclude gridcells with no natural veg (PCT_NATVEG=0) or 100% PFT0 (PCT_NAT_PFT_0=100).
+    """
+    # Prefer test_static_inverse.csv written by run_inference_all (same row order as predictions)
+    candidates = [
+        os.path.join(results_dir, 'cnp_predictions', 'test_static_inverse.csv'),
+        os.path.join(results_dir, 'cnp_predictions', 'gridcell_metadata.csv'),
+    ]
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path)
+            # Need PCT_NATVEG and PCT_NAT_PFT_0 for exclusion; PCT_NAT_PFT_1..16 for low-coverage flag
+            pct_natveg = None
+            for c in ['PCT_NATVEG', 'pct_natveg']:
+                if c in df.columns:
+                    pct_natveg = df[c].values
+                    break
+            pct_pft0 = None
+            for c in ['PCT_NAT_PFT_0', 'pct_nat_pft_0']:
+                if c in df.columns:
+                    pct_pft0 = df[c].values
+                    break
+            if pct_natveg is None or pct_pft0 is None:
+                continue
+            # Build include mask: include where (PCT_NATVEG > 0) and (PCT_NAT_PFT_0 < 100)
+            include = (np.asarray(pct_natveg, dtype=float) > 0) & (np.asarray(pct_pft0, dtype=float) < 100)
+            # PCT_NAT_PFT_1..16 for pft_pct_low
+            pct_pft_cols = {}
+            for i in range(1, 17):
+                c = f'PCT_NAT_PFT_{i}'
+                if c in df.columns:
+                    pct_pft_cols[i] = df[c].values.astype(float)
+            return {
+                'include_mask': include,
+                'pct_pft': pct_pft_cols,
+                'n_rows': len(df),
+            }
+        except Exception as e:
+            print(f"Warning: Could not load gridcell metadata from {path}: {e}")
+    return None
+
+
 def _parse_worst_vars_report(report_path):
     """Parse quality_summary_report.txt to extract variables from
     the '## Variables with Worst Predictions' section.
@@ -124,7 +175,7 @@ def _parse_worst_vars_report(report_path):
         return {}
     return selection
 
-def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top_bad_report=None, plots_dir_override=None, worst_only=False):
+def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top_bad_report=None, plots_dir_override=None, worst_only=False, use_natveg_filter=True):
     # Create plots subdirectory and subfolders for organization
     plots_dir = plots_dir_override or os.path.join(results_dir, "plots")
     os.makedirs(plots_dir, exist_ok=True)
@@ -152,6 +203,11 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
             print("No selections parsed from report; proceeding without restriction.")
             selection = None
     
+    # Load gridcell metadata for PFT/2D filtering only when explicitly requested (opt-in; default off to avoid changing metrics)
+    gridcell_metadata = _load_gridcell_metadata(results_dir) if use_natveg_filter else None
+    if gridcell_metadata is not None:
+        print("Using gridcell metadata for PFT/2D: excluding no-natveg and 100% PFT0 gridcells")
+    
     # Check for new directory structure first
     pft_gt_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_ground_truth')
     pft_pred_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_predictions')
@@ -159,7 +215,7 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
     # Handle 1D data with new structure
     if os.path.exists(pft_gt_dir) and os.path.exists(pft_pred_dir):
         print("Using new 1D directory structure")
-        analyze_1d_new_structure(results_dir, '1D', plots_dir, stats_data, plot_scatter, selection)
+        analyze_1d_new_structure(results_dir, '1D', plots_dir, stats_data, plot_scatter, selection, gridcell_metadata)
     else:
         # Fall back to old single-file format
         print("Using legacy 1D single-file format")
@@ -184,7 +240,7 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
     soil_pred_dir = os.path.join(results_dir, 'cnp_predictions', 'soil_2d_predictions')
     if os.path.exists(soil_gt_dir) and os.path.exists(soil_pred_dir):
         print("Using new 2D directory structure")
-        analyze_2d_new_structure(results_dir, '2D', plots_dir, stats_data, plot_scatter, selection)
+        analyze_2d_new_structure(results_dir, '2D', plots_dir, stats_data, plot_scatter, selection, gridcell_metadata)
     else:
         # Fall back to old single-file format
         print("Using legacy 2D single-file format")
@@ -318,8 +374,11 @@ def analyze_pair(gt_path, pred_path, label, out_dir, stats_data, per_column=Fals
         })
         return {'rmse': rmse, 'mae': mae, 'r2': r2}
 
-def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True, selection=None):
-    """Analyze 1D data using the new directory structure with individual variable files"""
+def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True, selection=None, gridcell_metadata=None):
+    """Analyze 1D data using the new directory structure with individual variable files.
+    If gridcell_metadata is provided, exclude gridcells where PCT_NATVEG=0 or PCT_NAT_PFT_0=100
+    and set pft_pct_low for PFTs with mean coverage < 2%.
+    """
     gt_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_ground_truth')
     pred_dir = os.path.join(results_dir, 'cnp_predictions', 'pft_1d_predictions')
     
@@ -362,6 +421,11 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             print(f"Shape mismatch for {var_name}: GT {gt_data.shape} vs Pred {pred_data.shape}")
             continue
 
+        # Build row mask for PFT/2D: exclude PCT_NATVEG=0 and PCT_NAT_PFT_0=100
+        include_mask = None
+        if gridcell_metadata is not None and gridcell_metadata['n_rows'] == len(gt_data):
+            include_mask = gridcell_metadata['include_mask']
+
         # When using selection (top-bad only): skip this variable for per-PFT plots if not selected,
         # but we still generate the AllPFTs plot for every variable so AllPFTs are never "missing".
         in_selection = selection is None or var_name in selection
@@ -391,13 +455,22 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             gt_col = gt_data[col_name].values
             pred_col = pred_data[col_name].values
             
+            # Apply natveg filter: use only included gridcells (PCT_NATVEG>0 and PCT_NAT_PFT_0<100)
+            if include_mask is not None:
+                n_included = int(np.sum(include_mask))
+                if n_included < MIN_GRIDCELLS_FOR_NATVEG_FILTER:
+                    pass  # keep gt_col, pred_col unfiltered to avoid unstable metrics
+                else:
+                    gt_col = gt_col[include_mask]
+                    pred_col = pred_col[include_mask]
+            
             # Skip if all values are NaN
             if np.all(np.isnan(gt_col)) or np.all(np.isnan(pred_col)):
                 continue
             
             # Remove NaN pairs
             valid_mask = ~(np.isnan(gt_col) | np.isnan(pred_col))
-            if np.sum(valid_mask) < 3:  # Relax threshold to allow small samples
+            if np.sum(valid_mask) < MIN_VALID_PAIRS_FOR_PLOT:
                 continue
             
             gt_valid = gt_col[valid_mask]
@@ -412,6 +485,15 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             mae = mean_absolute_error(gt_valid, pred_valid)
             r2 = r2_score(gt_valid, pred_valid)
             
+            # PFT coverage < 2% flag for scatter coloring (PFT 1 = pft_idx 0 -> PCT_NAT_PFT_1)
+            pft_pct_low = False
+            if gridcell_metadata is not None and include_mask is not None:
+                pft_num = pft_idx + 1  # 1-based
+                if pft_num in gridcell_metadata.get('pct_pft', {}):
+                    pct_vals = gridcell_metadata['pct_pft'][pft_num][include_mask]
+                    if len(pct_vals) > 0:
+                        pft_pct_low = float(np.nanmean(pct_vals)) < 2.0
+            
             print(f"    {col_name}: RMSE: {rmse:.4f}, MAE: {mae:.4f}, R2: {r2:.4f}")
             print(f"      GT - min: {gt_stats['min']:.6g}, max: {gt_stats['max']:.6g}, sum: {gt_stats['sum']:.6g}")
             print(f"      Pred - min: {pred_stats['min']:.6g}, max: {pred_stats['max']:.6g}, sum: {pred_stats['sum']:.6g}")
@@ -425,7 +507,7 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 )
             
             # Collect stats
-            stats_data.append({
+            row = {
                 'type': '1D',
                 'variable': var_name,
                 'pft': col_name,
@@ -438,7 +520,10 @@ def analyze_1d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
                 'pred_min': pred_stats['min'],
                 'pred_max': pred_stats['max'],
                 'pred_sum': pred_stats['sum']
-            })
+            }
+            if gridcell_metadata is not None:
+                row['pft_pct_low'] = pft_pct_low
+            stats_data.append(row)
         
         # When not in top-bad mode: provide overall scatter across all PFTs (aggregate_all).
         # When selection is set (top_bad_plots), skip so we only get aggregate_bad and by_pft_layer.
@@ -590,8 +675,10 @@ def analyze_1d(gt_path, pred_path, label, out_dir, results_dir, stats_data, plot
                 'pred_sum': pred_stats['sum']
             })
 
-def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True, selection=None):
-    """Analyze 2D data using the new directory structure with individual variable files"""
+def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatter=True, selection=None, gridcell_metadata=None):
+    """Analyze 2D data using the new directory structure with individual variable files.
+    If gridcell_metadata is provided, exclude gridcells where PCT_NATVEG=0 or PCT_NAT_PFT_0=100.
+    """
     gt_dir = os.path.join(results_dir, 'cnp_predictions', 'soil_2d_ground_truth')
     pred_dir = os.path.join(results_dir, 'cnp_predictions', 'soil_2d_predictions')
     
@@ -637,6 +724,11 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
         if gt_data.shape != pred_data.shape:
             print(f"Shape mismatch for {var_name}: GT {gt_data.shape} vs Pred {pred_data.shape}")
             continue
+
+        # Build row mask: exclude PCT_NATVEG=0 and PCT_NAT_PFT_0=100
+        include_mask = None
+        if gridcell_metadata is not None and gridcell_metadata['n_rows'] == len(gt_data):
+            include_mask = gridcell_metadata['include_mask']
         
         # 2D data: All layers = NUM_LAYERS (10) only.
         total_columns = gt_data.shape[1]
@@ -672,13 +764,21 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             gt_col = gt_data.iloc[:, col_idx].values
             pred_col = pred_data.iloc[:, col_idx].values
             
+            # Apply natveg filter: use only included gridcells (PCT_NATVEG>0 and PCT_NAT_PFT_0<100)
+            if include_mask is not None:
+                n_included = int(np.sum(include_mask))
+                if n_included >= MIN_GRIDCELLS_FOR_NATVEG_FILTER:
+                    gt_col = gt_col[include_mask]
+                    pred_col = pred_col[include_mask]
+                # else: too few after filter; keep unfiltered to avoid unstable metrics
+            
             # Skip if all values are NaN
             if np.all(np.isnan(gt_col)) or np.all(np.isnan(pred_col)):
                 continue
                 
             # Remove NaN pairs
             valid_mask = ~(np.isnan(gt_col) | np.isnan(pred_col))
-            if np.sum(valid_mask) < 3:  # Relax threshold to allow small samples
+            if np.sum(valid_mask) < MIN_VALID_PAIRS_FOR_PLOT:
                 continue
                 
             gt_valid = gt_col[valid_mask]
@@ -879,8 +979,10 @@ if __name__ == '__main__':
     parser.add_argument('--top-bad-only', action='store_true', help='Plot only variables listed in the quality summary top-bad section')
     parser.add_argument('--worst-only', action='store_true', help='Plot only variables listed under \"Variables with Worst Predictions\"')
     parser.add_argument('--top-bad-report', type=str, default=None, help='Path to quality_summary_report.txt (defaults to results_dir/analysis/quality_summary_report.txt)')
+    parser.add_argument('--no-natveg-filter', action='store_false', dest='use_natveg_filter',
+                        help='Do not apply PFT/2D filter (plot all gridcells). Default: natveg filter is ON (exclude PCT_NATVEG=0 or PCT_NAT_PFT_0=100).')
     
-    parser.set_defaults(plot_scatter=True, plot_loss=True)
+    parser.set_defaults(plot_scatter=True, plot_loss=True, use_natveg_filter=True)
     args = parser.parse_args()
     
     # If stats-only requested, force-disable all plotting
@@ -891,4 +993,6 @@ if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Using current directory as results directory")
     
-    main_with_flag(args.results_dir, args.plot_scatter, args.plot_loss, args.top_bad_only, args.top_bad_report, worst_only=getattr(args, 'worst_only', False))
+    main_with_flag(args.results_dir, args.plot_scatter, args.plot_loss, args.top_bad_only, args.top_bad_report,
+                   worst_only=getattr(args, 'worst_only', False),
+                   use_natveg_filter=getattr(args, 'use_natveg_filter', True))

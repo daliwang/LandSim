@@ -167,6 +167,11 @@ class ModelConfig:
     # PFT1D activation control
     pft1d_activation: str = 'abs'  # 'abs', 'relu', 'softplus', 'linear'
     pft1d_activation_overrides: Dict[str, str] = field(default_factory=dict)
+    
+    # Multihead/Multimode configuration
+    use_multihead_attention: bool = False  # Enable multi-head attention for mode-specific feature extraction
+    multihead_num_heads: int = 4  # Number of attention heads for multihead attention
+    use_mode_specific_heads: bool = False  # Enable separate feature extractors for each output mode
 
 
 @dataclass

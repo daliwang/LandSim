@@ -182,7 +182,7 @@ python train_cnp_model.py \
     python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c > run_inference_all.log 2>&1 &
 
 
-        python train_cnp_model.py \
+  python train_cnp_model.py \
   --variable-list CNP_IO_updated9_dev_dw.txt \
   --training-config config/training_config_experiment_3_global.json \
     2>&1 | tee cnp_experiment3_global.log &
@@ -222,3 +222,24 @@ cp ../cnp_config.json . 2>/dev/null || true
 # Same as runbook: current dir is the “results” dir
 python ../../../scripts/cnp_result_validationplot.py . --stats-only && \
 python ../../../scripts/generate_prediction_quality_report.py
+
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data
+
+python ../scripts/ai_model_comparison_plot.py \
+  --model1 ./20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --model2 ./20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc \
+  --variable-list ../CNP_IO_updated9_dev_dw.txt \
+  --output-dir ./adspin20_vs_final800_all_plots \
+  --layers 0 1 2 3 4  \
+  --pfts 1 2 3 4 5 6 \
+   > adspin20_spin800_all_comparison.log 2>&1 &
+
+
+   python train_cnp_model.py \
+       --model-config CNP_model_config_multimode_tropicaltest1.txt \
+       --variable-list CNP_IO_tropicaltest1.txt \
+       --training-config config/training_config_experiment_2.json \
+       --tropical-only
+
+
+python scripts/cnp_result_validationplot.py /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260220_145518 --natveg-filter
