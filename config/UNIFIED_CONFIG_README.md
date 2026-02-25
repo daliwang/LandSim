@@ -10,6 +10,16 @@ Instead of managing multiple separate JSON files, you can now use a single unifi
 - Tail-aware weights
 - PFT zero sparsity weights
 - PFT1D activation overrides
+- **Data filtering** (tropical band, natveg-only) — see `data_filtering_config` below
+
+### Where to put options: config JSON vs CNP_IO.txt
+
+| Purpose | Use |
+|--------|-----|
+| **Variable lists**, **data paths**, **file patterns** | **CNP_IO.txt** (and optional paths in variable list) |
+| **Training filters** (tropical, natveg, longitude drop), **hyperparameters**, **loss weights**, **reproducibility** | **config/training_*.json** (unified or per-experiment) |
+
+Put **natveg filter**, **tropical selection**, and **longitude filtering** in the **training config JSON** under `data_filtering_config`, not in CNP_IO. That way one variable list can be reused with different filter choices, and the run’s saved config records exactly which filters were applied.
 
 ## JSON File Format
 
@@ -145,11 +155,15 @@ Settings for reproducibility and data handling:
 **Note**: CLI arguments (`--split-seed`, `--strict-determinism`, `--train-split`, `--normalization`, `--dropout-p`) take precedence over JSON values.
 
 ### `data_filtering_config`
-Settings for data filtering:
+Settings for which samples are included at training time. **Use the training config JSON here, not CNP_IO.txt**: CNP_IO defines variables and data paths; filtering (tropical, natveg) is a run choice and belongs in config so the same variable list can be reused with different filters.
+
 - `tropical_only`: Filter dataset to tropical latitudes (default: `false`)
 - `tropical_lat_range`: Latitude range as `[min, max]` or `"min,max"` string (default: `[-23.5, 23.5]`)
+- `tropical_lat_column`: Optional column name for latitude (default: auto-detect, e.g. `Latitude`)
+- `natveg_only`: If `true`, keep only gridcells with natural vegetation: `PCT_NATVEG > 0` and `PCT_NAT_PFT_0 < 100` (default: `false`). See `docs/EXCLUDED_SAMPLE_ANALYSIS.md` for impact (~33% of samples excluded on typical data).
+- `longitudes_to_drop`: List of longitudes (degrees) to exclude from training, e.g. `[0, 358.75]`. Samples whose longitude matches (within tolerance) are dropped. Overrides the same option in CNP_IO. Use 0–360° convention to match data.
 
-**Note**: CLI arguments (`--tropical-only`, `--tropical-lat-range`) take precedence over JSON values.
+**Note**: CLI arguments (`--tropical-only`, `--tropical-lat-range`, `--natveg-only`, `--longitudes-to-drop`) take precedence over JSON values. JSON `data_filtering_config` overrides values from the CNP_IO variable list (e.g. longitude filtering in CNP_IO).
 
 ### `variable_weights`
 Contains three subsections:
@@ -190,7 +204,7 @@ When both unified config and CLI arguments are specified:
 
 1. **Training hyperparameters**: CLI args (`--epochs`, `--batch-size`, `--learning-rate`, `--xsmrpool-loss-weight`, `--litter-*-loss-weight`) override unified config
 2. **Reproducibility config**: CLI args (`--split-seed`, `--strict-determinism`, `--train-split`, `--normalization`, `--dropout-p`) override unified config
-3. **Data filtering config**: CLI args (`--tropical-only`, `--tropical-lat-range`) override unified config
+3. **Data filtering config**: CLI args (`--tropical-only`, `--tropical-lat-range`, `--natveg-only`, `--longitudes-to-drop`) override unified config
 4. **PFT mask config**: CLI args (`--mask-absent-pfts` / `--no-mask-absent-pfts`, `--pft-presence-threshold`) override unified config
 5. **Tail-aware config**: CLI args (`--tail-aware-loss`, `--tail-aware-eps`) override unified config
 6. **Tail-aware weights**: Individual `--tail-aware-weights-json` overrides unified config
@@ -227,7 +241,8 @@ This allows you to:
   },
   "data_filtering_config": {
     "tropical_only": true,
-    "tropical_lat_range": [-23.5, 23.5]
+    "tropical_lat_range": [-23.5, 23.5],
+    "longitudes_to_drop": [0, 358.75]
   },
   "variable_weights": {
     "pft1d_weights": {

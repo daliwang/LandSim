@@ -15,8 +15,8 @@ FILE_PATTERN: training_data_batch_*.pkl
 TVA4KM_FILE_PATTERN: enhanced_monthly_training_data_batch_*.pkl
 
 
-LONGITUDE FILTERING - 2 longitudes:
-• 0, 358.75
+#LONGITUDE FILTERING - 2 longitudes:
+#• 0, 358.75
 
 TIME SERIES VARIABLES (Climate Forcing) - 6 variables:
 • FLDS, PSRF, FSDS, QBOT, PRECTmms, TBOT 

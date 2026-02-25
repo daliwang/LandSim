@@ -248,6 +248,12 @@ def main():
         help='Latitude column name override (default: auto-detect from static columns)'
     )
     parser.add_argument(
+        '--longitudes-to-drop',
+        type=str,
+        default=None,
+        help='Comma-separated longitudes to drop from training (e.g. "0,358.75"). Overrides config/CNP_IO.'
+    )
+    parser.add_argument(
         '--max-files',
         type=int,
         default=None,
@@ -478,6 +484,15 @@ def main():
                 logger.info(f"Enabled tropical filtering: {tropical_kwargs}")
             except Exception as e:
                 logger.warning(f"Failed to apply tropical filtering config: {e}")
+        # Optional longitude filtering (CLI overrides config/CNP_IO)
+        if args.longitudes_to_drop is not None:
+            try:
+                parts = [p.strip() for p in str(args.longitudes_to_drop).split(',') if p.strip()]
+                longitudes = [float(x) for x in parts]
+                config.update_data_config(longitudes_to_drop=longitudes)
+                logger.info(f"Longitudes to drop (CLI): {longitudes}")
+            except Exception as e:
+                logger.warning(f"Failed to parse --longitudes-to-drop: {e}")
         if args.variable_list is not None:
             logger.info(f"Using CNP configuration from variable list file: {args.variable_list}")
         else:
@@ -748,6 +763,14 @@ def main():
                                     parts = [p.strip() for p in lat_range.split(',')]
                                     if len(parts) == 2:
                                         update_kwargs['tropical_lat_range'] = (float(parts[0]), float(parts[1]))
+                            
+                            # Longitude filtering: drop samples at these longitudes (config overrides CNP_IO)
+                            if 'longitudes_to_drop' in filter_config and args.longitudes_to_drop is None:
+                                lon_drop = filter_config['longitudes_to_drop']
+                                if isinstance(lon_drop, list):
+                                    update_kwargs['longitudes_to_drop'] = [float(x) for x in lon_drop]
+                                elif isinstance(lon_drop, str):
+                                    update_kwargs['longitudes_to_drop'] = [float(x.strip()) for x in lon_drop.split(',') if x.strip()]
                             
                             if update_kwargs:
                                 config.update_data_config(**update_kwargs)
@@ -1241,6 +1264,7 @@ def main():
                     'data_paths': list(getattr(data_cfg, 'data_paths', []) or []),
                     'file_pattern': getattr(data_cfg, 'file_pattern', None) or 'enhanced_1_training_data_batch_*.pkl',
                     'dataset_file_patterns': dict(getattr(data_cfg, 'dataset_file_patterns', None) or {}),
+                    'longitudes_to_drop': list(getattr(data_cfg, 'longitudes_to_drop', None) or []),
                 }
             config_dict = {
                 'include_water': include_water,

@@ -27,7 +27,8 @@
   },
   "data_filtering_config": {
     "tropical_only": false,
-    "tropical_lat_range": null
+    "tropical_lat_range": null,
+    "longitudes_to_drop": [0, 358.75]
   },
   "variable_weights": {
     "pft1d_weights": {
