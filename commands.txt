@@ -299,3 +299,19 @@ python train_cnp_model.py \
   --training-config-json config/training_config_experiment_3_global_natveg_improved.json \
   --variable-list CNP_IO_updated9_dev_dw.txt \
   --output-dir-suffix natveg_improved
+
+  # Minimal pipeline: validation + per-PFT npool/ppool + quality report
+# Run from inside a run directory, e.g. cnp_results/run_YYYYMMDD_HHMMSS_suffix
+
+# 1) Validation stats (writes validation_stats.csv in run dir)
+python ../../scripts/cnp_result_validationplot.py --stats-only
+
+# 2) Per-PFT npool/ppool validation (so npool/ppool not labeled "worst"; creates analysis/ if needed)
+python ../../scripts/validation_npool_ppool_per_pft.py . -o analysis/npool_ppool_per_pft.json
+
+# 3) Quality report + top_bad_plots (excludes npool/ppool from worst list; writes analysis/ and analysis/top_bad_plots/)
+#    Add --training-config cnp_config.json to include all CNP_IO variables in report/chart (pad missing with zeros).
+python ../../scripts/generate_prediction_quality_report.py --input validation_stats.csv --npool-ppool-per-pft-json analysis/npool_ppool_per_pft.json
+
+# One-liner (from run dir):
+# python ../../scripts/cnp_result_validationplot.py --stats-only && python ../../scripts/validation_npool_ppool_per_pft.py . -o analysis/npool_ppool_per_pft.json && python ../../scripts/generate_prediction_quality_report.py --input validation_stats.csv --npool-ppool-per-pft-json analysis/npool_ppool_per_pft.json

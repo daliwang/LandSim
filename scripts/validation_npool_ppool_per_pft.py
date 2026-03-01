@@ -9,7 +9,7 @@ Where a PFT has zero coverage, npool/ppool are typically the special values
 
 Usage:
   python scripts/validation_npool_ppool_per_pft.py cnp_results/run_YYYYMMDD_HHMMSS
-  python scripts/validation_npool_ppool_per_pft.py cnp_results/run_20260226_114546_nofiter --output report.json --pct-min 0
+  python scripts/validation_npool_ppool_per_pft.py cnp_results/run_20260226_114546_nofilter --output report.json --pct-min 0
 """
 
 import argparse
@@ -143,6 +143,7 @@ def run(run_dir: Path, pct_min: float = 0.0, output_path: Path = None):
     print(f"  Mean R² (PFTs with ≥{min_cells} cells): {results['ppool_mean_r2_over_pfts']}")
 
     if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nReport written to {output_path}")
@@ -160,7 +161,8 @@ def main():
     args = ap.parse_args()
     run_path = Path(args.run_dir)
     if not run_path.is_absolute():
-        run_path = (REPO_ROOT / args.run_dir).resolve()
+        # Resolve relative to cwd so "." means the current (run) directory
+        run_path = (Path.cwd() / run_path).resolve()
     out_path = Path(args.output).resolve() if args.output else None
     run(run_path, pct_min=args.pct_min, output_path=out_path)
 

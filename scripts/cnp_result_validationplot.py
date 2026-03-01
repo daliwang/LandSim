@@ -205,6 +205,12 @@ def main_with_flag(results_dir, plot_scatter, plot_loss, top_bad_only=False, top
         if not selection:
             print("No selections parsed from report; proceeding without restriction.")
             selection = None
+        # Always include npool and ppool in selection when in restricted mode so their scatter plots
+        # (gt vs pred) are still generated even when they are excluded from the worst list (e.g. per-PFT validation).
+        if selection is not None:
+            for _v in ('npool', 'ppool'):
+                if _v not in selection:
+                    selection[_v] = {'pfts': set(), 'layers': set()}
     
     # Load gridcell metadata for PFT/2D filtering only when explicitly requested (opt-in; default off to avoid changing metrics)
     gridcell_metadata = _load_gridcell_metadata(results_dir) if use_natveg_filter else None
@@ -991,6 +997,7 @@ if __name__ == '__main__':
     parser.add_argument('--top-bad-only', action='store_true', help='Plot only variables listed in the quality summary top-bad section')
     parser.add_argument('--worst-only', action='store_true', help='Plot only variables listed under \"Variables with Worst Predictions\"')
     parser.add_argument('--top-bad-report', type=str, default=None, help='Path to quality_summary_report.txt (defaults to results_dir/analysis/quality_summary_report.txt)')
+    parser.add_argument('--plots-dir', type=str, default=None, help='Output directory for plots (default: results_dir/plots). Use analysis/top_bad_plots to match quality-report pipeline.')
     parser.add_argument('--no-natveg-filter', action='store_false', dest='use_natveg_filter',
                         help='Do not apply PFT/2D filter (plot all gridcells). Default: natveg filter is ON (exclude PCT_NATVEG=0 or PCT_NAT_PFT_0=100).')
     
@@ -1005,6 +1012,10 @@ if __name__ == '__main__':
     if len(sys.argv) < 2:
         print("Using current directory as results directory")
     
+    plots_dir_override = None
+    if getattr(args, 'plots_dir', None):
+        plots_dir_override = os.path.join(args.results_dir, args.plots_dir) if not os.path.isabs(args.plots_dir) else args.plots_dir
     main_with_flag(args.results_dir, args.plot_scatter, args.plot_loss, args.top_bad_only, args.top_bad_report,
+                   plots_dir_override=plots_dir_override,
                    worst_only=getattr(args, 'worst_only', False),
                    use_natveg_filter=getattr(args, 'use_natveg_filter', True))
