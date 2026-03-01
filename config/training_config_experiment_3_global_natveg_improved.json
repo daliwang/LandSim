@@ -1,9 +1,9 @@
 {
-  "_description": "Experiment 3 global: full training config for global run (20,826 samples). Same structure as training_config_experiment_2.json. Tail-aware log1p_huber; primp_vr weight 11; PFT mask and zero sparsity as in experiment_3.",
+  "_description": "Experiment 3 global NATVEG IMPROVED: Based on natveg_aligned reference (docs/NATVEG_VS_NOFILTER_COMPARISON.md). Same data setup (natveg_only true, natveg_filter_before_split false). Tuning to improve soil 2D (especially occlp_vr) and overall stability: more epochs, slightly lower LR, added occlp_vr weighting, mild dropout increase.",
   "training_hyperparameters": {
-    "num_epochs": 100,
+    "num_epochs": 120,
     "batch_size": 128,
-    "learning_rate": 0.0001,
+    "learning_rate": 8e-5,
     "optimizer_type": "adamw",
     "weight_decay": 0.01,
     "use_scheduler": true,
@@ -23,14 +23,14 @@
     "strict_determinism": false,
     "train_split": 0.8,
     "normalization": "individual",
-    "dropout_p": 0.1
+    "dropout_p": 0.12
   },
   "data_filtering_config": {
     "tropical_only": false,
     "tropical_lat_range": null,
     "longitudes_to_drop": [0, 358.75],
     "natveg_only": true,
-    "natveg_filter_before_split": true
+    "natveg_filter_before_split": false
   },
   "variable_weights": {
     "pft1d_weights": {
@@ -57,6 +57,7 @@
     },
     "soil2d_weights": {
       "primp_vr": 11,
+      "occlp_vr": 9,
       "litr2c_vr": 8,
       "litr2p_vr": 8,
       "litr2n_vr": 8,
@@ -78,7 +79,7 @@
   },
   "tail_aware_config": {
     "loss": "log1p_huber",
-    "epsilon": 1e-08,
+    "epsilon": 1e-8,
     "huber_delta": 1
   },
   "tail_aware_weights": {
@@ -104,6 +105,7 @@
     "labilep": 5,
     "labilep_vr": 5,
     "primp_vr": 11,
+    "occlp_vr": 9,
     "litr2c_vr": 8,
     "litr2p_vr": 8,
     "litr2n_vr": 8,
@@ -120,7 +122,7 @@
   },
   "pft_zero_sparsity_config": {
     "weight": 1,
-    "threshold": 1e-08
+    "threshold": 1e-8
   },
   "pft_zero_sparsity_weights": {
     "cpool": 2,

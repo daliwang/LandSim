@@ -243,3 +243,59 @@ python ../scripts/ai_model_comparison_plot.py \
 
 
 python scripts/cnp_result_validationplot.py /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260220_145518 --natveg-filter
+
+
+
+python ../../scripts/cnp_result_validationplot.py --stats-only > validationplot.log 2>&1 && \
+python ../../scripts/generate_prediction_quality_report.py > prediction_quality_report.log 2>&1 && \
+python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c > run_inference_all.log 2>&1 && \
+python ../../scripts/ai_predictions_to_netcdf.py > ai_prediction_to_netcdf.log 2>&1  
+
+python ../../scripts/ai_predictions_to_restart.py \
+  --output CNInit_updated9_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  > ai_predictions_to_restart.log 2>&1
+
+python ../../scripts/ai_predictions_to_restart.py \
+  --output CNInit_natveg_updated9_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  > ai_predictions_to_restart.log 2>&1 &
+
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_3_tropical.json \
+  >  cnp_experiment3_tropical.log 2>&1 
+
+comparison runs
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_3_global_nofilter.json 
+
+  python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --training-config config/training_config_experiment_3_global_natveg_aligned.json 
+
+    python train_cnp_model.py \
+  --variable-list CNP_IO_updated9_intermediate_dw.txt \
+  --training-config config/training_config_experiment_3_global_nofilter.json
+
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+
+python scripts/ai_restart_comparison.py \
+  --variable-list CNP_IO_updated9_dev.txt \
+  --ai-restart cnp_results/run_20260221_120117_withCNonlyInit/CNInit_updated9_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --original-restart ELM_data/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --plot-all \
+  --output-dir cnp_results/run_20260221_120117_withCNonlyInit/ai_restart_comparison_plots
+
+python scripts/ai_restart_comparison.py \
+  --variable-list CNP_IO_updated9_dev.txt \
+  --ai-restart cnp_results/run_20260221_120117_withCNonlyInit/CNInit_updated9_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --original-restart ELM_data/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc \
+  --plot-all \
+  --output-dir cnp_results/run_20260221_120117_withCNonlyInit/ai_restart_comparison_plots_vs_target800result
+
+# Run folder: cnp_results/run_YYYYMMDD_HHMMSS_natveg_improved (--output-dir defaults to cnp_results).
+python train_cnp_model.py \
+  --training-config-json config/training_config_experiment_3_global_natveg_improved.json \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --output-dir-suffix natveg_improved

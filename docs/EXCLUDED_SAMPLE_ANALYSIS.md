@@ -85,14 +85,14 @@ These flags come from the **static** inputs (e.g. `test_static_inverse.csv`), wh
 ## 2. Where the Exclusion Is Used
 
 - **Validation metrics (R², RMSE, MAE)**  
-  When the **natveg filter** is enabled (`--natveg-filter`), metrics for PFT and 2D variables are computed **only over included gridcells**. Excluded gridcells are not used in the metric.
+  When the **natveg filter** is enabled (default; use `--no-natveg-filter` to turn it off), metrics for PFT and 2D variables are computed **only over included gridcells**. Excluded gridcells are not used in the metric.
 
 - **GT vs Pred scatter plots in `top_bad_plots`**  
-  The per-variable, per-layer scatter plots (e.g. `2D_soil1c_vr_Layer1_gt_vs_pred.png`) always plot **all** gridcells (both included and excluded). The filter does **not** remove points from these plots; it only changes how the **single** R²/RMSE for that variable/layer is computed. So:
-  - **With** `--natveg-filter`: the plot shows all points, but the R² in `validation_stats.csv` is for included-only.
-  - **Without** `--natveg-filter`: the plot is the same (all points), and the R² is over all gridcells.
+  When the natveg filter is **on**, the script first restricts to included gridcells, then plots and computes R²/RMSE on that subset. So both the **plot** and the **metric** in `validation_stats.csv` are for included-only. When the filter is **off**, all test gridcells are used for the plot and the metric.
 
-So **the excluded gridcells are still plotted** in `by_pft_layer` and similar GT-vs-Pred figures; they are only excluded from the **metric** when the filter is on.
+**Fair comparison (no-filter vs natveg run):** For the **natveg** run we should only evaluate on gridcells that pass the natveg filter (the “relevant” gridcells). The natveg model is trained only on those, so we expect it to perform **somewhat better** on that subset. Therefore:
+- Compare **both** runs using **validation_stats** (or the quality report) generated with the natveg filter on (default; do not pass `--no-natveg-filter`). Then both metrics are “included gridcells only,” and the natveg run can be fairly expected to be somewhat better on that subset.
+- The **inference-time** metrics (`cnp_predictions/test_metrics.csv`, `cnp_metrics.json`) are computed over the **full** test set. For the natveg run that is unfair (it includes gridcells the model was not trained on), so prefer the validation script with the filter for reporting natveg performance.
 
 ## 3. Data Source: Row Alignment
 
@@ -161,15 +161,14 @@ python scripts/plot_excluded_locations.py cnp_results/run_20260220_145518 -o /pa
 
 ## 6. Validation: Enabling the Natveg Filter
 
-- **Default:** Filter is **off**. Validation uses all gridcells (same as “nofilter” behaviour).
-- **Opt-in:** Pass `--natveg-filter` when generating validation stats so that PFT/2D metrics use only **included** gridcells.
+- **Default:** Natveg filter is **on**. PFT/2D metrics use only **included** gridcells. Pass `--no-natveg-filter` to use all gridcells instead.
 
 ```bash
-# Validation stats and top_bad plots *without* filter (default)
+# Validation stats and top_bad plots *with* natveg filter (default; included gridcells only)
 python scripts/cnp_result_validationplot.py cnp_results/run_20260220_145518
 
-# Validation stats and top_bad plots *with* filter (excluded cells not used in R²/RMSE)
-python scripts/cnp_result_validationplot.py cnp_results/run_20260220_145518 --natveg-filter
+# Validation stats and top_bad plots *without* filter (all gridcells)
+python scripts/cnp_result_validationplot.py cnp_results/run_20260220_145518 --no-natveg-filter
 ```
 
 The **scatter plots** in `top_bad_plots/by_pft_layer/` still show all gridcells in both cases; only the numbers in `validation_stats.csv` (and thus in the quality report) change when the filter is used.
@@ -191,13 +190,44 @@ All 36 exclusions in that run had **PCT_NAT_PFT_0 = 100** (and PCT_NATVEG ≈ 10
 | Question | Answer |
 |----------|--------|
 | Are excluded gridcells still in the GT-vs-Pred scatter plots? | **Yes.** `top_bad_plots/by_pft_layer/*.png` always show all gridcells. |
-| What changes with `--natveg-filter`? | Only the **metrics** (R², RMSE, MAE) for PFT/2D variables; they are computed over **included** gridcells only. |
+| What changes with the natveg filter (on by default)? | Only the **metrics** (R², RMSE, MAE) for PFT/2D variables; they are computed over **included** gridcells only. |
 | Where is the list of excluded locations? | `analysis/excluded_locations/excluded_locations_lat_lon.csv` after running `plot_excluded_locations.py`. |
 | How do I plot only excluded gridcells? | Run `scripts/plot_excluded_locations.py <results_dir>`; see `analysis/excluded_locations/excluded_locations_<var>_gt_vs_pred.png`. |
 
-## 9. Related Files
+## 9. Test Set Alignment: Natveg Run vs No-Filter Run
+
+When comparing a **natveg-only** run to a **no-filter** run, the test sets can differ depending on when the filter is applied.
+
+### Two behaviors
+
+| Option | When filter is applied | Test set |
+|--------|-------------------------|----------|
+| **Filter before split** (default / legacy) | Filter to natveg **before** shuffle and 80/20 split. | Test = 20% of **natveg-only** data (e.g. ~2802 rows). **Not** a subset of the no-filter test set. |
+| **Split then filter** (`--no-natveg-filter-before-split`) | Shuffle and split on **full** data (same as no-filter); then filter **only the training set** to natveg. | Test = same 20% as no-filter run (e.g. ~4166 rows). Natveg validation plots show only the **included** subset of that test set. |
+
+So: **for the natveg run’s validation data to be a subset of the no-filter run’s validation data**, use **split then filter** (do **not** filter before split).
+
+### How to get aligned test sets
+
+- **Training:** use `natveg_only: true` and `natveg_filter_before_split: false` in config, or `--natveg-only --no-natveg-filter-before-split` on the CLI.
+- **Inference:** uses the same data config from `cnp_config.json` (including `natveg_filter_before_split`), so test rows and `test_static_inverse.csv` match the no-filter run.
+- **Validation:** with the natveg filter on, plots and metrics use only the **included** gridcells from that same test set, so points in e.g. `2D_soil4c_vr_Layer10_gt_vs_pred.png` are a subset of the no-filter run’s plot.
+
+### Verifying overlap
+
+Use the script below to compare two runs’ test gridcells by (Latitude, Longitude):
+
+```bash
+python scripts/verify_natveg_test_subset.py \
+  cnp_results/run_NOFILTER/cnp_predictions \
+  cnp_results/run_NATVEG/cnp_predictions
+```
+
+If the natveg run was trained with `natveg_filter_before_split: false`, the natveg test set (rows in `test_static_inverse.csv`) should be **identical** to the no-filter test set; the script reports overlap and subset relationship.
+
+## 10. Related Files
 
 - **Validation (filter logic):** `scripts/cnp_result_validationplot.py` — `_load_gridcell_metadata()`, `analyze_1d_new_structure(..., gridcell_metadata)`, `analyze_2d_new_structure(..., gridcell_metadata)`.
-- **Quality report:** `scripts/generate_prediction_quality_report.py` — optional `--natveg-filter` when invoking validation for top-bad plots.
+- **Quality report:** `scripts/generate_prediction_quality_report.py` — natveg filter on by default when invoking validation for top-bad plots; use `--no-natveg-filter` to turn it off.
 - **Excluded-only plots:** `scripts/plot_excluded_locations.py`.
 - **Prediction quality overview:** `docs/README_prediction_quality.md`.

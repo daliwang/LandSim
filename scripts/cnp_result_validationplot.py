@@ -24,13 +24,16 @@ SUBDIR_ALLLAYER = "aggregate_all"
 SUBDIR_BADLAYER = "aggregate_bad"
 SUBDIR_INDIVIDUAL = "by_pft_layer"
 
-def plot_gt_vs_pred(gt, pred, title, save_path):
+def plot_gt_vs_pred(gt, pred, title, save_path, subtitle=None):
     plt.figure(figsize=(6,6))
     plt.scatter(gt, pred, alpha=0.5)
     plt.plot([gt.min(), gt.max()], [gt.min(), gt.max()], 'r--')
     plt.xlabel('Ground Truth')
     plt.ylabel('Prediction')
-    plt.title(title)
+    if subtitle:
+        plt.title(f"{title}\n{subtitle}", fontsize=10)
+    else:
+        plt.title(title)
     plt.tight_layout()
     # Ensure the directory exists
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -729,6 +732,11 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
         include_mask = None
         if gridcell_metadata is not None and gridcell_metadata['n_rows'] == len(gt_data):
             include_mask = gridcell_metadata['include_mask']
+            n_incl = int(np.sum(include_mask))
+            n_excl = len(include_mask) - n_incl
+            print(f"  Natveg filter for {var_name}: {n_incl} included, {n_excl} excluded (of {len(gt_data)} rows)")
+        elif gridcell_metadata is not None and gridcell_metadata['n_rows'] != len(gt_data):
+            print(f"  Warning: gridcell_metadata has {gridcell_metadata['n_rows']} rows but GT has {len(gt_data)}; skipping natveg filter for {var_name}")
         
         # 2D data: All layers = NUM_LAYERS (10) only.
         total_columns = gt_data.shape[1]
@@ -765,11 +773,13 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             pred_col = pred_data.iloc[:, col_idx].values
             
             # Apply natveg filter: use only included gridcells (PCT_NATVEG>0 and PCT_NAT_PFT_0<100)
+            applied_natveg_filter = False
             if include_mask is not None:
                 n_included = int(np.sum(include_mask))
                 if n_included >= MIN_GRIDCELLS_FOR_NATVEG_FILTER:
                     gt_col = gt_col[include_mask]
                     pred_col = pred_col[include_mask]
+                    applied_natveg_filter = True
                 # else: too few after filter; keep unfiltered to avoid unstable metrics
             
             # Skip if all values are NaN
@@ -799,10 +809,12 @@ def analyze_2d_new_structure(results_dir, label, out_dir, stats_data, plot_scatt
             
             # Conditionally plot
             if plot_scatter:
+                subtitle = f"{len(gt_valid)} gridcells (natveg filter applied)" if applied_natveg_filter else None
                 plot_gt_vs_pred(
-                    gt_valid, pred_valid, 
-                    f"{label} {var_name} Layer{layer_idx+1} GT vs Pred", 
-                    os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_{var_name}_Layer{layer_idx+1}_gt_vs_pred.png")
+                    gt_valid, pred_valid,
+                    f"{label} {var_name} Layer{layer_idx+1} GT vs Pred",
+                    os.path.join(out_dir, SUBDIR_INDIVIDUAL, f"{label}_{var_name}_Layer{layer_idx+1}_gt_vs_pred.png"),
+                    subtitle=subtitle,
                 )
             
             # Collect stats

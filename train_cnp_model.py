@@ -134,6 +134,13 @@ def main():
         help='Output directory for results'
     )
     parser.add_argument(
+        '--output-dir-suffix',
+        default=None,
+        type=str,
+        metavar='SUFFIX',
+        help='Optional suffix for the run folder name (e.g. natveg_improved -> run_YYYYMMDD_HHMMSS_natveg_improved)'
+    )
+    parser.add_argument(
         '--epochs', '--epoch',
         dest='epochs',
         type=int,
@@ -252,6 +259,16 @@ def main():
         type=str,
         default=None,
         help='Comma-separated longitudes to drop from training (e.g. "0,358.75"). Overrides config/CNP_IO.'
+    )
+    parser.add_argument(
+        '--natveg-only',
+        action='store_true',
+        help='Keep only gridcells with natural vegetation (PCT_NATVEG>0 and PCT_NAT_PFT_0<100). Overrides config.'
+    )
+    parser.add_argument(
+        '--no-natveg-filter-before-split',
+        action='store_true',
+        help='With --natveg-only: split on full data then filter only training set to natveg, so test set matches no-filter run. Default: filter before split (legacy).'
     )
     parser.add_argument(
         '--max-files',
@@ -409,9 +426,11 @@ def main():
     )
     args = parser.parse_args()
     
-    # Create output directory with timestamp
+    # Create output directory with timestamp (optional suffix)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = Path(args.output_dir) / f"run_{timestamp}"
+    suffix = (args.output_dir_suffix or '').strip().replace(' ', '_').replace('/', '_').strip('_')
+    run_name = f"run_{timestamp}" + (f"_{suffix}" if suffix else "")
+    output_dir = Path(args.output_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Setup logging with timestamped log file in output directory (default INFO so log file is populated)
@@ -493,6 +512,13 @@ def main():
                 logger.info(f"Longitudes to drop (CLI): {longitudes}")
             except Exception as e:
                 logger.warning(f"Failed to parse --longitudes-to-drop: {e}")
+        # Optional natveg-only filtering (CLI overrides config)
+        if args.natveg_only:
+            config.update_data_config(natveg_only=True)
+            logger.info("Enabled natveg-only filtering (PCT_NATVEG>0 and PCT_NAT_PFT_0<100).")
+        if getattr(args, 'no_natveg_filter_before_split', False):
+            config.update_data_config(natveg_filter_before_split=False)
+            logger.info("Natveg filter applied after split (test set will match no-filter run).")
         if args.variable_list is not None:
             logger.info(f"Using CNP configuration from variable list file: {args.variable_list}")
         else:
@@ -771,6 +797,12 @@ def main():
                                     update_kwargs['longitudes_to_drop'] = [float(x) for x in lon_drop]
                                 elif isinstance(lon_drop, str):
                                     update_kwargs['longitudes_to_drop'] = [float(x.strip()) for x in lon_drop.split(',') if x.strip()]
+                            
+                            # Natveg-only: keep only PCT_NATVEG>0 and PCT_NAT_PFT_0<100 (CLI takes precedence)
+                            if 'natveg_only' in filter_config and not args.natveg_only:
+                                update_kwargs['natveg_only'] = bool(filter_config['natveg_only'])
+                            if 'natveg_filter_before_split' in filter_config and not getattr(args, 'no_natveg_filter_before_split', False):
+                                update_kwargs['natveg_filter_before_split'] = bool(filter_config['natveg_filter_before_split'])
                             
                             if update_kwargs:
                                 config.update_data_config(**update_kwargs)
@@ -1265,6 +1297,8 @@ def main():
                     'file_pattern': getattr(data_cfg, 'file_pattern', None) or 'enhanced_1_training_data_batch_*.pkl',
                     'dataset_file_patterns': dict(getattr(data_cfg, 'dataset_file_patterns', None) or {}),
                     'longitudes_to_drop': list(getattr(data_cfg, 'longitudes_to_drop', None) or []),
+                    'natveg_only': bool(getattr(data_cfg, 'natveg_only', False)),
+                    'natveg_filter_before_split': bool(getattr(data_cfg, 'natveg_filter_before_split', True)),
                 }
             config_dict = {
                 'include_water': include_water,

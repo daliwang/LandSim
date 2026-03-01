@@ -100,8 +100,13 @@ class DataConfig:
     tropical_only: bool = False
     tropical_lat_range: Tuple[float, float] = (-23.5, 23.5)
     tropical_lat_column: Optional[str] = None
-    
-    
+    # Natveg-only filtering: keep only gridcells with PCT_NATVEG > 0 and PCT_NAT_PFT_0 < 100
+    natveg_only: bool = False
+    # When True: filter to natveg before shuffle/split (legacy). When False: split on full data, then
+    # filter only training set to natveg, so test set is the same as no-filter run (natveg test ⊂ no-filter test).
+    # Default True preserves legacy behavior when key is missing.
+    natveg_filter_before_split: bool = True
+
     # File loading limits (for testing)
     max_files: Optional[int] = None  # Maximum number of files to load (None = all files)
     

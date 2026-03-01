@@ -406,6 +406,10 @@ def run_inference_all(
                 config.data_config.file_pattern = data_cfg.get('file_pattern')
             if data_cfg.get('dataset_file_patterns'):
                 config.data_config.dataset_file_patterns = data_cfg.get('dataset_file_patterns')
+            if 'natveg_only' in data_cfg:
+                config.data_config.natveg_only = bool(data_cfg['natveg_only'])
+            if 'natveg_filter_before_split' in data_cfg:
+                config.data_config.natveg_filter_before_split = bool(data_cfg['natveg_filter_before_split'])
         elif data_paths is None:
             logging.warning(
                 "Training run cnp_config.json has no data_config (or no data_paths). "
