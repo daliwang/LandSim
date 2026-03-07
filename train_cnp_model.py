@@ -1292,6 +1292,9 @@ def main():
             data_cfg = getattr(config, 'data_config', None)
             data_config_snapshot = None
             if data_cfg is not None:
+                tr = getattr(data_cfg, 'tropical_lat_range', (-23.5, 23.5))
+                if tr is None:
+                    tr = (-23.5, 23.5)
                 data_config_snapshot = {
                     'data_paths': list(getattr(data_cfg, 'data_paths', []) or []),
                     'file_pattern': getattr(data_cfg, 'file_pattern', None) or 'enhanced_1_training_data_batch_*.pkl',
@@ -1299,6 +1302,8 @@ def main():
                     'longitudes_to_drop': list(getattr(data_cfg, 'longitudes_to_drop', None) or []),
                     'natveg_only': bool(getattr(data_cfg, 'natveg_only', False)),
                     'natveg_filter_before_split': bool(getattr(data_cfg, 'natveg_filter_before_split', True)),
+                    'tropical_only': bool(getattr(data_cfg, 'tropical_only', False)),
+                    'tropical_lat_range': [float(tr[0]), float(tr[1])],
                 }
             config_dict = {
                 'include_water': include_water,

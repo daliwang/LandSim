@@ -318,6 +318,18 @@ def apply_training_overrides(
     if "mask_absent_pfts" in config:
         train_cfg.mask_absent_pfts = bool(config["mask_absent_pfts"])
 
+    # Tropical-only filtering: restrict data to latitude band before train/test split.
+    if "tropical_only" in config:
+        data_cfg.tropical_only = bool(config["tropical_only"])
+    if "tropical_lat_range" in config:
+        raw = config["tropical_lat_range"]
+        if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+            data_cfg.tropical_lat_range = (float(raw[0]), float(raw[1]))
+        elif isinstance(raw, str):
+            parts = [p.strip() for p in raw.split(",")]
+            if len(parts) >= 2:
+                data_cfg.tropical_lat_range = (float(parts[0]), float(parts[1]))
+
 
 def load_training_config_from_checkpoint(model_path: Path) -> Optional[Dict[str, Any]]:
     """Discover and load `cnp_config.json` located near the checkpoint."""
@@ -545,6 +557,18 @@ def fine_tune(args: argparse.Namespace) -> Dict[str, Any]:
     logger.info("Run directory: %s", run_dir)
     attach_file_logger(run_dir)
 
+    # CLI overrides for tropical-only filtering (override config file if set).
+    if getattr(args, "tropical_only", False):
+        manager.data_config.tropical_only = True
+        if getattr(args, "tropical_lat_range", None):
+            parts = [p.strip() for p in args.tropical_lat_range.split(",")]
+            if len(parts) >= 2:
+                manager.data_config.tropical_lat_range = (float(parts[0]), float(parts[1]))
+        logger.info(
+            "Tropical-only fine-tuning: lat range %s",
+            manager.data_config.tropical_lat_range,
+        )
+
     # Load historical configuration from the checkpoint when available.
     prior_config = load_training_config_from_checkpoint(model_path)
     if prior_config:
@@ -644,6 +668,18 @@ def parse_args() -> argparse.Namespace:
         "--normalization",
         choices=("group", "individual", "hybrid"),
         help="Override normalization strategy (otherwise use config setting).",
+    )
+    parser.add_argument(
+        "--tropical-only",
+        action="store_true",
+        help="Restrict fine-tuning data to tropical latitude band (overrides config file).",
+    )
+    parser.add_argument(
+        "--tropical-lat-range",
+        type=str,
+        metavar="MIN,MAX",
+        default=None,
+        help='Latitude range for tropical filter, e.g. "-30,30" (default: -23.5,23.5). Used when --tropical-only is set.',
     )
     parser.add_argument(
         "--log-level",

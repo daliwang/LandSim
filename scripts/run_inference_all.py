@@ -230,7 +230,8 @@ def run_inference_all(
     loader: str = 'auto',
     mask_pft_with_gt: bool = False,
     mask_absent_pfts: bool = True,
-    derive_np_from_c: bool = False
+    derive_np_from_c: bool = True,
+    inference_full_grid: bool = False
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
@@ -410,6 +411,18 @@ def run_inference_all(
                 config.data_config.natveg_only = bool(data_cfg['natveg_only'])
             if 'natveg_filter_before_split' in data_cfg:
                 config.data_config.natveg_filter_before_split = bool(data_cfg['natveg_filter_before_split'])
+            if 'tropical_only' in data_cfg:
+                config.data_config.tropical_only = bool(data_cfg['tropical_only'])
+                logging.info(f"Using tropical_only from training config: {config.data_config.tropical_only}")
+            if 'tropical_lat_range' in data_cfg:
+                tr = data_cfg['tropical_lat_range']
+                if isinstance(tr, (list, tuple)) and len(tr) >= 2:
+                    config.data_config.tropical_lat_range = (float(tr[0]), float(tr[1]))
+                    logging.info(f"Using tropical_lat_range from training config: {config.data_config.tropical_lat_range}")
+        # Force full-grid inference when requested (e.g. Phase 2 trained tropical-only; merge needs all gridcells)
+        if inference_full_grid:
+            config.data_config.tropical_only = False
+            logging.info("Inference full grid: tropical_only=False (use all gridcells)")
         elif data_paths is None:
             logging.warning(
                 "Training run cnp_config.json has no data_config (or no data_paths). "
@@ -1765,8 +1778,10 @@ def main():
     parser.add_argument("--no-mask-absent-pfts", dest="mask_absent_pfts", action="store_false", help="Disable masking of absent PFTs")
     parser.set_defaults(mask_absent_pfts=True)
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
-    parser.add_argument("--derive-np-from-c", action='store_true', default=False, 
-                       help="Enforce CNP stoichiometric ratios by deriving N/P variables from C predictions after inference (default: False)")
+    parser.add_argument("--derive-np-from-c", action='store_true', default=True, 
+                       help="Enforce CNP stoichiometric ratios by deriving N/P variables from C predictions after inference (default: True)")
+    parser.add_argument("--inference-full-grid", action='store_true', default=False,
+                       help="Run inference on full global grid (set tropical_only=False). Use for Phase 2 tropical-trained models when merging P variables into a global restart; otherwise only validation/tropical gridcells would be in the predictions NetCDF.")
     args = parser.parse_args()
     
     # Setup logging
@@ -1782,12 +1797,13 @@ def main():
             model_config=args.model_config,
             scalers_dir=args.scalers_dir,
             use_training_config=args.use_training_config,
-            strict_loading=args.strict_loading
-            , debug_vars=args.debug_vars
-            , loader=args.loader
-            , mask_pft_with_gt=args.mask_pft_with_gt
-            , mask_absent_pfts=args.mask_absent_pfts
-            , derive_np_from_c=args.derive_np_from_c
+            strict_loading=args.strict_loading,
+            debug_vars=args.debug_vars,
+            loader=args.loader,
+            mask_pft_with_gt=args.mask_pft_with_gt,
+            mask_absent_pfts=args.mask_absent_pfts,
+            derive_np_from_c=args.derive_np_from_c,
+            inference_full_grid=getattr(args, 'inference_full_grid', False)
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         

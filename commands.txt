@@ -315,3 +315,109 @@ python ../../scripts/generate_prediction_quality_report.py --input validation_st
 
 # One-liner (from run dir):
 # python ../../scripts/cnp_result_validationplot.py --stats-only && python ../../scripts/validation_npool_ppool_per_pft.py . -o analysis/npool_ppool_per_pft.json && python ../../scripts/generate_prediction_quality_report.py --input validation_stats.csv --npool-ppool-per-pft-json analysis/npool_ppool_per_pft.json
+
+
+python /mnt/proj-shared/AI4BGC_7xw/AI4BGC/scripts/extract_elm_restart_point.py \
+  --restart-file /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260228_214757_natveg_improved/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --lat -17.4246 \
+  --lon 303.75 \
+  --output-file /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260228_214757_natveg_improved/Amazon_updated_natveg_improved_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024.nc
+
+two step training targeting tropical and occld_vr
+python train_cnp_model.py   --training-config-json config/training_config_experiment_3_global_natveg_improved_occlp.json   --variable-list CNP_IO_updated9_dev_dw.txt   --output-dir-suffix natveg_improved_occlp
+
+python ../../scripts/run_inference_all.py --model model.pth --output-dir cnp_inference_entire_dataset --derive-np-from-c
+python ../../scripts/ai_predictions_to_netcdf.py
+python ../../scripts/ai_predictions_to_restart.py \
+  --ai-predictions comparison_results/ai_predictions_for_plotting.nc \
+  --restart-file ../../ELM_data/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --output ./updated_restart_global_natveg_improved_occlp.nc \
+  --variable-list ../../CNP_IO_updated9_dev_dw.txt
+
+
+  python scripts/run_finetuning.py \
+  --config CNP_IO_finetune_tropics.txt \
+  --tropical-only
+
+  python scripts/run_finetuning_json.py \
+  --config-json config/training_config_experiment_3_global_natveg_occlp_phase2_tropics.json 
+
+  go to /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results_tropics_natveg_improved_occlp/finetune_20260304_081553
+
+  python ../../scripts/run_inference_all.py \
+  --model /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results_tropics_natveg_improved_occlp/finetune_20260304_081553/finetuned_model.pth \
+  --data-paths /mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP \
+  --file-pattern training_data_batch_*.pkl \
+  --output-dir cnp_inference_entire_dataset \
+  --derive-np-from-c
+
+
+  python train_cnp_model.py \
+  --training-config-json config/training_config_experiment_3_natveg_occlp_phase2_tropics_from_scratch.json \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --tropical-only \
+  --output-dir-suffix natveg_occlp_phase2_tropics_from_scratch
+
+
+  python train_cnp_model.py \
+  --training-config-json config/training_config_experiment_3_natveg_occlp_extreme_soilp.json \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --output-dir-suffix natveg_occlp_extreme_soilp
+
+  # Amazon site: use absolute --output-file so one file regardless of cwd
+  python ../../scripts/extract_elm_restart_point.py \
+  --restart-file /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260304_133300_natveg_occlp_extreme_soilp/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --lat -17.4246 \
+  --lon 303.75 \
+  --output-file /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260304_133300_natveg_occlp_extreme_soilp/Amazon_Extreme_SoilP_updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc
+
+
+  python train_cnp_model.py \
+  --training-config-json config/training_config_phase2_four_p_weight100.json \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --tropical-only \
+  --output-dir-suffix phase2_four_p_weight100
+
+# Phase2 P-variable merge: base restart (natveg_improved) + phase2 P predictions -> new restart in phase2 dir
+# IMPORTANT: Use ENTIRE-DATASET inference (all gridcells), not just cnp_predictions (validation/tropical subset).
+# cnp_predictions has ~1064 gridcells (validation from tropical-only training); restart has 20975. Use full-grid inference.
+# Step 1: Run inference on entire dataset (full global grid) with Phase 2 model
+# cd cnp_results/run_20260305_153217_phase2_pvariable_focus && python ../../scripts/run_inference_all.py \
+#   --model cnp_predictions/model.pth \
+#   --output-dir cnp_inference_entire_dataset \
+#   --inference-full-grid \
+#   --derive-np-from-c \
+#   > run_inference_entire_dataset.log 2>&1
+# Step 2: Build phase2 AI predictions NetCDF from cnp_inference_entire_dataset (not cnp_predictions)
+# python scripts/ai_predictions_to_netcdf.py \
+#   --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/cnp_inference_entire_dataset/cnp_predictions \
+#   --output cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_for_plotting.nc
+# Step 3: Update only P variables in base restart, write to phase2 dir
+# python scripts/ai_predictions_to_restart.py \
+#   --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_for_plotting.nc \
+#   --restart-file cnp_results/run_20260228_214757_natveg_improved/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+#   --output cnp_results/run_20260305_153217_phase2_pvariable_focus/updated_restart_phase2_pvariable_focus_P_from_natveg_base.nc \
+#   --variable-list CNP_IO_updated9_dev_dw.txt \
+#   --variables-to-update @config/phase2_soilp_variables_to_update.txt
+
+# Conservative Phase2 merge: tropical-only inference -> NetCDF -> update base restart with 4 P vars in tropical cells only
+# 1) Add tropical_only to run cnp_config.json if missing; then run inference (no --inference-full-grid)
+# cd cnp_results/run_20260305_153217_phase2_pvariable_focus && python ../../scripts/run_inference_all.py --model cnp_predictions/model.pth --output-dir cnp_inference_tropical_only
+# 2) Build NetCDF from tropical predictions
+# python scripts/ai_predictions_to_netcdf.py --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/cnp_inference_tropical_only/cnp_predictions --output cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_tropical_only.nc
+# 3) Update base restart: only occlp_vr, labilep_vr, solutionp_vr, secondp_vr in tropical band (-30,30)
+# python scripts/ai_predictions_to_restart.py --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_tropical_only.nc --restart-file cnp_results/run_20260228_214757_natveg_improved/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc --output cnp_results/run_20260305_153217_phase2_pvariable_focus/updated_restart_phase2_tropical_4p.nc --variable-list CNP_IO_updated9_dev_dw.txt --variables-to-update occlp_vr,labilep_vr,solutionp_vr,secondp_vr "--tropical-lat-range=-30,30"
+
+
+python scripts/compare_restart_pft1d_amazon.py \
+  --restart-a ELM_data/Amazon_20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc \
+  --restart-b cnp_results/run_20260305_153217_phase2_pvariable_focus/Amazon_phase2_tropical_4p_restart.nc \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --output cnp_results/run_20260305_153217_phase2_pvariable_focus/Amazon_restart_PFT1d_comparison_0801_vs_phase2_tropical_4p.txt \
+  --plot-dir cnp_results/run_20260305_153217_phase2_pvariable_focus/plots
+
+
+python train_cnp_model.py \
+  --training-config-json config/training_config_phase2_pvariable_focus_global.json \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --output-dir-suffix phase2_pvariab_focus_global
