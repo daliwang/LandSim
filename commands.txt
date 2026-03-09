@@ -421,3 +421,8 @@ python train_cnp_model.py \
   --training-config-json config/training_config_phase2_pvariable_focus_global.json \
   --variable-list CNP_IO_updated9_dev_dw.txt \
   --output-dir-suffix phase2_pvariab_focus_global
+
+
+  python scripts/run_finetuning_json.py \
+  --config-json config/finetune_phase2_pvariable_focus_two_region.json \
+  --output-dir-suffix phase2_pvariab_focus_finetune_with_tworegions

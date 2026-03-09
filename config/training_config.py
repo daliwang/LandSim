@@ -117,6 +117,10 @@ class DataConfig:
     # Longitude filtering - list of longitude values to drop from dataset
     longitudes_to_drop: List[float] = field(default_factory=list)
 
+    # Region boxes: keep only gridcells inside any box. List of (lat_min, lat_max, lon_min, lon_max).
+    # Longitude in 0-360 convention. None = no region filter (use tropical_only / longitudes_to_drop instead).
+    region_boxes: Optional[List[Tuple[float, float, float, float]]] = None
+
 
 
 

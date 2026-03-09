@@ -113,6 +113,17 @@ class DataLoaderIndividual:
                 return col
         return None
 
+    def _resolve_lon_column(self) -> Optional[str]:
+        """Resolve longitude column name from config or common patterns."""
+        for col in getattr(self.data_config, 'static_columns', []) or []:
+            if 'lon' in str(col).lower():
+                if col in self.df.columns:
+                    return col
+        for col in ['lon', 'longitude', 'LON', 'Longitude', 'LONGITUDE']:
+            if col in self.df.columns:
+                return col
+        return None
+
     def load_data(self) -> pd.DataFrame:
         """Load data from configured paths and patterns."""
         df_list = []
@@ -217,6 +228,32 @@ class DataLoaderIndividual:
                 logger.info(f"Longitude filtering: {original_size} samples -> {filtered_size} samples (dropped {dropped_count} samples)")
             else:
                 logger.warning("'Longitude' column not found in dataset. Cannot apply longitude filtering.")
+
+        # Optional region-box filtering: keep only (lat, lon) inside any box. Boxes = (lat_min, lat_max, lon_min, lon_max), lon 0-360.
+        region_boxes = getattr(self.data_config, 'region_boxes', None)
+        if region_boxes and len(region_boxes) > 0:
+            lat_col = self._resolve_lat_column()
+            lon_col = self._resolve_lon_column()
+            if lat_col is not None and lon_col is not None:
+                original_size = len(self.df)
+                lat_vals = pd.to_numeric(self.df[lat_col], errors='coerce')
+                lon_vals = pd.to_numeric(self.df[lon_col], errors='coerce')
+                # Normalize longitude to 0-360 for comparison (if data use -180..180, add 360 when < 0)
+                lon_360 = lon_vals.where(lon_vals >= 0, lon_vals + 360.0)
+                mask = pd.Series(False, index=self.df.index)
+                for (lat_min, lat_max, lon_min, lon_max) in region_boxes:
+                    in_lat = (lat_vals >= float(lat_min)) & (lat_vals <= float(lat_max))
+                    in_lon = (lon_360 >= float(lon_min)) & (lon_360 <= float(lon_max))
+                    mask = mask | (in_lat & in_lon)
+                self.df = self.df[mask].reset_index(drop=True)
+                filtered_size = len(self.df)
+                logger.info(
+                    f"Region-box filtering: {original_size} -> {filtered_size} (boxes: {region_boxes})"
+                )
+                if filtered_size == 0:
+                    logger.warning("Region-box filter removed all samples. Check lat/lon columns and box definitions.")
+            else:
+                logger.warning("Region-box filter enabled but lat/lon columns not found. Skipping.")
 
         # Optional tropical-only filtering by latitude
         if getattr(self.data_config, 'tropical_only', False):

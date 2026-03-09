@@ -162,6 +162,7 @@ Settings for which samples are included at training time. **Use the training con
 - `tropical_lat_column`: Optional column name for latitude (default: auto-detect, e.g. `Latitude`)
 - `natveg_only`: If `true`, keep only gridcells with natural vegetation: `PCT_NATVEG > 0` and `PCT_NAT_PFT_0 < 100` (default: `false`). See `docs/EXCLUDED_SAMPLE_ANALYSIS.md` for impact (~33% of samples excluded on typical data).
 - `longitudes_to_drop`: List of longitudes (degrees) to exclude from training, e.g. `[0, 358.75]`. Samples whose longitude matches (within tolerance) are dropped. Overrides the same option in CNP_IO. Use 0–360° convention to match data.
+- `region_boxes`: Optional list of boxes to **keep**; only gridcells inside at least one box are used. Each box is `[lat_min, lat_max, lon_min, lon_max]` with longitude in **0–360°**. E.g. Amazon + Africa: `[[-30, 10, 270, 330], [-15, 15, 0, 30]]`. See `docs/PLAN_TWO_REGION_FIVE_P_TRAINING.md`.
 
 **Note**: CLI arguments (`--tropical-only`, `--tropical-lat-range`, `--natveg-only`, `--longitudes-to-drop`) take precedence over JSON values. JSON `data_filtering_config` overrides values from the CNP_IO variable list (e.g. longitude filtering in CNP_IO).
 

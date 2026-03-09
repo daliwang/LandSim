@@ -419,10 +419,22 @@ def run_inference_all(
                 if isinstance(tr, (list, tuple)) and len(tr) >= 2:
                     config.data_config.tropical_lat_range = (float(tr[0]), float(tr[1]))
                     logging.info(f"Using tropical_lat_range from training config: {config.data_config.tropical_lat_range}")
+            if 'region_boxes' in data_cfg:
+                boxes = data_cfg['region_boxes']
+                if isinstance(boxes, (list, tuple)) and len(boxes) > 0:
+                    parsed = []
+                    for b in boxes:
+                        if isinstance(b, (list, tuple)) and len(b) >= 4:
+                            parsed.append((float(b[0]), float(b[1]), float(b[2]), float(b[3])))
+                    if parsed:
+                        config.data_config.region_boxes = parsed
+                        logging.info(f"Using region_boxes from training config: {len(parsed)} box(es) — inference will run on these regions only")
         # Force full-grid inference when requested (e.g. Phase 2 trained tropical-only; merge needs all gridcells)
         if inference_full_grid:
             config.data_config.tropical_only = False
-            logging.info("Inference full grid: tropical_only=False (use all gridcells)")
+            if hasattr(config.data_config, 'region_boxes'):
+                config.data_config.region_boxes = None
+            logging.info("Inference full grid: tropical_only=False, region_boxes cleared (use all gridcells)")
         elif data_paths is None:
             logging.warning(
                 "Training run cnp_config.json has no data_config (or no data_paths). "
@@ -1782,6 +1794,8 @@ def main():
                        help="Enforce CNP stoichiometric ratios by deriving N/P variables from C predictions after inference (default: True)")
     parser.add_argument("--inference-full-grid", action='store_true', default=False,
                        help="Run inference on full global grid (set tropical_only=False). Use for Phase 2 tropical-trained models when merging P variables into a global restart; otherwise only validation/tropical gridcells would be in the predictions NetCDF.")
+    parser.add_argument("--inference-two-regions-only", action='store_true', default=False,
+                       help="Run inference only on Amazon + Central Africa region boxes. Use for two-region finetuned models when you want predictions only in those regions.")
     args = parser.parse_args()
     
     # Setup logging
@@ -1803,7 +1817,8 @@ def main():
             mask_pft_with_gt=args.mask_pft_with_gt,
             mask_absent_pfts=args.mask_absent_pfts,
             derive_np_from_c=args.derive_np_from_c,
-            inference_full_grid=getattr(args, 'inference_full_grid', False)
+            inference_full_grid=getattr(args, 'inference_full_grid', False),
+            inference_two_regions_only=getattr(args, 'inference_two_regions_only', False),
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         

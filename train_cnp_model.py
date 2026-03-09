@@ -803,7 +803,15 @@ def main():
                                 update_kwargs['natveg_only'] = bool(filter_config['natveg_only'])
                             if 'natveg_filter_before_split' in filter_config and not getattr(args, 'no_natveg_filter_before_split', False):
                                 update_kwargs['natveg_filter_before_split'] = bool(filter_config['natveg_filter_before_split'])
-                            
+                            if 'region_boxes' in filter_config:
+                                boxes = filter_config['region_boxes']
+                                if isinstance(boxes, (list, tuple)) and len(boxes) > 0:
+                                    parsed = []
+                                    for b in boxes:
+                                        if isinstance(b, (list, tuple)) and len(b) >= 4:
+                                            parsed.append((float(b[0]), float(b[1]), float(b[2]), float(b[3])))
+                                    if parsed:
+                                        update_kwargs['region_boxes'] = parsed
                             if update_kwargs:
                                 config.update_data_config(**update_kwargs)
                                 logger.info(f"Applied data_filtering_config from unified config: {update_kwargs}")
