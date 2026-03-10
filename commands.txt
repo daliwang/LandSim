@@ -426,3 +426,55 @@ python train_cnp_model.py \
   python scripts/run_finetuning_json.py \
   --config-json config/finetune_phase2_pvariable_focus_two_region.json \
   --output-dir-suffix phase2_pvariab_focus_finetune_with_tworegions
+
+
+use the bias/scale adjustment
+
+python scripts/apply_5p_bias_scale_correction.py \
+  --run-dir cnp_results/run_20260228_214757_natveg_improved \
+  --region-config-json config/training_config_two_region_five_p.json
+
+python scripts/compare_5p_amazon_site_scatter.py
+
+  python scripts/apply_5p_bias_scale_correction.py \
+  --run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
+  --region-config-json config/training_config_two_region_five_p.json \
+  --variables occlp_vr,labilep_vr,solutionp_vr,secondp_vr \
+  --output-subdir soil_2d_predictions_4P_bias_corrected_phase2
+
+
+python scripts/compare_5p_amazon_site_scatter.py \
+  --gt-run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
+  --natveg-run-dir cnp_results/run_20260228_214757_natveg_improved \
+  --phase2-run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
+  --phase2-bias-corrected-subdir \
+    cnp_inference_entire_dataset/cnp_predictions/soil_2d_predictions_4P_bias_corrected_phase2
+
+
+Site A: lon=300.0, lat=4.240838
+Site B: lon=292.5, lat=-15.549738
+Site C: lon=295.0, lat=-8.952880
+Site D: lon=288.75, lat=-4.240838
+Site E: lon=317.5, lat=-12.722513
+
+
+python scripts/compare_5p_amazon_site_scatter.py \
+  --gt-run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
+  --natveg-run-dir cnp_results/run_20260228_214757_natveg_improved \
+  --phase2-run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
+  --phase2-bias-corrected-subdir \
+    cnp_inference_entire_dataset/cnp_predictions/soil_2d_predictions_4P_bias_corrected_phase2 \
+  --lon 300.0 \
+  --lat 4.240838 \
+  --output-dir cnp_results/run_20260228_214757_natveg_improved/analysis/amazon_5p_comparison_bias_correction_site_A
+
+
+  python scripts/compare_5p_amazon_site_scatter.py \
+  --gt-run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
+  --natveg-run-dir cnp_results/run_20260228_214757_natveg_improved \
+  --phase2-run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
+  --phase2-bias-corrected-subdir \
+    cnp_inference_entire_dataset/cnp_predictions/soil_2d_predictions_4P_bias_corrected_phase2 \
+  --lon 292.5  \
+  --lat -15.549738 \
+  --output-dir cnp_results/run_20260228_214757_natveg_improved/analysis/amazon_5p_comparison_bias_correction_site_B
