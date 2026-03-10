@@ -61,7 +61,13 @@ def _extract_profile(
 ) -> Tuple[np.ndarray, List[str]]:
     """Extract the vertical profile (all layers) for one variable at row_idx."""
     prefix = f"Y_{var}_col1_layer"
-    layer_cols = sorted([c for c in df.columns if c.startswith(prefix)])
+    # Sort by numeric layer index so that layer1, layer2, ..., layer10 are in
+    # the correct physical order instead of the lexicographic order
+    # (layer1, layer10, layer2, ...).
+    layer_cols = sorted(
+        [c for c in df.columns if c.startswith(prefix)],
+        key=lambda c: int(c.split("layer")[-1]),
+    )
     if not layer_cols:
         raise ValueError(f"No columns starting with '{prefix}' found.")
 
@@ -94,8 +100,8 @@ def load_profiles_for_site(
             raise FileNotFoundError(f"Ground truth file not found: {gt_path}")
 
         gt_df = pd.read_csv(gt_path)
-        row_idx = _find_row_for_site(gt_df, lon=lon, lat=lat)
-        gt_vals, layer_cols = _extract_profile(gt_df, var=var, row_idx=row_idx)
+        gt_row_idx = _find_row_for_site(gt_df, lon=lon, lat=lat)
+        gt_vals, layer_cols = _extract_profile(gt_df, var=var, row_idx=gt_row_idx)
 
         gt_profiles[var] = gt_vals
         if not layer_labels:
@@ -112,23 +118,12 @@ def load_profiles_for_site(
                 continue
 
             pred_df = pd.read_csv(pred_path)
-            if pred_df.shape != gt_df.shape:
-                raise ValueError(
-                    f"Shape mismatch GT vs predictions for model '{model.name}', var '{var}': "
-                    f"GT {gt_df.shape}, PRED {pred_df.shape}"
-                )
 
-            # Ensure same lon/lat ordering
-            if not np.allclose(
-                pred_df["Longitude"].values, gt_df["Longitude"].values
-            ) or not np.allclose(
-                pred_df["Latitude"].values, gt_df["Latitude"].values
-            ):
-                raise ValueError(
-                    f"Longitude/Latitude mismatch between GT and model '{model.name}' for var '{var}'"
-                )
-
-            pred_vals, _ = _extract_profile(pred_df, var=var, row_idx=row_idx)
+            # Find the matching site row independently in each prediction DataFrame.
+            # This avoids assumptions about global shape or ordering and supports
+            # region-only prediction CSVs (e.g., Amazon/Africa subsets).
+            pred_row_idx = _find_row_for_site(pred_df, lon=lon, lat=lat)
+            pred_vals, _ = _extract_profile(pred_df, var=var, row_idx=pred_row_idx)
             model_profiles[model.name][var] = pred_vals
 
     return gt_profiles, model_profiles, layer_labels

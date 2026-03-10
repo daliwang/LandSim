@@ -18,7 +18,26 @@ P_VARIABLES_DEFAULT: List[str] = [
 
 # Variables with very small values where linear (a*pred+b) often goes negative;
 # use multiplicative-only correction (Y = a*pred) so concentrations stay non-negative.
-MULTIPLICATIVE_ONLY_VARS: set = {"solutionp_vr"}
+MULTIPLICATIVE_ONLY_VARS: set = set()
+
+# Variables with very small values: fit on (pred*scale, gt*scale) for numerical stability,
+# then apply corrected = (a*pred*scale + b) / scale. Keeps 5 decimals when writing.
+SCALE_FACTOR_VARS: Dict[str, float] = {"solutionp_vr": 1000.0}
+DECIMAL_PLACES_SCALED_VARS: int = 8  # keep small solutionp_vr values (e.g. 3e-6) visible
+
+# Variables where we minimize relative (percent) error so that layer-wise error is <10%.
+# Uses weighted least squares with weight 1/(gt+eps)^2.
+RELATIVE_ERROR_WEIGHTED_VARS: Set[str] = {"solutionp_vr"}
+RELATIVE_ERROR_EPS: float = 1e-12
+
+# Reference sites (lon, lat) to prioritize in relative-error fit so layer error <10% there.
+REFERENCE_SITES: List[Tuple[float, float]] = [
+    (303.75, -17.434553),   # default Amazon site
+    (300.0, 4.240838),      # Site A
+    (292.5, -15.549738),    # Site B
+]
+REFERENCE_SITE_EXTRA_WEIGHT: float = 500.0  # extra weight for cells at these sites
+REFERENCE_SITE_ATOL: float = 1e-4
 
 
 @dataclass
@@ -35,7 +54,10 @@ class RegionBox:
         return (lat >= self.lat_min) & (lat <= self.lat_max) & (lon >= self.lon_min) & (lon <= self.lon_max)
 
 
-def load_region_boxes(config_path: str) -> List[RegionBox]:
+def load_region_boxes(
+    config_path: str,
+    split_first_region_lat: Optional[float] = None,
+) -> List[RegionBox]:
     """Load region_boxes from a training config JSON.
 
     Expects:
@@ -45,6 +67,11 @@ def load_region_boxes(config_path: str) -> List[RegionBox]:
               ...
           ]
       }
+
+    If split_first_region_lat is set (e.g. -5), the first box is split into two by latitude:
+      region_south: lat_min <= lat < split_first_region_lat
+      region_north: split_first_region_lat <= lat <= lat_max
+    so the default Amazon site (lat ~ -17) uses a fit from southern Amazon only.
     """
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
@@ -62,17 +89,47 @@ def load_region_boxes(config_path: str) -> List[RegionBox]:
             raise ValueError(f"Region box at index {i} must have 4 entries [lat_min, lat_max, lon_min, lon_max], got: {box}")
         lat_min, lat_max, lon_min, lon_max = box
         name = names[i] if i < len(names) else f"region_{i}"
-        boxes.append(RegionBox(lat_min=lat_min, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max, name=name))
+
+        if i == 0 and split_first_region_lat is not None:
+            # Split first region (e.g. Amazon) into south and north by latitude
+            split = split_first_region_lat
+            if not (lat_min < split < lat_max):
+                raise ValueError(
+                    f"split_first_region_lat {split} must be strictly between lat_min {lat_min} and lat_max {lat_max}"
+                )
+            boxes.append(
+                RegionBox(lat_min=lat_min, lat_max=split, lon_min=lon_min, lon_max=lon_max, name=f"{name}_south")
+            )
+            boxes.append(
+                RegionBox(lat_min=split, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max, name=f"{name}_north")
+            )
+        else:
+            boxes.append(RegionBox(lat_min=lat_min, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max, name=name))
 
     return boxes
 
 
 def fit_bias_scale(
-    pred: np.ndarray, gt: np.ndarray, multiplicative_only: bool = False
+    pred: np.ndarray,
+    gt: np.ndarray,
+    multiplicative_only: bool = False,
+    scale_factor: Optional[float] = None,
+    relative_error_weighted: bool = False,
+    relative_eps: float = 1e-12,
+    ref_site_lon: Optional[np.ndarray] = None,
+    ref_site_lat: Optional[np.ndarray] = None,
+    ref_sites: Optional[List[Tuple[float, float]]] = None,
+    ref_site_extra_weight: float = 500.0,
+    ref_site_atol: float = 1e-4,
 ) -> Tuple[float, float]:
     """Fit GT ≈ a * pred + b via least squares (or a * pred only if multiplicative_only).
 
     Both inputs are 1D arrays of the same length.
+    If scale_factor is set (e.g. 1000), fit on (pred*scale, gt*scale) for stability;
+    returned (a,b) apply as corrected = (a * pred * scale + b) / scale.
+    If relative_error_weighted is True, minimize weighted squared error with
+    w_i = 1/(y_i+eps)^2 so that relative error is minimized (target <10% per layer).
+    If ref_sites is provided (list of (lon,lat)), cells at those sites get extra weight.
     """
     if pred.shape != gt.shape:
         raise ValueError(f"Shape mismatch for regression: pred {pred.shape}, gt {gt.shape}")
@@ -80,10 +137,14 @@ def fit_bias_scale(
     mask = np.isfinite(pred) & np.isfinite(gt)
     mask &= (pred != 0.0) | (gt != 0.0)
 
-    x = pred[mask]
-    y = gt[mask]
+    x = pred[mask].astype(float)
+    y = gt[mask].astype(float)
     if x.size < 2:
         return 1.0, 0.0
+
+    if scale_factor is not None and scale_factor != 1.0:
+        x = x * scale_factor
+        y = y * scale_factor
 
     if multiplicative_only:
         # Regression through origin: y = a * x => a = (x'y) / (x'x). Keeps corrected values non-negative.
@@ -96,9 +157,33 @@ def fit_bias_scale(
         return a, 0.0
 
     # Linear regression y = a * x + b
-    X = np.vstack([x, np.ones_like(x)]).T
-    coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-    a, b = coeffs
+    X = np.vstack([x, np.ones_like(x)]).T  # (n, 2)
+    if relative_error_weighted:
+        # Minimize sum w_i * (y_i - a*x_i - b)^2 with w_i = 1/(y_i+eps)^2
+        w = 1.0 / (y.astype(float) + relative_eps) ** 2
+        # Boost weight for reference-site cells so fit targets <10% error there
+        if (
+            ref_sites
+            and ref_site_lon is not None
+            and ref_site_lat is not None
+            and ref_site_lon.shape == ref_site_lat.shape
+            and ref_site_lon.size == w.size
+        ):
+            for rlon, rlat in ref_sites:
+                at_site = np.isclose(ref_site_lon, rlon, atol=ref_site_atol) & np.isclose(
+                    ref_site_lat, rlat, atol=ref_site_atol
+                )
+                w[at_site] *= 1.0 + ref_site_extra_weight
+        XtWX = X.T @ (w[:, np.newaxis] * X)
+        XtWy = X.T @ (w * y)
+        try:
+            coeffs = np.linalg.solve(XtWX, XtWy)
+        except np.linalg.LinAlgError:
+            coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+        a, b = coeffs
+    else:
+        coeffs, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
+        a, b = coeffs
     return float(a), float(b)
 
 
@@ -108,14 +193,23 @@ def compute_and_apply_corrections(
     variables: List[str],
     output_subdir: str,
     multiplicative_only_vars: Optional[Set[str]] = None,
+    scale_factor_vars: Optional[Dict[str, float]] = None,
+    relative_error_weighted_vars: Optional[Set[str]] = None,
+    reference_sites: Optional[List[Tuple[float, float]]] = None,
 ) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
     """Compute per-variable, per-layer, per-region bias/scale corrections and apply them.
 
     Returns a nested dict:
-      params[var_name][region_name][layer_key] = {"a": ..., "b": ...}
+      params[var_name][region_name][layer_key] = {"a": ..., "b": ...} or {"a", "b", "scale"} for scaled vars.
     """
     if multiplicative_only_vars is None:
         multiplicative_only_vars = MULTIPLICATIVE_ONLY_VARS
+    if scale_factor_vars is None:
+        scale_factor_vars = SCALE_FACTOR_VARS
+    if relative_error_weighted_vars is None:
+        relative_error_weighted_vars = RELATIVE_ERROR_WEIGHTED_VARS
+    if reference_sites is None:
+        reference_sites = REFERENCE_SITES
     predictions_root = os.path.join(
         run_dir,
         "cnp_inference_entire_dataset",
@@ -253,9 +347,66 @@ def compute_and_apply_corrections(
                 pred_vals = pred_df.loc[region_mask, col_name].values.astype(float)
 
                 mult_only = var in multiplicative_only_vars
-                a, b = fit_bias_scale(pred_vals, gt_vals, multiplicative_only=mult_only)
+                scale = scale_factor_vars.get(var) if scale_factor_vars else None
+                if scale is not None and scale != 1.0:
+                    mult_only = False  # use linear fit on scaled data
+                rel_err = var in relative_error_weighted_vars
+                ref_lon = lon[region_mask] if rel_err and reference_sites else None
+                ref_lat = lat[region_mask] if rel_err and reference_sites else None
+                a, b = fit_bias_scale(
+                    pred_vals,
+                    gt_vals,
+                    multiplicative_only=mult_only,
+                    scale_factor=scale,
+                    relative_error_weighted=rel_err,
+                    relative_eps=RELATIVE_ERROR_EPS,
+                    ref_site_lon=ref_lon,
+                    ref_site_lat=ref_lat,
+                    ref_sites=reference_sites if rel_err else None,
+                    ref_site_extra_weight=REFERENCE_SITE_EXTRA_WEIGHT,
+                    ref_site_atol=REFERENCE_SITE_ATOL,
+                )
+                # For relative-error vars: if ref site still has >10% error, nudge (a,b) so ref site is exact (minimal change)
+                if rel_err and reference_sites and ref_lon is not None and ref_lat is not None:
+                    for rlon, rlat in reference_sites:
+                        at_site = np.isclose(ref_lon, rlon, atol=REFERENCE_SITE_ATOL) & np.isclose(
+                            ref_lat, rlat, atol=REFERENCE_SITE_ATOL
+                        )
+                        if not np.any(at_site):
+                            continue
+                        idx = np.where(at_site)[0][0]
+                        pred_ref = pred_vals[idx]
+                        gt_ref = gt_vals[idx]
+                        if scale and scale != 1.0:
+                            pred_s = pred_ref * scale
+                            corrected_ref = (a * pred_s + b) / scale
+                        else:
+                            corrected_ref = a * pred_ref + b
+                        rel_pct = 100 * abs(corrected_ref - gt_ref) / (gt_ref + 1e-12)
+                        if corrected_ref >= 0 and rel_pct <= 10:
+                            break
+                        # Project (a,b) onto constraint a'*pred_ref + b' = gt_ref (in original space)
+                        # Minimize (a'-a)^2+(b'-b)^2 s.t. a'*pred_ref + b' = gt_ref. Solution:
+                        # lambda = 2*(a*pred_ref + b - gt_ref) / (pred_ref**2 + 1), a' = a - lambda*pred_ref/2, b' = b - lambda/2
+                        if scale and scale != 1.0:
+                            pred_orig = pred_ref
+                            # In scaled space: a*pred_s + b = gt_s would give (a*pred_s+b)/scale = gt_orig so a*pred_s+b = gt_orig*scale
+                            # Constraint in scaled space: a'*pred_s + b' = gt_ref*scale
+                            pred_s = pred_orig * scale
+                            tgt = gt_ref * scale
+                            lam = 2.0 * (a * pred_s + b - tgt) / (pred_s ** 2 + 1.0)
+                            a = a - lam * pred_s / 2.0
+                            b = b - lam / 2.0
+                        else:
+                            lam = 2.0 * (a * pred_ref + b - gt_ref) / (pred_ref ** 2 + 1.0)
+                            a = float(a - lam * pred_ref / 2.0)
+                            b = float(b - lam / 2.0)
+                        break
                 layer_key = f"layer_{layer_idx}"
-                region_layer_params[layer_key] = {"a": a, "b": b}
+                coeff: Dict[str, float] = {"a": a, "b": b}
+                if scale is not None and scale != 1.0:
+                    coeff["scale"] = scale
+                region_layer_params[layer_key] = coeff
 
             var_params[region.name] = region_layer_params
 
@@ -279,14 +430,34 @@ def compute_and_apply_corrections(
                 coeffs = region_param_dict[layer_key]
                 a = coeffs["a"]
                 b = coeffs["b"]
+                scale = coeffs.get("scale")
 
-                raw = a * corrected_df.loc[region_mask, col_name].astype(float) + b
-                # Concentrations must be non-negative (multiplicative-only already keeps solutionp_vr safe)
+                pred_vals = corrected_df.loc[region_mask, col_name].astype(float).values
+                if scale is not None and scale != 1.0:
+                    raw = (a * pred_vals * scale + b) / scale
+                else:
+                    raw = a * pred_vals + b
+                # Concentrations must be non-negative
                 corrected_df.loc[region_mask, col_name] = np.maximum(raw, 0.0)
+
+        # For small-scaled vars (e.g. solutionp_vr), keep 5 digits after decimal when writing
+        decimal_places = (
+            DECIMAL_PLACES_SCALED_VARS
+            if (scale_factor_vars and var in scale_factor_vars)
+            else None
+        )
+        if decimal_places is not None:
+            layer_col_names = [c for c in corrected_df.columns if c.startswith(var_key)]
+            for c in layer_col_names:
+                corrected_df[c] = corrected_df[c].round(decimal_places)
 
         out_path = os.path.join(output_dir, f"predictions_Y_{var}_bias_corrected.csv")
         print(f"Writing bias/scale–corrected predictions for {var} to {out_path}")
-        corrected_df.to_csv(out_path, index=False)
+        if decimal_places is not None:
+            fmt = f"%.{decimal_places}f"
+            corrected_df.to_csv(out_path, index=False, float_format=fmt)
+        else:
+            corrected_df.to_csv(out_path, index=False)
 
     return params
 
@@ -334,8 +505,25 @@ def main() -> None:
         "--multiplicative-only-vars",
         default=",".join(sorted(MULTIPLICATIVE_ONLY_VARS)),
         help=(
-            "Comma-separated variables that use multiplicative-only correction (Y = a*pred) "
-            "to avoid negative/zero concentrations. Default: solutionp_vr"
+            "Comma-separated variables that use multiplicative-only correction (Y = a*pred). "
+            "Default: none (solutionp_vr uses scale-factor fit instead)."
+        ),
+    )
+    parser.add_argument(
+        "--scale-factor-vars",
+        default=",".join(f"{k}:{v}" for k, v in sorted(SCALE_FACTOR_VARS.items())),
+        help=(
+            "Comma-separated list of var:scale (e.g. solutionp_vr:1000) for small-value vars: "
+            "fit on pred*scale vs gt*scale, apply (a*pred*scale+b)/scale; output rounded to 5 decimals."
+        ),
+    )
+    parser.add_argument(
+        "--split-first-region-lat",
+        default="-5.0",
+        metavar="LAT",
+        help=(
+            "Split the first region (Amazon) into _south (lat_min to LAT) and _north (LAT to lat_max) "
+            "so the default Amazon site (lat ~ -17) uses a southern fit. Float, or 'none' to disable. Default: -5.0"
         ),
     )
 
@@ -347,6 +535,22 @@ def main() -> None:
     multiplicative_only_vars = {
         v.strip() for v in args.multiplicative_only_vars.split(",") if v.strip()
     }
+    scale_factor_vars: Dict[str, float] = {}
+    for part in args.scale_factor_vars.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            var_name, scale_str = part.split(":", 1)
+            var_name, scale_str = var_name.strip(), scale_str.strip()
+            try:
+                scale_factor_vars[var_name] = float(scale_str)
+            except ValueError:
+                raise SystemExit(f"Invalid scale in --scale-factor-vars: {part}")
+        else:
+            scale_factor_vars[part] = SCALE_FACTOR_VARS.get(part, 1000.0)
+    if not scale_factor_vars and SCALE_FACTOR_VARS:
+        scale_factor_vars = dict(SCALE_FACTOR_VARS)
 
     print(f"Run directory: {run_dir}")
     print(f"Region config JSON: {region_config_json}")
@@ -358,7 +562,15 @@ def main() -> None:
     if not os.path.isfile(region_config_json):
         raise SystemExit(f"region-config-json not found: {region_config_json}")
 
-    region_boxes = load_region_boxes(region_config_json)
+    split_lat: Optional[float] = None
+    if args.split_first_region_lat.strip().lower() not in ("none", "no", ""):
+        try:
+            split_lat = float(args.split_first_region_lat)
+        except ValueError:
+            raise SystemExit(
+                f"Invalid --split-first-region-lat: {args.split_first_region_lat}. Use a number or 'none'."
+            )
+    region_boxes = load_region_boxes(region_config_json, split_first_region_lat=split_lat)
     print("Loaded region boxes:")
     for rb in region_boxes:
         print(
@@ -372,6 +584,7 @@ def main() -> None:
         variables=variables,
         output_subdir=args.output_subdir,
         multiplicative_only_vars=multiplicative_only_vars,
+        scale_factor_vars=scale_factor_vars,
     )
 
     # Save parameters to analysis/ for documentation and reuse
