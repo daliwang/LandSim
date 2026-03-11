@@ -231,7 +231,8 @@ def run_inference_all(
     mask_pft_with_gt: bool = False,
     mask_absent_pfts: bool = True,
     derive_np_from_c: bool = True,
-    inference_full_grid: bool = False
+    inference_full_grid: bool = False,
+    inference_two_regions_only: bool = False,
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
