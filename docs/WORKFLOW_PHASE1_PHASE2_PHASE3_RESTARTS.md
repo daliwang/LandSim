@@ -1,3 +1,37 @@
+### 5. Site‑based 5P restart comparison (Amazon / Africa or any site)
+
+Once `phase1_global`, `phase2_tropical`, and `phase3_tworegions` restarts are created,
+you can **automatically generate single‑point restarts and 5P comparison plots** for
+any longitude/latitude using:
+
+- `scripts/generate_site_5p_restart_comparison.py`
+- Documented in `docs/SITE_5P_RESTART_COMPARISON.md`
+
+Example (Africa site at lon=28, lat=0):
+
+```bash
+python scripts/generate_site_5p_restart_comparison.py \
+  --lon 28.0 \
+  --lat 0.0 \
+  --site-name africa_28_0
+```
+
+Example (Amazon validation site):
+
+```bash
+python scripts/generate_site_5p_restart_comparison.py \
+  --lon 303.75 \
+  --lat -17.434553 \
+  --site-name amazon_303_17S
+```
+
+The script will:
+
+- Extract single‑point restarts from the three phase runs at the requested site.
+- Load Phase1 **ground‑truth 5P vertical profiles** at that site.
+- Produce line plots comparing GT vs `phase1_global`, `phase2_tropical`,
+  and `phase3_tworegions` for the 5 P variables.
+
 ## Workflow: phase1_global, phase2_tropical, phase3_tworegions restarts
 
 This document summarizes how to create three restart files from existing
