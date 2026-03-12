@@ -1,12 +1,15 @@
 import argparse
 import os
+import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import xarray as xr
 
+warnings.filterwarnings("ignore", message=".*multiple fill values.*", category=UserWarning, module="xarray")
 
 P_VARIABLES: List[str] = [
     "labilep_vr",
@@ -218,6 +221,175 @@ def write_profiles_csv(
     df.to_csv(out_csv, index=False)
 
 
+def _load_5p_from_restart(path: str) -> Dict[str, np.ndarray]:
+    """Load 5P variables from a restart NetCDF. Returns dict of (n_col, n_lev) arrays.
+    Handles (column, levgrnd) or (gridcell, column, levgrnd) by taking gridcell=0 if needed."""
+    out: Dict[str, np.ndarray] = {}
+    with xr.open_dataset(path, decode_times=False) as ds:
+        for var in P_VARIABLES:
+            if var not in ds:
+                continue
+            arr = np.asarray(ds[var].values, dtype=float)
+            if arr.ndim == 2:
+                out[var] = arr  # (column, levgrnd)
+            elif arr.ndim == 3:
+                out[var] = arr[0, :, :]  # (gridcell, column, levgrnd) -> take first
+            else:
+                out[var] = arr.reshape(-1, arr.shape[-1])
+    return out
+
+
+def _profile_from_2d(data: Dict[str, np.ndarray], use_column: int = 0) -> Dict[str, np.ndarray]:
+    """Extract 1D profile (first column) per variable for line plots."""
+    return {v: arr[use_column, :].copy() for v, arr in data.items()}
+
+
+def make_restart_profile_plots(
+    output_dir: str,
+    name_a: str,
+    name_b: str,
+    profiles_a: Dict[str, np.ndarray],
+    profiles_b: Dict[str, np.ndarray],
+    lon: float,
+    lat: float,
+) -> None:
+    """Plot vertical profiles (one line per restart) for each 5P variable."""
+    os.makedirs(output_dir, exist_ok=True)
+    for var in P_VARIABLES:
+        if var not in profiles_a or var not in profiles_b:
+            continue
+        a_vals = profiles_a[var]
+        b_vals = profiles_b[var]
+        n_layers = len(a_vals)
+        if len(b_vals) != n_layers:
+            continue
+        layers = np.arange(1, n_layers + 1)
+        plt.figure(figsize=(6, 6))
+        plt.plot(layers, a_vals, marker="o", linestyle="-", label=name_a, alpha=0.9)
+        plt.plot(layers, b_vals, marker="s", linestyle="--", label=name_b, alpha=0.9)
+        plt.xlabel("Soil layer index")
+        plt.ylabel(f"{var} value")
+        plt.title(f"{var} at Amazon site (lon={lon}, lat={lat})\nrestart comparison (col 0)")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        out_path = os.path.join(output_dir, f"amazon_site_profile_{var}_restart_compare.png")
+        plt.savefig(out_path, dpi=200)
+        plt.close()
+        print(f"  Wrote {out_path}")
+
+
+def make_restart_scatter_plots(
+    output_dir: str,
+    name_a: str,
+    name_b: str,
+    data_a: Dict[str, np.ndarray],
+    data_b: Dict[str, np.ndarray],
+) -> None:
+    """Scatter plot: value in restart A vs value in restart B for each 5P variable (all columns and layers)."""
+    os.makedirs(output_dir, exist_ok=True)
+    for var in P_VARIABLES:
+        if var not in data_a or var not in data_b:
+            continue
+        a_flat = data_a[var].ravel()
+        b_flat = data_b[var].ravel()
+        if a_flat.size != b_flat.size:
+            continue
+        plt.figure(figsize=(6, 6))
+        plt.scatter(a_flat, b_flat, alpha=0.5, s=10)
+        lims = [min(a_flat.min(), b_flat.min()), max(a_flat.max(), b_flat.max())]
+        plt.plot(lims, lims, "k--", label="1:1")
+        plt.xlabel(f"{var} ({name_a})")
+        plt.ylabel(f"{var} ({name_b})")
+        plt.title(f"{var}: restart A vs B (all columns × layers)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        out_path = os.path.join(output_dir, f"amazon_site_scatter_{var}_restart_compare.png")
+        plt.savefig(out_path, dpi=200)
+        plt.close()
+        print(f"  Wrote {out_path}")
+
+
+def write_restart_profiles_csv(
+    output_dir: str,
+    name_a: str,
+    name_b: str,
+    profiles_a: Dict[str, np.ndarray],
+    profiles_b: Dict[str, np.ndarray],
+    lon: float,
+    lat: float,
+) -> None:
+    """Write CSV of layer-wise values for both restarts (col 0 profile)."""
+    rows: List[Dict[str, object]] = []
+    for var in P_VARIABLES:
+        if var not in profiles_a or var not in profiles_b:
+            continue
+        a_vals = profiles_a[var]
+        b_vals = profiles_b[var]
+        for layer_idx in range(min(len(a_vals), len(b_vals))):
+            rows.append({
+                "variable": var,
+                "layer_index": layer_idx + 1,
+                "lon": lon,
+                "lat": lat,
+                name_a: float(a_vals[layer_idx]),
+                name_b: float(b_vals[layer_idx]),
+                "abs_diff": float(abs(a_vals[layer_idx] - b_vals[layer_idx])),
+            })
+    if rows:
+        df = pd.DataFrame(rows)
+        out_csv = os.path.join(output_dir, "amazon_site_5p_restart_compare_profiles.csv")
+        df.to_csv(out_csv, index=False)
+        print(f"  Wrote {out_csv}")
+
+
+def run_restart_compare(
+    restart_a: str,
+    restart_b: str,
+    name_a: str,
+    name_b: str,
+    output_dir: str,
+    lon: float = DEFAULT_AMAZON_LON,
+    lat: float = DEFAULT_AMAZON_LAT,
+) -> None:
+    """Load two restart NetCDFs, plot 5P profiles and scatter, write CSV."""
+    if not os.path.isfile(restart_a):
+        raise SystemExit(f"Restart A not found: {restart_a}")
+    if not os.path.isfile(restart_b):
+        raise SystemExit(f"Restart B not found: {restart_b}")
+    print(f"Loading restart A: {restart_a}")
+    data_a = _load_5p_from_restart(restart_a)
+    print(f"Loading restart B: {restart_b}")
+    data_b = _load_5p_from_restart(restart_b)
+    if not data_a or not data_b:
+        raise SystemExit("No 5P variables found in one or both restarts.")
+    profiles_a = _profile_from_2d(data_a)
+    profiles_b = _profile_from_2d(data_b)
+    os.makedirs(output_dir, exist_ok=True)
+    print("Profile plots (col 0)...")
+    make_restart_profile_plots(
+        output_dir=output_dir,
+        name_a=name_a,
+        name_b=name_b,
+        profiles_a=profiles_a,
+        profiles_b=profiles_b,
+        lon=lon,
+        lat=lat,
+    )
+    print("Scatter plots (all columns × layers)...")
+    make_restart_scatter_plots(output_dir=output_dir, name_a=name_a, name_b=name_b, data_a=data_a, data_b=data_b)
+    write_restart_profiles_csv(
+        output_dir=output_dir,
+        name_a=name_a,
+        name_b=name_b,
+        profiles_a=profiles_a,
+        profiles_b=profiles_b,
+        lon=lon,
+        lat=lat,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -276,8 +448,45 @@ def main() -> None:
             "Default: <natveg-run-dir>/analysis/amazon_5p_comparison_bias_correction"
         ),
     )
+    # Restart-vs-restart mode: compare 5P between two Amazon-site restart NetCDFs
+    parser.add_argument(
+        "--restart-a",
+        default="",
+        help="Path to first Amazon-site restart NetCDF (e.g. phase3 extract). If set with --restart-b, run restart comparison only.",
+    )
+    parser.add_argument(
+        "--restart-b",
+        default="",
+        help="Path to second Amazon-site restart NetCDF (e.g. phase2 Amazon 5P bias-corrected).",
+    )
+    parser.add_argument(
+        "--restart-name-a",
+        default="phase3_amazon",
+        help="Label for restart A in plots (used with --restart-a/--restart-b).",
+    )
+    parser.add_argument(
+        "--restart-name-b",
+        default="phase2_amazon_5P_bias_corrected",
+        help="Label for restart B in plots.",
+    )
 
     args = parser.parse_args()
+
+    # Restart-vs-restart mode
+    if args.restart_a and args.restart_b:
+        output_dir = os.path.abspath(args.output_dir) if args.output_dir else os.path.join(
+            os.path.dirname(os.path.abspath(args.restart_a)), "analysis", "amazon_5p_restart_compare"
+        )
+        run_restart_compare(
+            restart_a=os.path.abspath(args.restart_a),
+            restart_b=os.path.abspath(args.restart_b),
+            name_a=args.restart_name_a,
+            name_b=args.restart_name_b,
+            output_dir=output_dir,
+            lon=args.lon,
+            lat=args.lat,
+        )
+        return
 
     gt_run_dir = os.path.abspath(args.gt_run_dir)
     natveg_run_dir = os.path.abspath(args.natveg_run_dir)

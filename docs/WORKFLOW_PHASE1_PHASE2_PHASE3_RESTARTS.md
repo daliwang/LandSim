@@ -17,9 +17,22 @@ The recommended way to run all three phases is to use
 
 ---
 
-### 0. Common setup and how to train your own models
+### 0. Common setup and model training for new users
 
-Assumptions (adjust paths if your run IDs differ):
+For a **new user**, the full TRENDY‑1 AI restart workflow should start by
+training **two CNP models**:
+
+- A **global natveg_improved‑like model** (used for `phase1_global` and as the
+  base restart).
+- A **tropical Phase2 P‑focused model** (used for `phase2_tropical` and
+  `phase3_tworegions`).
+
+These two trainings are done with `train_cnp_model.py`, and then the rest of
+the restart creation steps follow the procedure in
+`docs/INSTRUCTIONS_TRENDY_1_AI_RESTART_CREATION.md` and in this document.
+
+Assumptions below use the existing runs; if you train your own, replace them
+with your paths:
 
 - **Natveg run**: `cnp_results/run_20260228_214757_natveg_improved`
 - **Base restart**:
@@ -27,62 +40,56 @@ Assumptions (adjust paths if your run IDs differ):
 - **Phase2 run**: `cnp_results/run_20260305_153217_phase2_pvariable_focus`
 - **Variable list file**: `CNP_IO_updated9_dev_dw.txt` in repo root.
 
-If you are a new user and want to **train your own models** instead of reusing
-the existing runs, follow these high-level steps:
+If you are a new user and want to **train your own pair of models** instead of
+reusing these runs, follow these steps first.
 
-#### 0.1 Train your own natveg_improved-like global model (for phase1_global)
+#### 0.1 Train a natveg_improved‑like global model (for phase1_global)
 
-1. Choose or copy a global training config, e.g.:
-   - `config/training_config_experiment_3_global_natveg_improved.json`
-2. From the repo root, run a standard training script (adjust config path and
-   output directory name as needed):
+From the repo root:
 
-   ```bash
-   python train_cnp_repeat.py \
-     --config config/training_config_experiment_3_global_natveg_improved_occlp.json \
-     --run-dir cnp_results/run_YYYYMMDD_HHMMSS_natveg_improved_custom
-   ```
+```bash
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
 
-3. After training, produce a global restart file for your new run using the
-   same pipeline that was used for `natveg_improved` (see
-   `docs/WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md` for details). In
-   many cases this means:
-   - Running full-domain inference for the model.
-   - Converting predictions to NetCDF.
-   - Using `ai_predictions_to_restart.py` (or your existing ELM workflow) to
-     generate an updated restart NetCDF.
-4. Use the resulting restart as your new **base restart** and update the
-   variables in this document accordingly, for example:
+python train_cnp_model.py \
+  --config config/training_config_experiment_3_global_natveg_improved.json \
+  --run-dir cnp_results/run_YYYYMMDD_HHMMSS_natveg_improved_custom \
+  --variable-list CNP_IO_updated9_dev_dw.txt
+```
+
+After training:
+
+1. Follow `docs/WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md` (or your
+   existing ELM workflow) to produce a **global restart NetCDF** from this run
+   (full‑domain inference → NetCDF → `ai_predictions_to_restart.py` as needed).
+2. Use the resulting restart as your new **base restart** and set:
 
    ```bash
    export NATVEG_RUN_DIR="cnp_results/run_YYYYMMDD_HHMMSS_natveg_improved_custom"
    export BASE_RESTART="$NATVEG_RUN_DIR/updated_restart_...your_file.nc"
    ```
 
-#### 0.2 Train your own phase2_tropical-like P-focused tropical model
+#### 0.2 Train a phase2_tropical‑like P‑focused tropical model
 
-1. Use the Phase2 two-region/P-focused configs as templates, for example:
-   - `config/training_config_phase2_tropical_soilp_only.json`  
-     (tropical-only, natveg-only, high weights on 5P).
-2. Train your Phase2-style model:
+From the repo root:
 
-   ```bash
-   python train_cnp_repeat.py \
-     --config config/training_config_phase2_tropical_soilp_only.json \
-     --run-dir cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom
-   ```
+```bash
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
 
-3. This creates a run directory similar to
-   `cnp_results/run_20260305_153217_phase2_pvariable_focus` but with your own
-   timestamp and name. Use that directory as `PHASE2_RUN_DIR` in the commands
-   below, for example:
+python train_cnp_model.py \
+  --config config/training_config_phase2_tropical_soilp_only.json \
+  --run-dir cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom \
+  --variable-list CNP_IO_updated9_dev_dw.txt
+```
 
-   ```bash
-   export PHASE2_RUN_DIR="cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom"
-   ```
+Then set:
 
-4. The remaining inference, bias/scale, and restart steps in this document
-   work the same way; only the run directory names change.
+```bash
+export PHASE2_RUN_DIR="cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom"
+```
+
+The remaining inference, bias/scale, and restart steps in this document are the
+same; only `NATVEG_RUN_DIR`, `BASE_RESTART`, and `PHASE2_RUN_DIR` change to
+point at your newly trained models.
 
 ---
 
@@ -233,17 +240,39 @@ echo "phase3_tworegions: natveg base + Phase2 5P with Amazon+Africa bias/scale i
 
 ---
 
-### 4. Automation script
+### 4. Automation scripts (run 1 → inspect → 2 → inspect → 3)
 
-The companion script `scripts/run_phase_restarts.sh` wraps the commands above.
-By default it:
+## make sure to export RESTART_TEMPLATE
 
-- Uses the natveg and Phase2 paths listed in this document.
-- Creates three new run directories with a timestamp.
-- Produces:
-  - `updated_restart_phase1_global_natveg_improved.nc`
-  - `updated_restart_phase2_tropical_5P_raw.nc`
-  - `updated_restart_phase3_tworegions_5P_bias_corrected_tropical.nc`
+# export RESTART_TEMPLATE=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc
 
-See `scripts/run_phase_restarts.sh` for details and optional overrides.
+
+For new users, the recommended workflow is to run three scripts **sequentially**,
+inspecting results between phases:
+
+1. `scripts/run_phase1_global.sh`  
+   - Trains the global natveg_improved‑like model (or reuses an existing one).  
+   - Runs full‑grid inference and creates a **base restart** from an ELM
+     restart template.  
+   - Exports `NATVEG_RUN_DIR` and `BASE_RESTART` in its log output.
+
+2. `scripts/run_phase2_tropical.sh`  
+   - Trains the tropical Phase2 P‑focused model (or reuses an existing one).  
+   - Runs tropical‑only inference and creates the **phase2_tropical** restart
+     with raw Phase2 5P in the tropics, using `BASE_RESTART` from phase 1.  
+   - Exports `PHASE2_RUN_DIR` and prints the path to the tropical restart.
+
+3. `scripts/run_phase3_tworegions.sh`  
+   - Runs full‑grid inference with the Phase2 model.  
+   - Applies two‑region 5P bias/scale correction (Amazon + Africa).  
+   - Creates the **phase3_tworegions** tropical restart with bias‑corrected
+     Phase2 5P, using the same `BASE_RESTART`.
+
+Between scripts you can:
+
+- Inspect logs, validation plots, and diagnostics for each model/run.
+- Adjust configs or weights and re‑run the specific phase if needed.
+
+Each script is self‑contained and safe to re‑run; they will reuse existing runs
+when possible instead of retraining from scratch.
 

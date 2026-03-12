@@ -4,14 +4,55 @@ This document gives step-by-step instructions to repeat the process in **docs/WO
 
 ---
 
-## Prerequisites
+## Prerequisites (for new users and existing runs)
 
-- Existing **natveg_improved** run with a global restart file.
-- Existing **phase2_pvariable_focus** run (tropical 5P model) with trained model and, for the full 5P bias/scale path, either:
-  - **Tropical-only** inference outputs, or
-  - **Full-grid** inference outputs under `cnp_inference_entire_dataset/`.
+This workflow assumes you have **two trained CNP models**:
 
-Paths used below (adjust if your run IDs differ):
+1. A **global natveg_improved-like model** with a global restart file.
+2. A **tropical Phase2 P-focused model** (`phase2_pvariable_focus`-like) with a
+   trained checkpoint and inference outputs.
+
+If you are a **new user** and do not yet have these models, first follow
+Section 0 in `docs/WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md` to train them
+with `train_cnp_model.py`. In short:
+
+- Global model (natveg_improved-like):
+
+  ```bash
+  cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+
+  python train_cnp_model.py \
+    --config config/training_config_experiment_3_global_natveg_improved.json \
+    --run-dir cnp_results/run_YYYYMMDD_HHMMSS_natveg_improved_custom \
+    --variable-list CNP_IO_updated9_dev_dw.txt
+  ```
+
+  Then produce a global restart NetCDF from this run and set:
+
+  ```bash
+  export NATVEG_RUN_DIR="cnp_results/run_YYYYMMDD_HHMMSS_natveg_improved_custom"
+  export BASE_RESTART_FILE="$NATVEG_RUN_DIR/updated_restart_...your_file.nc"
+  ```
+
+- Tropical P-focused model (phase2_tropical-like):
+
+  ```bash
+  cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+
+  python train_cnp_model.py \
+    --config config/training_config_phase2_tropical_soilp_only.json \
+    --run-dir cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom \
+    --variable-list CNP_IO_updated9_dev_dw.txt
+  ```
+
+  Then set:
+
+  ```bash
+  export PHASE2_RUN_DIR="cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom"
+  ```
+
+If you already have trained runs, you can reuse them. The paths used below
+assume the **existing** experiments (adjust if your run IDs differ):
 
 - **Natveg run:** `cnp_results/run_20260228_214757_natveg_improved`
 - **Base restart file:**  

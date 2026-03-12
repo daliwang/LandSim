@@ -323,6 +323,13 @@ python /mnt/proj-shared/AI4BGC_7xw/AI4BGC/scripts/extract_elm_restart_point.py \
   --lon 303.75 \
   --output-file /mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260228_214757_natveg_improved/Amazon_updated_natveg_improved_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024.nc
 
+# Phase3 tworegions: extract Amazon site from full-grid 5P bias-corrected restart (same pattern as above)
+# python scripts/extract_elm_restart_point.py \
+#   --restart-file cnp_results/run_20260311_204845_phase3_tworegions/updated_restart_phase3_tworegions_5P_bias_corrected_tropical.nc \
+#   --lat -17.434553 \
+#   --lon 303.75 \
+#   --output-file cnp_results/run_20260311_204845_phase3_tworegions/Amazon_phase3_tworegions_5P_bias_corrected_restart.nc
+
 two step training targeting tropical and occld_vr
 python train_cnp_model.py   --training-config-json config/training_config_experiment_3_global_natveg_improved_occlp.json   --variable-list CNP_IO_updated9_dev_dw.txt   --output-dir-suffix natveg_improved_occlp
 
