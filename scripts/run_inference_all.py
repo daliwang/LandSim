@@ -300,6 +300,18 @@ def run_inference_all(
         variable_list_path=variable_list,
         model_config_path=model_config
     )
+    # Optional tropical-only filtering (apply before data loading)
+    if tropical_only:
+        tropical_kwargs = {'tropical_only': True}
+        if isinstance(tropical_lat_range, tuple) and len(tropical_lat_range) == 2:
+            tropical_kwargs['tropical_lat_range'] = tropical_lat_range
+        if tropical_lat_column:
+            tropical_kwargs['tropical_lat_column'] = str(tropical_lat_column).strip()
+        try:
+            config.update_data_config(**tropical_kwargs)
+            logging.info(f"Enabled tropical filtering: {tropical_kwargs}")
+        except Exception as e:
+            logging.warning(f"Failed to apply tropical filtering config: {e}")
     try:
         config.update_training_config(mask_absent_pfts=bool(mask_absent_pfts))
         logging.info(f"mask_absent_pfts set to {bool(mask_absent_pfts)}")
@@ -1803,6 +1815,17 @@ def main():
     logging.basicConfig(level=logging.INFO)
     
     try:
+        tropical_lat_range = None
+        if args.tropical_lat_range:
+            try:
+                parts = [p.strip() for p in str(args.tropical_lat_range).split(',')]
+                if len(parts) == 2:
+                    tropical_lat_range = (float(parts[0]), float(parts[1]))
+                else:
+                    logging.warning("Invalid --tropical-lat-range; expected format 'min,max'. Using default.")
+            except Exception:
+                logging.warning("Failed to parse --tropical-lat-range; using default.")
+
         output_path = run_inference_all(
             model_path=args.model,
             data_paths=args.data_paths,
