@@ -485,3 +485,38 @@ python scripts/compare_5p_amazon_site_scatter.py \
   --lon 292.5  \
   --lat -15.549738 \
   --output-dir cnp_results/run_20260228_214757_natveg_improved/analysis/amazon_5p_comparison_bias_correction_site_B
+
+
+
+  cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+
+# 1) Phase1 global → Africa_phase1_global_restart.nc
+python scripts/extract_elm_restart_point.py \
+  --restart-file cnp_results/run_20260311_165538_phase1_global/updated_restart_base.nc \
+  --lat 0.0 \
+  --lon 28.0 \
+  --output-file cnp_results/run_20260311_165538_phase1_global/Africa_phase1_global_restart.nc
+
+# 2) Phase2 tropical → Africa_phase2_tropical_restart.nc
+python scripts/extract_elm_restart_point.py \
+  --restart-file cnp_results/run_20260311_174843_phase2_tropical/updated_restart_phase2_tropical_5P_raw.nc \
+  --lat 0.0 \
+  --lon 28.0 \
+  --output-file cnp_results/run_20260311_174843_phase2_tropical/Africa_phase2_tropical_restart.nc
+
+# 3) Phase3 two-regions → Africa_phase3_tworegions_restart.nc
+python scripts/extract_elm_restart_point.py \
+  --restart-file cnp_results/run_20260311_204845_phase3_tworegions/updated_restart_phase3_tworegions_5P_bias_corrected_tropical.nc \
+  --lat 0.0 \
+  --lon 28.0 \
+  --output-file cnp_results/run_20260311_204845_phase3_tworegions/Africa_phase3_tworegions_restart.nc
+
+python scripts/generate_site_5p_restart_comparison.py   --lon 303.75   --lat -17.434553   --site-name amazon_303_17S
+python scripts/generate_site_5p_restart_comparison.py  --lon 292.5  --lat -15.55   --site-name amazon_292_15S
+
+python scripts/generate_site_5p_restart_comparison.py   --lon 28   --lat 0   --site-name africa_28_0
+
+python scripts/generate_site_5p_restart_comparison.py   --lon 14   --lat 0   --site-name africa
+
+
+
