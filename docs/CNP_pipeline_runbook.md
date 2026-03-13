@@ -145,6 +145,22 @@ python ../../scripts/cnp_result_validationplot.py --stats-only && \
 python ../../scripts/generate_prediction_quality_report.py
 ```
 
+### 4.0.1) Validate predictions in `cnp_inference_entire_dataset` (inference subdirectory)
+If inference wrote outputs under a subdirectory (e.g. `cnp_inference_entire_dataset/` with `cnp_predictions/` inside it), run validation by passing that directory. From the **run** directory (e.g. `cnp_results/run_YYYYMMDD_HHMMSS`):
+
+```bash
+# One-time: copy run config into the inference dir so validation can read variable lists (if not already there)
+cp cnp_config.json cnp_inference_entire_dataset/ 2>/dev/null || true
+
+# Stats + quality report for the inference subdirectory
+python ../../scripts/cnp_result_validationplot.py cnp_inference_entire_dataset --stats-only && \
+python ../../scripts/generate_prediction_quality_report.py cnp_inference_entire_dataset/validation_stats.csv
+```
+
+- First command writes `cnp_inference_entire_dataset/validation_stats.csv`.
+- Second reads that CSV and writes `cnp_inference_entire_dataset/analysis/` (quality report, plots, `quality_summary_report.txt`, `top_bad_plots/`, etc.).
+- Replace `cnp_inference_entire_dataset` with your actual inference subdirectory name if different.
+
 ### 4.1) Highlight a site in all scatter plots (optional)
 Highlight a given site (lon/lat) in every GT vs Pred scatter plot. The site will be marked as a red star.
 
@@ -273,6 +289,29 @@ python ../../scripts/ai_restart_comparison.py \
   --stats-only \
   --variable-list ../../CNP_IO_updated9_dev.txt
 ```
+
+#### 9.2) Custom AI vs model (ground truth) restart paths and plot all PFTs/layers
+To compare an AI-augmented restart file with a **model (ground truth) restart file** using your own paths, use `--ai-restart` and `--original-restart`. To generate map plots for **every variable with every soil layer and every PFT**, use `--plot-all` (10 soil layers 0–9 and PFTs 1–16; PFT 0 is skipped).
+
+From the **project root** (`AI4BGC/`):
+
+```bash
+python scripts/ai_restart_comparison.py \
+  --variable-list CNP_IO_updated9_dev.txt \
+  --ai-restart cnp_results/run_YYYYMMDD_HHMMSS/CNInit_updated9_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --original-restart ELM_data/20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
+  --plot-all \
+  --output-dir cnp_results/run_YYYYMMDD_HHMMSS/ai_restart_comparison_plots
+```
+
+- **`--variable-list`**: CNP_IO file that defines PFT1D and soil2D variables to compare (required for variable list; use the list that matches your run, e.g. `CNP_IO_updated9_dev.txt`).
+- **`--ai-restart`**: Path to the AI-updated restart NetCDF.
+- **`--original-restart`**: Path to the model (ground truth) restart NetCDF.
+- **`--plot-all`**: Plot all variables for all 10 soil layers (0–9) and all 16 PFTs (1–16).
+- **`--output-dir`**: Where to write map PNGs and stats (default: `./ai_restart_comparison_plots`).
+
+Each plot is a 4-panel map: AI Restart, Original Restart, difference, and percent-difference bins. Files are named like `{variable}_lev{layer}.png` (soil variables) and `{variable}_pft{k}.png` (PFT variables). Statistics are written to `restart_stats.csv` / `restart_stats.txt` and a quality summary to `restart_quality_by_variable.png` in the output directory.
+
 ---
 
 ### Old scripts (to be double-checked)

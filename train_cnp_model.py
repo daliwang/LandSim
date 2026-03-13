@@ -134,6 +134,13 @@ def main():
         help='Output directory for results'
     )
     parser.add_argument(
+        '--output-dir-suffix',
+        default=None,
+        type=str,
+        metavar='SUFFIX',
+        help='Optional suffix for the run folder name (e.g. natveg_improved -> run_YYYYMMDD_HHMMSS_natveg_improved)'
+    )
+    parser.add_argument(
         '--epochs', '--epoch',
         dest='epochs',
         type=int,
@@ -246,6 +253,22 @@ def main():
         type=str,
         default=None,
         help='Latitude column name override (default: auto-detect from static columns)'
+    )
+    parser.add_argument(
+        '--longitudes-to-drop',
+        type=str,
+        default=None,
+        help='Comma-separated longitudes to drop from training (e.g. "0,358.75"). Overrides config/CNP_IO.'
+    )
+    parser.add_argument(
+        '--natveg-only',
+        action='store_true',
+        help='Keep only gridcells with natural vegetation (PCT_NATVEG>0 and PCT_NAT_PFT_0<100). Overrides config.'
+    )
+    parser.add_argument(
+        '--no-natveg-filter-before-split',
+        action='store_true',
+        help='With --natveg-only: split on full data then filter only training set to natveg, so test set matches no-filter run. Default: filter before split (legacy).'
     )
     parser.add_argument(
         '--max-files',
@@ -403,9 +426,11 @@ def main():
     )
     args = parser.parse_args()
     
-    # Create output directory with timestamp
+    # Create output directory with timestamp (optional suffix)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = Path(args.output_dir) / f"run_{timestamp}"
+    suffix = (args.output_dir_suffix or '').strip().replace(' ', '_').replace('/', '_').strip('_')
+    run_name = f"run_{timestamp}" + (f"_{suffix}" if suffix else "")
+    output_dir = Path(args.output_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Setup logging with timestamped log file in output directory (default INFO so log file is populated)
@@ -478,6 +503,22 @@ def main():
                 logger.info(f"Enabled tropical filtering: {tropical_kwargs}")
             except Exception as e:
                 logger.warning(f"Failed to apply tropical filtering config: {e}")
+        # Optional longitude filtering (CLI overrides config/CNP_IO)
+        if args.longitudes_to_drop is not None:
+            try:
+                parts = [p.strip() for p in str(args.longitudes_to_drop).split(',') if p.strip()]
+                longitudes = [float(x) for x in parts]
+                config.update_data_config(longitudes_to_drop=longitudes)
+                logger.info(f"Longitudes to drop (CLI): {longitudes}")
+            except Exception as e:
+                logger.warning(f"Failed to parse --longitudes-to-drop: {e}")
+        # Optional natveg-only filtering (CLI overrides config)
+        if args.natveg_only:
+            config.update_data_config(natveg_only=True)
+            logger.info("Enabled natveg-only filtering (PCT_NATVEG>0 and PCT_NAT_PFT_0<100).")
+        if getattr(args, 'no_natveg_filter_before_split', False):
+            config.update_data_config(natveg_filter_before_split=False)
+            logger.info("Natveg filter applied after split (test set will match no-filter run).")
         if args.variable_list is not None:
             logger.info(f"Using CNP configuration from variable list file: {args.variable_list}")
         else:
@@ -749,6 +790,28 @@ def main():
                                     if len(parts) == 2:
                                         update_kwargs['tropical_lat_range'] = (float(parts[0]), float(parts[1]))
                             
+                            # Longitude filtering: drop samples at these longitudes (config overrides CNP_IO)
+                            if 'longitudes_to_drop' in filter_config and args.longitudes_to_drop is None:
+                                lon_drop = filter_config['longitudes_to_drop']
+                                if isinstance(lon_drop, list):
+                                    update_kwargs['longitudes_to_drop'] = [float(x) for x in lon_drop]
+                                elif isinstance(lon_drop, str):
+                                    update_kwargs['longitudes_to_drop'] = [float(x.strip()) for x in lon_drop.split(',') if x.strip()]
+                            
+                            # Natveg-only: keep only PCT_NATVEG>0 and PCT_NAT_PFT_0<100 (CLI takes precedence)
+                            if 'natveg_only' in filter_config and not args.natveg_only:
+                                update_kwargs['natveg_only'] = bool(filter_config['natveg_only'])
+                            if 'natveg_filter_before_split' in filter_config and not getattr(args, 'no_natveg_filter_before_split', False):
+                                update_kwargs['natveg_filter_before_split'] = bool(filter_config['natveg_filter_before_split'])
+                            if 'region_boxes' in filter_config:
+                                boxes = filter_config['region_boxes']
+                                if isinstance(boxes, (list, tuple)) and len(boxes) > 0:
+                                    parsed = []
+                                    for b in boxes:
+                                        if isinstance(b, (list, tuple)) and len(b) >= 4:
+                                            parsed.append((float(b[0]), float(b[1]), float(b[2]), float(b[3])))
+                                    if parsed:
+                                        update_kwargs['region_boxes'] = parsed
                             if update_kwargs:
                                 config.update_data_config(**update_kwargs)
                                 logger.info(f"Applied data_filtering_config from unified config: {update_kwargs}")
@@ -1237,10 +1300,18 @@ def main():
             data_cfg = getattr(config, 'data_config', None)
             data_config_snapshot = None
             if data_cfg is not None:
+                tr = getattr(data_cfg, 'tropical_lat_range', (-23.5, 23.5))
+                if tr is None:
+                    tr = (-23.5, 23.5)
                 data_config_snapshot = {
                     'data_paths': list(getattr(data_cfg, 'data_paths', []) or []),
                     'file_pattern': getattr(data_cfg, 'file_pattern', None) or 'enhanced_1_training_data_batch_*.pkl',
                     'dataset_file_patterns': dict(getattr(data_cfg, 'dataset_file_patterns', None) or {}),
+                    'longitudes_to_drop': list(getattr(data_cfg, 'longitudes_to_drop', None) or []),
+                    'natveg_only': bool(getattr(data_cfg, 'natveg_only', False)),
+                    'natveg_filter_before_split': bool(getattr(data_cfg, 'natveg_filter_before_split', True)),
+                    'tropical_only': bool(getattr(data_cfg, 'tropical_only', False)),
+                    'tropical_lat_range': [float(tr[0]), float(tr[1])],
                 }
             config_dict = {
                 'include_water': include_water,

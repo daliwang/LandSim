@@ -100,8 +100,13 @@ class DataConfig:
     tropical_only: bool = False
     tropical_lat_range: Tuple[float, float] = (-23.5, 23.5)
     tropical_lat_column: Optional[str] = None
-    
-    
+    # Natveg-only filtering: keep only gridcells with PCT_NATVEG > 0 and PCT_NAT_PFT_0 < 100
+    natveg_only: bool = False
+    # When True: filter to natveg before shuffle/split (legacy). When False: split on full data, then
+    # filter only training set to natveg, so test set is the same as no-filter run (natveg test ⊂ no-filter test).
+    # Default True preserves legacy behavior when key is missing.
+    natveg_filter_before_split: bool = True
+
     # File loading limits (for testing)
     max_files: Optional[int] = None  # Maximum number of files to load (None = all files)
     
@@ -111,6 +116,10 @@ class DataConfig:
     
     # Longitude filtering - list of longitude values to drop from dataset
     longitudes_to_drop: List[float] = field(default_factory=list)
+
+    # Region boxes: keep only gridcells inside any box. List of (lat_min, lat_max, lon_min, lon_max).
+    # Longitude in 0-360 convention. None = no region filter (use tropical_only / longitudes_to_drop instead).
+    region_boxes: Optional[List[Tuple[float, float, float, float]]] = None
 
 
 
@@ -167,6 +176,11 @@ class ModelConfig:
     # PFT1D activation control
     pft1d_activation: str = 'abs'  # 'abs', 'relu', 'softplus', 'linear'
     pft1d_activation_overrides: Dict[str, str] = field(default_factory=dict)
+    
+    # Multihead/Multimode configuration
+    use_multihead_attention: bool = False  # Enable multi-head attention for mode-specific feature extraction
+    multihead_num_heads: int = 4  # Number of attention heads for multihead attention
+    use_mode_specific_heads: bool = False  # Enable separate feature extractors for each output mode
 
 
 @dataclass

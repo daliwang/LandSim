@@ -1,30 +1,36 @@
 {
+  "_description": "Experiment 3 global NATVEG IMPROVED: Based on natveg_aligned reference (docs/NATVEG_VS_NOFILTER_COMPARISON.md). Same data setup (natveg_only true, natveg_filter_before_split false). Tuning to improve soil 2D (especially occlp_vr) and overall stability: more epochs, slightly lower LR, added occlp_vr weighting, mild dropout increase.",
   "training_hyperparameters": {
-    "num_epochs": 100,
+    "num_epochs": 120,
     "batch_size": 128,
-    "learning_rate": 0.0001,
-    "optimizer_type": "adam",
-    "weight_decay": 0.0,
-    "use_scheduler": false,
-    "xsmrpool_loss_weight": 10.0,
-    "litter_c_loss_weight": 1.0,
-    "litter_n_loss_weight": 1.0,
-    "litter_p_loss_weight": 1.0,
-    "scalar_loss_weight": 1.0,
-    "vector_loss_weight": 1.0,
-    "matrix_loss_weight": 1.0
+    "learning_rate": 8e-5,
+    "optimizer_type": "adamw",
+    "weight_decay": 0.01,
+    "use_scheduler": true,
+    "scheduler_type": "cosine",
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.1,
+    "xsmrpool_loss_weight": 10,
+    "litter_c_loss_weight": 1,
+    "litter_n_loss_weight": 1,
+    "litter_p_loss_weight": 1,
+    "scalar_loss_weight": 1,
+    "vector_loss_weight": 1,
+    "matrix_loss_weight": 1
   },
   "reproducibility_config": {
     "random_seed": 42,
     "strict_determinism": false,
     "train_split": 0.8,
     "normalization": "individual",
-    "dropout_p": null
+    "dropout_p": 0.12
   },
   "data_filtering_config": {
-    "tropical_only": true,
-    "tropical_lat_range": [-23.5, 23.5],
-    "longitudes_to_drop": [0, 358.75]
+    "tropical_only": false,
+    "tropical_lat_range": null,
+    "longitudes_to_drop": [0, 358.75],
+    "natveg_only": true,
+    "natveg_filter_before_split": false
   },
   "variable_weights": {
     "pft1d_weights": {
@@ -50,7 +56,8 @@
       "tlai": 4
     },
     "soil2d_weights": {
-      "primp_vr": 9,
+      "primp_vr": 11,
+      "occlp_vr": 9,
       "litr2c_vr": 8,
       "litr2p_vr": 8,
       "litr2n_vr": 8,
@@ -71,8 +78,9 @@
     }
   },
   "tail_aware_config": {
-    "loss": "log1p_mse",
-    "epsilon": 1e-8
+    "loss": "log1p_huber",
+    "epsilon": 1e-8,
+    "huber_delta": 1
   },
   "tail_aware_weights": {
     "cpool": 6,
@@ -96,7 +104,8 @@
     "frootp": 4,
     "labilep": 5,
     "labilep_vr": 5,
-    "primp_vr": 9,
+    "primp_vr": 11,
+    "occlp_vr": 9,
     "litr2c_vr": 8,
     "litr2p_vr": 8,
     "litr2n_vr": 8,
@@ -109,10 +118,10 @@
   },
   "pft_mask_config": {
     "mask_absent_pfts": true,
-    "pft_presence_threshold": 0.0
+    "pft_presence_threshold": 0
   },
   "pft_zero_sparsity_config": {
-    "weight": 1.0,
+    "weight": 1,
     "threshold": 1e-8
   },
   "pft_zero_sparsity_weights": {

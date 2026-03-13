@@ -113,6 +113,17 @@ class DataLoaderIndividual:
                 return col
         return None
 
+    def _resolve_lon_column(self) -> Optional[str]:
+        """Resolve longitude column name from config or common patterns."""
+        for col in getattr(self.data_config, 'static_columns', []) or []:
+            if 'lon' in str(col).lower():
+                if col in self.df.columns:
+                    return col
+        for col in ['lon', 'longitude', 'LON', 'Longitude', 'LONGITUDE']:
+            if col in self.df.columns:
+                return col
+        return None
+
     def load_data(self) -> pd.DataFrame:
         """Load data from configured paths and patterns."""
         df_list = []
@@ -218,6 +229,32 @@ class DataLoaderIndividual:
             else:
                 logger.warning("'Longitude' column not found in dataset. Cannot apply longitude filtering.")
 
+        # Optional region-box filtering: keep only (lat, lon) inside any box. Boxes = (lat_min, lat_max, lon_min, lon_max), lon 0-360.
+        region_boxes = getattr(self.data_config, 'region_boxes', None)
+        if region_boxes and len(region_boxes) > 0:
+            lat_col = self._resolve_lat_column()
+            lon_col = self._resolve_lon_column()
+            if lat_col is not None and lon_col is not None:
+                original_size = len(self.df)
+                lat_vals = pd.to_numeric(self.df[lat_col], errors='coerce')
+                lon_vals = pd.to_numeric(self.df[lon_col], errors='coerce')
+                # Normalize longitude to 0-360 for comparison (if data use -180..180, add 360 when < 0)
+                lon_360 = lon_vals.where(lon_vals >= 0, lon_vals + 360.0)
+                mask = pd.Series(False, index=self.df.index)
+                for (lat_min, lat_max, lon_min, lon_max) in region_boxes:
+                    in_lat = (lat_vals >= float(lat_min)) & (lat_vals <= float(lat_max))
+                    in_lon = (lon_360 >= float(lon_min)) & (lon_360 <= float(lon_max))
+                    mask = mask | (in_lat & in_lon)
+                self.df = self.df[mask].reset_index(drop=True)
+                filtered_size = len(self.df)
+                logger.info(
+                    f"Region-box filtering: {original_size} -> {filtered_size} (boxes: {region_boxes})"
+                )
+                if filtered_size == 0:
+                    logger.warning("Region-box filter removed all samples. Check lat/lon columns and box definitions.")
+            else:
+                logger.warning("Region-box filter enabled but lat/lon columns not found. Skipping.")
+
         # Optional tropical-only filtering by latitude
         if getattr(self.data_config, 'tropical_only', False):
             lat_col = self._resolve_lat_column()
@@ -241,7 +278,52 @@ class DataLoaderIndividual:
                 )
                 if filtered_size == 0:
                     logger.warning("Tropical filter removed all samples. Check latitude column and range.")
-        
+
+        # Optional natveg-only filtering: keep only PCT_NATVEG > 0 and PCT_NAT_PFT_0 < 100
+        # When natveg_filter_before_split is False: add _natveg_include column but do not drop rows,
+        # so split is on full data and test set matches no-filter run; train is filtered in split_data().
+        if getattr(self.data_config, 'natveg_only', False):
+            pct_natveg_col = None
+            for c in ['PCT_NATVEG', 'pct_natveg']:
+                if c in self.df.columns:
+                    pct_natveg_col = c
+                    break
+            pct_pft0_col = None
+            for c in ['PCT_NAT_PFT_0', 'pct_nat_pft_0']:
+                if c in self.df.columns:
+                    pct_pft0_col = c
+                    break
+            if pct_natveg_col is None or pct_pft0_col is None:
+                logger.warning(
+                    "Natveg filter enabled but PCT_NATVEG or PCT_NAT_PFT_0 not found in dataset. "
+                    "Skipping natveg filtering."
+                )
+            else:
+                pct_natveg = pd.to_numeric(self.df[pct_natveg_col], errors='coerce').fillna(0)
+                pct_pft0 = pd.to_numeric(self.df[pct_pft0_col], errors='coerce').fillna(100)
+                include = (pct_natveg > 0) & (pct_pft0 < 100)
+                filter_before_split = getattr(self.data_config, 'natveg_filter_before_split', True)
+                if filter_before_split:
+                    # Legacy: filter before shuffle/split (test set = 20% of natveg-only data)
+                    original_size = len(self.df)
+                    self.df = self.df[include].reset_index(drop=True)
+                    filtered_size = len(self.df)
+                    dropped = original_size - filtered_size
+                    logger.info(
+                        f"Natveg filtering (PCT_NATVEG>0 and PCT_NAT_PFT_0<100) before split: "
+                        f"{original_size} -> {filtered_size} samples (dropped {dropped})"
+                    )
+                    if filtered_size == 0:
+                        logger.warning("Natveg filter removed all samples.")
+                else:
+                    # Split-then-filter: keep full df, mark rows so train can be filtered in split_data()
+                    self.df['_natveg_include'] = include.values
+                    n_natveg = int(include.sum())
+                    logger.info(
+                        f"Natveg marking (PCT_NATVEG>0 and PCT_NAT_PFT_0<100): {n_natveg} of {len(self.df)} "
+                        f"samples will be used for training; test set will match no-filter run (full split)."
+                    )
+
         # Drop specified columns
         if hasattr(self.data_config, 'filter_columns') and self.data_config.filter_columns:
             for col in self.data_config.filter_columns:
@@ -1635,15 +1717,35 @@ class DataLoaderIndividual:
             logger.info(f"  - Train split ratio: {self.data_config.train_split} ({train_size} samples)")
             logger.info(f"  - Test size: {test_size} samples (剩余部分)")
 
+        # When natveg_only and split-then-filter: use only natveg rows from first train_size for training;
+        # test set stays as last 20% of full data (same as no-filter run).
+        train_mask = None
+        if (
+            '_natveg_include' in self.df.columns
+            and getattr(self.data_config, 'natveg_only', False)
+            and not getattr(self.data_config, 'natveg_filter_before_split', True)
+        ):
+            train_mask = np.asarray(self.df['_natveg_include'].values[:train_size], dtype=bool)
+            n_train_natveg = int(np.sum(train_mask))
+            logger.info(
+                f"Natveg train-only filter: using {n_train_natveg} of {train_size} train rows (test set unchanged, {test_size} rows)."
+            )
+
         # Expose split indices for downstream use (e.g., location validation)
-        # Matches the contiguous slicing used below
         try:
-            self.train_indices = np.arange(0, train_size, dtype=int)
-            self.test_indices = np.arange(train_size, total_samples, dtype=int)
+            if train_mask is not None:
+                self.train_indices = np.where(train_mask)[0].astype(int)  # indices in 0..train_size-1 that are natveg
+                self.test_indices = np.arange(train_size, total_samples, dtype=int)
+            else:
+                self.train_indices = np.arange(0, train_size, dtype=int)
+                self.test_indices = np.arange(train_size, total_samples, dtype=int)
         except Exception:
-            # Fallback without crashing if numpy not available for some reason
-            self.train_indices = list(range(0, train_size))
-            self.test_indices = list(range(train_size, total_samples))
+            if train_mask is not None:
+                self.train_indices = np.where(train_mask)[0].tolist()
+                self.test_indices = list(range(train_size, total_samples))
+            else:
+                self.train_indices = list(range(0, train_size))
+                self.test_indices = list(range(train_size, total_samples))
         
         if test_size == 0:
             logger.error("Test size is 0! This will cause evaluation issues.")
@@ -1651,24 +1753,32 @@ class DataLoaderIndividual:
         
         # Split time series data
         train_time_series = normalized_data['time_series_data'][:train_size, :, :]
+        if train_mask is not None:
+            train_time_series = train_time_series[train_mask]
         test_time_series = normalized_data['time_series_data'][train_size:, :, :]
         train_data['time_series'] = train_time_series
         test_data['time_series'] = test_time_series
         
         # Split static data
         train_static = normalized_data['static_data'][:train_size]
+        if train_mask is not None:
+            train_static = train_static[train_mask]
         test_static = normalized_data['static_data'][train_size:]
         train_data['static'] = train_static
         test_data['static'] = test_static
         
         # Split pft_param data
         train_pft_param = normalized_data['pft_param_data'][:train_size]
+        if train_mask is not None:
+            train_pft_param = train_pft_param[train_mask]
         test_pft_param = normalized_data['pft_param_data'][train_size:]
         train_data['pft_param'] = train_pft_param
         test_data['pft_param'] = test_pft_param
 
         # Split scalar data (input)
         train_list_scalar = normalized_data['scalar_data'][:train_size]
+        if train_mask is not None:
+            train_list_scalar = train_list_scalar[train_mask]
         test_list_scalar = normalized_data['scalar_data'][train_size:]
         train_data['scalar'] = train_list_scalar
         test_data['scalar'] = test_list_scalar 
@@ -1676,51 +1786,53 @@ class DataLoaderIndividual:
         # Split y_scalar (target) - skip if not present (inference mode)
         if 'y_scalar' in normalized_data and normalized_data['y_scalar'] is not None:
             y_scalar = normalized_data['y_scalar']
-            train_data['y_scalar'] = y_scalar[:train_size]
+            train_data['y_scalar'] = y_scalar[:train_size][train_mask] if train_mask is not None else y_scalar[:train_size]
             test_data['y_scalar'] = y_scalar[train_size:]
 
         # Split variables_1d_pft (input)
         variables_1d_pft = normalized_data['variables_1d_pft']
-        train_data['variables_1d_pft'] = variables_1d_pft[:train_size]
+        train_data['variables_1d_pft'] = variables_1d_pft[:train_size][train_mask] if train_mask is not None else variables_1d_pft[:train_size]
         test_data['variables_1d_pft'] = variables_1d_pft[train_size:]
         
         # Split y_pft_1d (target) - skip if not present (inference mode)
         if 'y_pft_1d' in normalized_data and normalized_data['y_pft_1d'] is not None:
             y_pft_1d = normalized_data['y_pft_1d']
-            train_data['y_pft_1d'] = y_pft_1d[:train_size]
+            train_data['y_pft_1d'] = y_pft_1d[:train_size][train_mask] if train_mask is not None else y_pft_1d[:train_size]
             test_data['y_pft_1d'] = y_pft_1d[train_size:]
 
         # Split y_soil_2d (target) - skip if not present (inference mode)
         if 'y_soil_2d' in normalized_data and normalized_data['y_soil_2d'] is not None:
             y_soil_2d = normalized_data['y_soil_2d']
-            train_data['y_soil_2d'] = y_soil_2d[:train_size]
+            train_data['y_soil_2d'] = y_soil_2d[:train_size][train_mask] if train_mask is not None else y_soil_2d[:train_size]
             test_data['y_soil_2d'] = y_soil_2d[train_size:]
 
         # Split variables_2d_soil (input)
         variables_2d_soil = normalized_data['variables_2d_soil']
-        train_data['variables_2d_soil'] = variables_2d_soil[:train_size]
+        train_data['variables_2d_soil'] = variables_2d_soil[:train_size][train_mask] if train_mask is not None else variables_2d_soil[:train_size]
         test_data['variables_2d_soil'] = variables_2d_soil[train_size:]
         
         # Split water data if present
         if 'water' in normalized_data and normalized_data['water'] is not None:
-            train_data['water'] = normalized_data['water'][:train_size]
+            w = normalized_data['water']
+            train_data['water'] = w[:train_size][train_mask] if train_mask is not None else w[:train_size]
             test_data['water'] = normalized_data['water'][train_size:]
         if 'y_water' in normalized_data and normalized_data['y_water'] is not None:
-            train_data['y_water'] = normalized_data['y_water'][:train_size]
+            yw = normalized_data['y_water']
+            train_data['y_water'] = yw[:train_size][train_mask] if train_mask is not None else yw[:train_size]
             test_data['y_water'] = normalized_data['y_water'][train_size:]
 
         # Split PFT presence mask(s). Inference mask (pct>0) goes to both; training mask only to train.
         if 'pft_presence_mask' in normalized_data:
             ppm = normalized_data['pft_presence_mask']
             try:
-                train_data['pft_presence_mask'] = ppm[:train_size]
+                train_data['pft_presence_mask'] = ppm[:train_size][train_mask] if train_mask is not None else ppm[:train_size]
                 test_data['pft_presence_mask'] = ppm[train_size:]
             except Exception:
                 logger.warning("pft_presence_mask present but could not be split; skipping")
         if 'pft_presence_mask_training' in normalized_data:
             ppm_tr = normalized_data['pft_presence_mask_training']
             try:
-                train_data['pft_presence_mask_training'] = ppm_tr[:train_size]
+                train_data['pft_presence_mask_training'] = ppm_tr[:train_size][train_mask] if train_mask is not None else ppm_tr[:train_size]
             except Exception:
                 logger.warning("pft_presence_mask_training present but could not be split; skipping")
         

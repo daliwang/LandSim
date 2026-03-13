@@ -217,8 +217,14 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                                ai_predictions_path: Path, cnp_io_variables: List[str],
                                model_to_ai_mapping: np.ndarray, variable_mapping: Dict[str, Any],
                                strict_dims: bool = False,
-                               update_grid_mask: Optional[np.ndarray] = None) -> None:
+                               tropical_lat_range: Optional[tuple] = None) -> None:
+    """
+    tropical_lat_range: If (min_lat, max_lat), only update gridcells with lat in [min_lat, max_lat];
+        others are left unchanged (for merging tropical-model into global restart).
+    """
     print(f"Saving updated restart file to: {output_path}")
+    if tropical_lat_range is not None:
+        print(f"  Tropical-only update: lat in [{tropical_lat_range[0]}, {tropical_lat_range[1]}]")
     
     # Create output directory if it doesn't exist
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,6 +235,17 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
     
     # Open the output file for direct modification
     with nc.Dataset(output_path, 'r+') as ds_out:
+        # Build mask of gridcells to update (all, or only those in tropical_lat_range)
+        n_grid = variable_mapping.get("n_grid", 0)
+        update_mask = np.ones(n_grid, dtype=bool)
+        if tropical_lat_range is not None and n_grid > 0:
+            if "grid1d_lat" in ds_out.variables:
+                grid_lat = np.asarray(ds_out.variables["grid1d_lat"][:]).ravel()
+                min_lat, max_lat = float(tropical_lat_range[0]), float(tropical_lat_range[1])
+                update_mask = (grid_lat >= min_lat) & (grid_lat <= max_lat)
+                print(f"  Gridcells in tropical band: {update_mask.sum()} / {n_grid}")
+            else:
+                print("  Warning: grid1d_lat not found; applying tropical filter to all gridcells")
         # Verify and adjust spinup_state
         try:
             if 'spinup_state' in ds_out.variables:
@@ -309,7 +326,7 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                         
                         # For each model gridcell, update PFT data
                         for g in range(variable_mapping['n_grid']):
-                            if update_grid_mask is not None and not bool(update_grid_mask[g]):
+                            if not update_mask[g]:
                                 continue
                             if g < len(grid_to_pfts) and len(grid_to_pfts[g]) > 0:
                                 # Get PFTs in this gridcell
@@ -347,7 +364,7 @@ def create_updated_restart_file(restart_file_path: Path, output_path: Path,
                         
                         # For each model gridcell, update column data
                         for g in range(variable_mapping['n_grid']):
-                            if update_grid_mask is not None and not bool(update_grid_mask[g]):
+                            if not update_mask[g]:
                                 continue
                             if g < len(grid_to_cols) and len(grid_to_cols[g]) > 0:
                                 # Get columns in this gridcell
@@ -429,6 +446,15 @@ Examples:
     --restart-file model_restart.nc \
     --output updated_restart.nc \
     --preview-only
+
+  # Phase 2: update only P variables in tropical cells (merge Phase 2 into Phase 1 restart)
+  python ai_predictions_to_restart.py \
+    --ai-predictions phase2_predictions.nc \
+    --restart-file phase1_global_restart.nc \
+    --output merged_restart.nc \
+    --variable-list CNP_IO_updated9_dev_dw.txt \
+    --tropical-lat-range -30,30 \
+    --variables-to-update occlp_vr,labilep_vr,solutionp_vr,primp_vr,secondp_vr,soil1p_vr,soil2p_vr,soil3p_vr,soil4p_vr,litr2p_vr,litr3p_vr,cwdp_vr
         """
     )
     
@@ -446,12 +472,10 @@ Examples:
                        help='Create backup of original restart file before updating')
     parser.add_argument('--strict-dims', action='store_true',
                        help='Abort on any dimension mismatch instead of skipping')
-    parser.add_argument('--merge-scope', choices=['all', 'tropical-only'], default='all',
-                       help='Overwrite scope: all model gridcells (default) or tropical-only')
-    parser.add_argument('--tropical-lat-range', type=str, default='-23.5,23.5',
-                       help='Latitude range used when --merge-scope tropical-only, format "min,max"')
-    parser.add_argument('--coord-tol', type=float, default=1e-4,
-                       help='Coordinate match tolerance for tropical-only merge')
+    parser.add_argument('--tropical-lat-range', type=str, metavar='MIN,MAX', default=None,
+                       help='Only update gridcells with lat in [MIN, MAX] (e.g. "-30,30"). Use when merging tropical-model predictions into a global restart.')
+    parser.add_argument('--variables-to-update', type=str, default=None, metavar='VAR1,VAR2,...|@file.txt',
+                       help='Only update these variables (subset of CNP_IO list). Comma-separated names (e.g. occlp_vr,labilep_vr,solutionp_vr) or path to a file with one variable per line (e.g. @phase2_p_vars.txt). If not set, all variables from the variable list are updated. Use with Phase 2 to update only P variables in tropical cells.')
     
     args = parser.parse_args()
     
@@ -530,9 +554,31 @@ Examples:
         # Auto-detect from config.json
         cnp_io_variables = auto_detect_variable_list(Path(args.ai_predictions))
     
-    # Note: We only update variables in the CNP_IO list
-    # All other variables (including timemgr_rst_nstep_rad_prev) remain completely unchanged
-    print("Note: Only variables in CNP_IO list will be updated")
+    # Optionally restrict to a subset of variables (e.g. P-only for Phase 2 merge)
+    effective_update_variables = list(cnp_io_variables)
+    if getattr(args, 'variables_to_update', None) and args.variables_to_update.strip():
+        raw = args.variables_to_update.strip()
+        if raw.startswith('@'):
+            path = Path(raw[1:].strip())
+            if path.exists():
+                with open(path, 'r') as f:
+                    requested = {line.strip() for line in f if line.strip() and not line.strip().startswith('#')}
+            else:
+                parser.error(f'Variables-to-update file not found: {path}')
+        else:
+            requested = {v.strip() for v in raw.split(',') if v.strip()}
+        effective_update_variables = [v for v in cnp_io_variables if v in requested]
+        not_in_cnp = requested - set(cnp_io_variables)
+        if not_in_cnp:
+            print(f"  Note: --variables-to-update names not in CNP_IO list (skipped): {sorted(not_in_cnp)}")
+        if not effective_update_variables:
+            parser.error('--variables-to-update resulted in no variables to update (none matched CNP_IO list)')
+        print(f"  Restricting to {len(effective_update_variables)} variables: {effective_update_variables}")
+    else:
+        effective_update_variables = list(cnp_io_variables)
+    
+    # Note: We only update variables in the effective list (CNP_IO list, optionally filtered)
+    print("Note: Only variables in the update list will be modified in the restart")
     print("All other variables and attributes remain unchanged")
     
     # Print summary of changes
@@ -540,31 +586,31 @@ Examples:
     print("UPDATE SUMMARY")
     print("=" * 60)
     
-    # Count variables that will be updated (only PFT1D and soil2D from CNP_IO list)
+    # Count variables that will be updated (only PFT1D and soil2D from effective list)
     updated_vars = []
     for var_name in ds_ai.data_vars:
-        if var_name in ds_model.data_vars and var_name in cnp_io_variables:
-            # Only count PFT1D and soil2D variables that are in the CNP_IO list
+        if var_name in ds_model.data_vars and var_name in effective_update_variables:
+            # Only count PFT1D and soil2D variables that are in the update list
             if ('pft' in ds_ai[var_name].dims) or ('column' in ds_ai[var_name].dims and 'levgrnd' in ds_ai[var_name].dims):
                 updated_vars.append(var_name)
     
-    print(f"Variables to update (PFT1D and soil2D from CNP_IO list): {len(updated_vars)}")
+    print(f"Variables to update (PFT1D and soil2D): {len(updated_vars)}")
     for var_name in updated_vars:
         ai_shape = ds_ai[var_name].shape
         model_shape = ds_model[var_name].shape
         var_type = "PFT1D" if 'pft' in ds_ai[var_name].dims else "Soil2D"
         print(f"  {var_name} ({var_type}): AI {ai_shape} -> Model {model_shape}")
     
-    # Show which variables were skipped
+    # Show which variables were skipped (in CNP_IO but not in effective update list)
     skipped_vars = []
     for var_name in ds_ai.data_vars:
         if (var_name in ds_model.data_vars and 
             ('pft' in ds_ai[var_name].dims or ('column' in ds_ai[var_name].dims and 'levgrnd' in ds_ai[var_name].dims)) and
-            var_name not in cnp_io_variables):
+            var_name in cnp_io_variables and var_name not in effective_update_variables):
             skipped_vars.append(var_name)
     
     if skipped_vars:
-        print(f"\nVariables skipped (not in CNP_IO list): {len(skipped_vars)}")
+        print(f"\nVariables skipped (not in --variables-to-update): {len(skipped_vars)}")
         for var_name in skipped_vars:
             print(f"  {var_name}")
     
@@ -584,9 +630,15 @@ Examples:
             print(f"Backup created: {backup_path.stat().st_size / (1024*1024):.1f} MB")
         
         # Save updated restart file using direct NetCDF manipulation
+        tropical_lat_range = None
+        if getattr(args, 'tropical_lat_range', None):
+            parts = [p.strip() for p in args.tropical_lat_range.split(',')]
+            if len(parts) >= 2:
+                tropical_lat_range = (float(parts[0]), float(parts[1]))
         create_updated_restart_file(restart_file_path, output_path, ai_predictions_path, 
-                                   cnp_io_variables, ai_to_model_mapping, variable_mapping,
-                                   strict_dims=args.strict_dims, update_grid_mask=update_grid_mask)
+                                   effective_update_variables, ai_to_model_mapping, variable_mapping,
+                                   strict_dims=args.strict_dims,
+                                   tropical_lat_range=tropical_lat_range)
         
         print(f"\nRestart file updated successfully!")
         print(f"Original: {restart_file_path}")

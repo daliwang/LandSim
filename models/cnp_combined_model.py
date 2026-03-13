@@ -267,7 +267,12 @@ class CNPCombinedModel(nn.Module):
             num_layers=getattr(self.model_config, 'transformer_layers', 6)
         )
         
-        # 5. Output Heads
+        # 5. Multihead/Multimode Configuration
+        self.use_multihead_attention = getattr(self.model_config, 'use_multihead_attention', False)
+        self.multihead_num_heads = getattr(self.model_config, 'multihead_num_heads', 4)
+        self.use_mode_specific_heads = getattr(self.model_config, 'use_mode_specific_heads', False)
+        
+        # 6. Output Heads
         self._build_output_heads()
         
         # Loss weights setup (保持原样)
@@ -407,7 +412,69 @@ class CNPCombinedModel(nn.Module):
         return input_group_indices, group_ids
 
     def _build_output_heads(self):
-        # Heads 输入维度改为 self.embed_dim (因为 backbone 输出也是这个维度)
+        # Multihead Attention layers for mode-specific feature extraction
+        if self.use_multihead_attention:
+            # Multi-head attention for each output mode
+            self.scalar_attention = nn.MultiheadAttention(
+                embed_dim=self.embed_dim,
+                num_heads=self.multihead_num_heads,
+                dropout=self.dropout_p,
+                batch_first=True
+            )
+            self.soil2d_attention = nn.MultiheadAttention(
+                embed_dim=self.embed_dim,
+                num_heads=self.multihead_num_heads,
+                dropout=self.dropout_p,
+                batch_first=True
+            )
+            self.pft1d_attention = nn.MultiheadAttention(
+                embed_dim=self.embed_dim,
+                num_heads=self.multihead_num_heads,
+                dropout=self.dropout_p,
+                batch_first=True
+            )
+            
+            # Query vectors for each mode (learnable)
+            self.scalar_query = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+            self.soil2d_query = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+            self.pft1d_query = nn.Parameter(torch.randn(1, 1, self.embed_dim))
+            
+            # Mode-specific feature projection
+            self.scalar_feat_proj = nn.Linear(self.embed_dim, self.embed_dim)
+            self.soil2d_feat_proj = nn.Linear(self.embed_dim, self.embed_dim)
+            self.pft1d_feat_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        else:
+            self.scalar_attention = None
+            self.soil2d_attention = None
+            self.pft1d_attention = None
+        
+        # Mode-specific feature extractors (optional)
+        if self.use_mode_specific_heads:
+            # Separate feature extractors for each mode
+            self.scalar_feature_extractor = nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.LayerNorm(self.embed_dim),
+                nn.GELU(),
+                nn.Dropout(self.dropout_p)
+            )
+            self.soil2d_feature_extractor = nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.LayerNorm(self.embed_dim),
+                nn.GELU(),
+                nn.Dropout(self.dropout_p)
+            )
+            self.pft1d_feature_extractor = nn.Sequential(
+                nn.Linear(self.embed_dim, self.embed_dim),
+                nn.LayerNorm(self.embed_dim),
+                nn.GELU(),
+                nn.Dropout(self.dropout_p)
+            )
+        else:
+            self.scalar_feature_extractor = None
+            self.soil2d_feature_extractor = None
+            self.pft1d_feature_extractor = None
+        
+        # Output heads - 输入维度改为 self.embed_dim (因为 backbone 输出也是这个维度)
         self.scalar_head = nn.Sequential(
             nn.Linear(self.embed_dim, 64),
             nn.BatchNorm1d(64), nn.ReLU(), nn.Dropout(self.dropout_p),
@@ -456,6 +523,26 @@ class CNPCombinedModel(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None: nn.init.zeros_(m.bias)
+        
+        # Initialize multihead attention query vectors
+        if self.use_multihead_attention:
+            nn.init.normal_(self.scalar_query, std=0.02)
+            nn.init.normal_(self.soil2d_query, std=0.02)
+            nn.init.normal_(self.pft1d_query, std=0.02)
+            
+            # Initialize feature projection layers
+            if hasattr(self, 'scalar_feat_proj'):
+                nn.init.xavier_uniform_(self.scalar_feat_proj.weight)
+                if self.scalar_feat_proj.bias is not None:
+                    nn.init.zeros_(self.scalar_feat_proj.bias)
+            if hasattr(self, 'soil2d_feat_proj'):
+                nn.init.xavier_uniform_(self.soil2d_feat_proj.weight)
+                if self.soil2d_feat_proj.bias is not None:
+                    nn.init.zeros_(self.soil2d_feat_proj.bias)
+            if hasattr(self, 'pft1d_feat_proj'):
+                nn.init.xavier_uniform_(self.pft1d_feat_proj.weight)
+                if self.pft1d_feat_proj.bias is not None:
+                    nn.init.zeros_(self.pft1d_feat_proj.bias)
 
     def _count_parameters(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -533,15 +620,47 @@ class CNPCombinedModel(nn.Module):
         # 4. Backbone
         features = self.backbone(all_tokens)
 
-        # 5. Global Pooling
-        global_feat = features.mean(dim=1)
+        # 5. Multihead/Multimode Feature Extraction
+        if self.use_multihead_attention:
+            # Extract mode-specific features using multi-head attention
+            batch_size = features.shape[0]
+            
+            # Scalar mode: attention over all tokens with scalar-specific query
+            scalar_query = self.scalar_query.expand(batch_size, -1, -1)
+            scalar_attn_out, _ = self.scalar_attention(scalar_query, features, features)
+            scalar_feat = scalar_attn_out.squeeze(1)  # [B, D]
+            scalar_feat = self.scalar_feat_proj(scalar_feat)
+            
+            # Soil 2D mode: attention over all tokens with soil2d-specific query
+            soil2d_query = self.soil2d_query.expand(batch_size, -1, -1)
+            soil2d_attn_out, _ = self.soil2d_attention(soil2d_query, features, features)
+            soil2d_feat = soil2d_attn_out.squeeze(1)  # [B, D]
+            soil2d_feat = self.soil2d_feat_proj(soil2d_feat)
+            
+            # PFT 1D mode: attention over all tokens with pft1d-specific query
+            pft1d_query = self.pft1d_query.expand(batch_size, -1, -1)
+            pft1d_attn_out, _ = self.pft1d_attention(pft1d_query, features, features)
+            pft1d_feat = pft1d_attn_out.squeeze(1)  # [B, D]
+            pft1d_feat = self.pft1d_feat_proj(pft1d_feat)
+        else:
+            # Standard global pooling
+            global_feat = features.mean(dim=1)
+            scalar_feat = global_feat
+            soil2d_feat = global_feat
+            pft1d_feat = global_feat
+        
+        # Apply mode-specific feature extractors if enabled
+        if self.use_mode_specific_heads:
+            scalar_feat = self.scalar_feature_extractor(scalar_feat)
+            soil2d_feat = self.soil2d_feature_extractor(soil2d_feat)
+            pft1d_feat = self.pft1d_feature_extractor(pft1d_feat)
 
         # 6. Heads
         outputs = {}
-        outputs['scalar'] = torch.relu(self.scalar_head(global_feat))
-        outputs['soil_2d'] = torch.nn.functional.softplus(self.matrix_head(global_feat))
+        outputs['scalar'] = torch.relu(self.scalar_head(scalar_feat))
+        outputs['soil_2d'] = torch.nn.functional.softplus(self.matrix_head(soil2d_feat))
         
-        pft_out = self.pft_1d_head(global_feat)
+        pft_out = self.pft_1d_head(pft1d_feat)
         # Process PFT output
         pft_1d_varnames = self.data_info.get('variables_1d_pft', [])
         n_vars = len(pft_1d_varnames)

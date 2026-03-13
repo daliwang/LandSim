@@ -1,5 +1,24 @@
 # Tropical NPOOL/PPOOL Observations and Suggestions
 
+## Background values (10 for npool, 1 for ppool)
+
+**Does this codebase use 10 as background for npool and 1 for ppool?**
+- **No.** The training script and data loaders do **not** initialize or fill npool with 10 or ppool with 1. NaN/Inf in PFT1D data are replaced with **0** (`nan=0.0` in `data_loader_individual.py`); there is no special case for npool/ppool.
+- **Where do 10 and 1 come from?** They come from the **training targets** (ELM/TRENDY output in the PKL files). For many PFTs, the **ground-truth** Y_npool and Y_ppool in the dataset are near-constant at ~10 and ~1. So the "background" is in the **source data** (likely ELM default or typical values for those pool variables), not from our initialization.
+
+**Training dataset (ground truth) counts:** Run `scripts/analyze_npool_ppool_special_values.py` on your training PKL path. Example results on Trendy_1_data_CNP (20,975 grid cells, 16 PFTs):
+- **npool == 10**: 80.7% of all (cell, PFT) pairs have this value; 32.8% of grid cells have *all* 16 PFTs equal to 10; 100% of cells have *at least one* PFT with npool == 10.
+- **ppool == 1**: Same statistics (80.7% of pairs, 32.8% of cells all-1, 100% any).
+- **Both**: 6,877 grid cells (32.8%) have all PFTs with npool==10 and ppool==1.
+- Per-PFT counts and full report: `docs/npool_ppool_special_values_report.json`.
+
+**Validation excluding special-value grid cells:** Run `scripts/validation_npool_ppool_exclude_special.py <run_dir>` to compute R² and RMSE for npool and ppool when excluding grid cells where *all* 16 PFTs have npool==10 and ppool==1. Example (run_20260226_114546_nofilter, test set 4,166 cells, 33.5% special):
+- **NPOOL**: R² (all cells) ≈ 0.02 → R² (excl. special) ≈ **0.41**; RMSE 8.83 → 8.37.
+- **PPOOL**: R² (all cells) ≈ -1.58 → R² (excl. special) ≈ **-0.51**; RMSE 0.87 → 0.82.
+So on non-constant cells, npool prediction is moderate and ppool is still poor but much less bad than when including the constant cells.
+
+**Per-PFT validation (recommended):** The special values (10 for npool, 1 for ppool) should be treated **per PFT**. For each PFT k, only grid cells where **PCT_NAT_PFT_k > 0** (that PFT is present) should be used when computing prediction quality for that PFT; other cells are filled with 10/1 and should not count. Run `scripts/validation_npool_ppool_per_pft.py <run_dir>` to get per-PFT R² and RMSE using this rule. Example (run_20260226_114546_nofilter): mean R² over PFTs (with ≥10 valid cells) is **~0.92** for npool and **~0.93** for ppool — prediction quality is good when evaluated only where each PFT is present.
+
 ## Scope
 - Dataset: tropical-only subset (Latitude between -23.5 and 23.5).
 - Source: Trendy_1 training data (21 PKL files).

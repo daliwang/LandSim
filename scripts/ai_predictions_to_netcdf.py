@@ -175,8 +175,17 @@ def _discover_variables_from_files(predictions_dir: Path) -> Optional[Dict[str, 
         return None
 
 
-def load_ai_predictions(predictions_dir: Path) -> Dict[str, Any]:
-    """Load AI model predictions from the predictions directory."""
+def load_ai_predictions(
+    predictions_dir: Path,
+    soil_2d_bias_corrected_subdir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Load AI model predictions from the predictions directory.
+
+    If soil_2d_bias_corrected_subdir is set (e.g. soil_2d_predictions_5P_bias_corrected_phase2),
+    after loading soil from soil_2d_predictions we also load any
+    predictions_Y_<var>_bias_corrected.csv from that subdir and overlay them onto preds['soil_2d'],
+    so that the NetCDF uses bias-corrected 5P where applied.
+    """
     print(f"Loading AI predictions from: {predictions_dir}")
     
     preds = {}
@@ -218,6 +227,9 @@ def load_ai_predictions(predictions_dir: Path) -> Dict[str, Any]:
         preds['soil_2d'] = {}
         preds['soil2d_coords'] = {}
         for p in sorted(soil_dir.glob('predictions_*.csv')):
+            # Skip bias-corrected filenames here; they are loaded from the bias-corrected subdir if given
+            if '_bias_corrected' in p.stem:
+                continue
             # Extract variable name from filename (e.g., predictions_Y_cwdc_vr.csv -> cwdc_vr)
             var_name = p.stem.replace('predictions_Y_', '')
             df = pd.read_csv(p)
@@ -229,6 +241,23 @@ def load_ai_predictions(predictions_dir: Path) -> Dict[str, Any]:
             if 'Longitude' in df and 'Latitude' in df:
                 sample_locs = df[['Longitude', 'Latitude']].drop_duplicates().head(3)
                 print(f"    Sample locations (first 3 unique):\n{sample_locs}")
+    # Overlay bias-corrected soil 2D predictions if subdir provided (e.g. 5P from apply_5p_bias_scale_correction.py)
+    if soil_2d_bias_corrected_subdir:
+        bias_dir = predictions_dir / soil_2d_bias_corrected_subdir
+        if bias_dir.exists():
+            if 'soil_2d' not in preds:
+                preds['soil_2d'] = {}
+                preds['soil2d_coords'] = {}
+            for p in sorted(bias_dir.glob('predictions_Y_*_bias_corrected.csv')):
+                # predictions_Y_<var>_bias_corrected.csv -> <var>
+                var_name = p.stem.replace('predictions_Y_', '').replace('_bias_corrected', '')
+                df = pd.read_csv(p)
+                lon, lat = _extract_coords(df)
+                preds['soil2d_coords'][var_name] = (lon, lat)
+                preds['soil_2d'][var_name] = _drop_coords(df)
+                print(f"  Overlaid bias-corrected soil predictions for {var_name}: {df.shape}")
+        else:
+            print(f"  Warning: soil 2D bias-corrected subdir not found: {bias_dir}")
     
     # Load static inverse mapping for coordinates
     static_inv = predictions_dir / 'test_static_inverse.csv'
@@ -459,6 +488,10 @@ def main():
                        help='Show example usage and exit')
     parser.add_argument('--wrap-longitude', action='store_true', default=False,
                        help='Wrap longitudes from 0–360 to -180–180 (default: on). Use --no-wrap-longitude to disable if shell supports).')
+    parser.add_argument('--soil-2d-bias-corrected-subdir', default=None,
+                       help='Subdir under --ai-predictions containing bias-corrected soil 2D CSVs '
+                            '(e.g. soil_2d_predictions_5P_bias_corrected_phase2 from apply_5p_bias_scale_correction.py). '
+                            'Files named predictions_Y_<var>_bias_corrected.csv will overlay raw soil 2D for those variables.')
     
     args = parser.parse_args()
     
@@ -510,8 +543,11 @@ Examples:
         if not variable_list:
             parser.error('Could not auto-detect variables. Provide --variable-list to proceed.')
     
-    # Load AI predictions
-    ai_preds = load_ai_predictions(ai_predictions_dir)
+    # Load AI predictions (optionally overlay 5P bias-corrected from apply_5p_bias_scale_correction.py)
+    ai_preds = load_ai_predictions(
+        ai_predictions_dir,
+        soil_2d_bias_corrected_subdir=getattr(args, 'soil_2d_bias_corrected_subdir', None),
+    )
 
     # Report current lon/lat ranges from CSV coordinates
     try:

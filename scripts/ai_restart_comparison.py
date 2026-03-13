@@ -414,8 +414,25 @@ def main():
     grid_to_cols = _build_gridcell_groups(col2grid, n_grid)
     grid_to_pfts = _build_gridcell_groups(pft2grid, n_grid)
 
+    # Build reference-side grid groups when reference is a restart file (column/pft indexed, no gridcell on variables)
+    n_grid_old = ds_old.sizes['gridcell']
+    ref_has_col_index = 'cols1d_gridcell_index' in ds_old
+    ref_has_pft_index = 'pfts1d_gridcell_index' in ds_old
+    grid_to_cols_old = None
+    grid_to_pfts_old = None
+    if ref_has_col_index:
+        col2grid_old = _to_zero_based_index(_safe_get(ds_old, 'cols1d_gridcell_index').values, n_grid_old)
+        grid_to_cols_old = _build_gridcell_groups(col2grid_old, n_grid_old)
+    if ref_has_pft_index:
+        pft2grid_old = _to_zero_based_index(_safe_get(ds_old, 'pfts1d_gridcell_index').values, n_grid_old)
+        grid_to_pfts_old = _build_gridcell_groups(pft2grid_old, n_grid_old)
+
     print(f'Total gridcells: {n_grid} | total columns: {col2grid.size} | total pfts: {pft2grid.size}')
     print(f'Example: gridcell 0 -> columns {grid_to_cols[0][:5]}, pfts {grid_to_pfts[0][:5]}')
+    if grid_to_cols_old is not None:
+        print(f'Reference: restart-style (column-indexed); n_grid_old={n_grid_old}')
+    if grid_to_pfts_old is not None:
+        print(f'Reference: restart-style (pft-indexed)')
 
     stats_rows = []
     debug_enabled = not args.stats_only
@@ -435,21 +452,29 @@ def main():
             da_new_cl = da_new.transpose('column', 'levgrnd', ...)
             vals_new = _to_nan_fillvalue(da_new_cl.values)
 
-            if 'gridcell' not in da_old.dims:
-                print('  Skip (reference dataset lacks gridcell dimension)')
+            ref_restart_style = ('gridcell' not in da_old.dims) and (grid_to_cols_old is not None)
+            if not ref_restart_style and 'gridcell' not in da_old.dims:
+                print('  Skip (reference dataset lacks gridcell dimension and not column-indexed restart)')
                 continue
 
-            old_order = [dim for dim in da_old.dims if dim != 'gridcell'] + ['gridcell']
-            da_old_cl = da_old.transpose(*old_order)
-            vals_old = _to_nan_fillvalue(da_old_cl.values)
-            dims_old = da_old_cl.dims
-            axis_grid = dims_old.index('gridcell')
-            axis_column = dims_old.index('column') if 'column' in dims_old else None
-            axis_lev = dims_old.index('levgrnd') if 'levgrnd' in dims_old else None
+            if ref_restart_style:
+                # Reference is restart file: (column, levgrnd); use grid_to_cols_old + grid_mapping
+                da_old_cl = da_old.transpose('column', 'levgrnd', ...)
+                vals_old = _to_nan_fillvalue(da_old_cl.values)
+            else:
+                old_order = [dim for dim in da_old.dims if dim != 'gridcell'] + ['gridcell']
+                da_old_cl = da_old.transpose(*old_order)
+                vals_old = _to_nan_fillvalue(da_old_cl.values)
+                dims_old = da_old_cl.dims
+                axis_grid = dims_old.index('gridcell')
+                axis_column = dims_old.index('column') if 'column' in dims_old else None
+                axis_lev = dims_old.index('levgrnd') if 'levgrnd' in dims_old else None
 
             for lev in LEVGRND_LAYERS:
                 if lev < 0 or lev >= da_new_cl.sizes['levgrnd']:
                     print(f'  Layer {lev} out of range, skipped')
+                    continue
+                if not ref_restart_style and lev >= da_old_cl.sizes['levgrnd']:
                     continue
 
                 new_grid = np.full(n_grid, np.nan, dtype=float)
@@ -465,20 +490,28 @@ def main():
                     else:
                         new_grid[g] = vals_new[c0, lev]
 
-                    src_idx = int(grid_mapping[g]) if g < len(grid_mapping) else -1
-                    if src_idx < 0 or src_idx >= da_old_cl.sizes['gridcell']:
+                    src_g = int(grid_mapping[g]) if g < len(grid_mapping) else -1
+                    if src_g < 0 or src_g >= n_grid_old:
                         continue
 
-                    idx = [slice(None)] * vals_old.ndim
-                    if axis_column is not None:
-                        col_sel = min(c0, vals_old.shape[axis_column] - 1)
-                        idx[axis_column] = col_sel
-                    if axis_lev is not None:
-                        if lev >= vals_old.shape[axis_lev]:
+                    if ref_restart_style:
+                        cols_old = grid_to_cols_old[src_g]
+                        if len(cols_old) == 0:
                             continue
-                        idx[axis_lev] = lev
-                    idx[axis_grid] = src_idx
-                    old_grid[g] = vals_old[tuple(idx)]
+                        c0_old = cols_old[0]
+                        if c0_old < vals_old.shape[0] and lev < vals_old.shape[1]:
+                            old_grid[g] = vals_old[c0_old, lev]
+                    else:
+                        idx = [slice(None)] * vals_old.ndim
+                        if axis_column is not None:
+                            col_sel = min(c0, vals_old.shape[axis_column] - 1)
+                            idx[axis_column] = col_sel
+                        if axis_lev is not None:
+                            if lev >= vals_old.shape[axis_lev]:
+                                continue
+                            idx[axis_lev] = lev
+                        idx[axis_grid] = src_g
+                        old_grid[g] = vals_old[tuple(idx)]
 
                 if debug_enabled:
                     print(f'[DEBUG] {var} lev{lev}: new min={np.nanmin(new_grid)} max={np.nanmax(new_grid)} mean={np.nanmean(new_grid)}')
@@ -489,15 +522,20 @@ def main():
                 stats_rows.append({'variable': var, 'suffix': f'_lev{lev}', 'label_new': label_new, 'label_old': label_old, 'quality': _classify_quality_from_r2(stats['r2']), **stats})
 
         elif 'pft' in dims:
-            if 'gridcell' not in da_old.dims:
-                print('  Skip (reference dataset lacks gridcell dimension)')
+            ref_pft_restart_style = ('gridcell' not in da_old.dims) and (grid_to_pfts_old is not None)
+            if not ref_pft_restart_style and 'gridcell' not in da_old.dims:
+                print('  Skip (reference dataset lacks gridcell dimension and not pft-indexed restart)')
                 continue
 
             da_new_p = da_new.transpose(..., 'pft')
             vals_new = _to_nan_fillvalue(da_new_p.values)
 
-            da_old_p = da_old.transpose('pft', 'gridcell')
-            vals_old = _to_nan_fillvalue(da_old_p.values)
+            if ref_pft_restart_style:
+                da_old_p = da_old.transpose('pft', ...)
+                vals_old = _to_nan_fillvalue(da_old_p.values)
+            else:
+                da_old_p = da_old.transpose('pft', 'gridcell')
+                vals_old = _to_nan_fillvalue(da_old_p.values)
             total_pfts = da_new_p.sizes.get('pft', vals_new.shape[0])
 
             for k in PFT_PICK_LIST:
@@ -518,12 +556,22 @@ def main():
                         p_idx = pfts[k]
                         if p_idx < vals_new.shape[0]:
                             new_grid[g] = vals_new[p_idx]
-                    src_idx = int(grid_mapping[g]) if g < len(grid_mapping) else -1
-                    if src_idx < 0 or src_idx >= vals_old.shape[1]:
-                        continue
-                    ai_pft_idx = k - 1
-                    if ai_pft_idx >= 0 and ai_pft_idx < vals_old.shape[0]:
-                        old_grid[g] = vals_old[ai_pft_idx, src_idx]
+
+                    src_g = int(grid_mapping[g]) if g < len(grid_mapping) else -1
+                    if ref_pft_restart_style:
+                        if src_g < 0 or src_g >= n_grid_old or grid_to_pfts_old is None:
+                            continue
+                        pfts_old = grid_to_pfts_old[src_g]
+                        if k < len(pfts_old):
+                            p_idx_old = pfts_old[k]
+                            if p_idx_old < vals_old.shape[0]:
+                                old_grid[g] = vals_old[p_idx_old]
+                    else:
+                        if src_g < 0 or src_g >= vals_old.shape[1]:
+                            continue
+                        ai_pft_idx = k - 1
+                        if ai_pft_idx >= 0 and ai_pft_idx < vals_old.shape[0]:
+                            old_grid[g] = vals_old[ai_pft_idx, src_g]
 
                 stats = _plot_tripanel(var, f'_pft{k}', grid_lon, grid_lat, new_grid, old_grid, str(output_dir),
                                        label_new=label_new, label_old=label_old, plot=plot_enabled)

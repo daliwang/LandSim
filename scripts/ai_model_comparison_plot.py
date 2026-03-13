@@ -1,4 +1,56 @@
 #!/usr/bin/env python3
+"""
+Compare AI CNP predictions with reference (model) or with CSV exports.
+Also supports model-vs-model: compare two ELM restart NetCDFs (--model1, --model2).
+
+Design:
+  - Model vs model: two ELM restart NetCDFs. Uses same grid from model1; compares
+    variables from --variable-list or --variables. PFTs 1-16 (--pfts, 1-based) and top 10
+    soil layers (args.layers) only.
+  - Primary: AI predictions NetCDF vs model (ELM) NetCDF.
+    Use --ai-predictions and --model (and --compare-to model to avoid CSV).
+
+  - Optional: AI predictions NetCDF vs CSV predictions (same run, two formats).
+    Use --csv-predictions for a consistency check. Use --compare-to csv or auto.
+
+How AI vs model comparison works (different internal formats):
+
+  The AI NetCDF and the model restart NetCDF do not have the same internal
+  layout. The script bridges them as follows.
+
+  Required for both:
+    - grid1d_lon, grid1d_lat (1D arrays of length n_gridcell)
+    - Same variable names (e.g. cwdc_vr, tlai) for the fields to compare
+
+  AI NetCDF (e.g. from ai_predictions_to_netcdf.py):
+    - One gridcell per land point; dimension "gridcell".
+    - Scalars: (gridcell).
+    - PFT variables: (pft, gridcell) with pft size 16 (PFT 1–16).
+    - Soil/column variables: (column, levgrnd, gridcell) with column size 1,
+      levgrnd size 10 (one column per gridcell).
+
+  Model (ELM) NetCDF:
+    - Many columns and PFT instances; each is linked to a gridcell via
+      cols1d_gridcell_index and pfts1d_gridcell_index (1-based or 0-based).
+    - Scalars: often (gridcell).
+    - Column variables: (column, levgrnd) — column index maps to gridcell.
+    - PFT variables: (pft) — model has PFT 0–16 (17 slots). For comparison we
+      use only model PFT 1–16 and ignore model PFT 0, so user --pfts 1–16 align
+      with both AI (1–16) and model (1–16).
+
+  The script:
+    1. Builds a spatial mapping: for each AI gridcell (lon, lat), finds the
+       closest model gridcell (nearest-neighbor).
+    2. For each model gridcell g: gets AI value from the AI gridcell that
+       maps to g; gets model value from the model’s column/pft indices for g
+       (e.g. first column and PFT 1–16 for that gridcell).
+    3. Plots and stats are on the model grid (one value per model gridcell).
+
+  So the AI NetCDF must be in the “plotting” format produced by
+  ai_predictions_to_netcdf.py (grid1d_lon/lat, gridcell, pft/gridcell,
+  column/levgrnd/gridcell). If your AI NetCDF has a different layout, convert
+  it first or extend this script to support that layout.
+"""
 import os
 import numpy as np
 import xarray as xr
@@ -21,19 +73,19 @@ from config.training_config import parse_cnp_io_list
 
 # Default paths
 FALLBACK_AI_PREDICTIONS = './comparison_results/ai_predictions_for_plotting.nc'
-FALLBACK_MODEL = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+#FALLBACK_MODEL = '/global/cfs/cdirs/m4814/daweigao/14_Code/all_dataset_1_degree/20250117_trendytest_ICB1850CNPRDCTCBC.elm.r.0781-01-01-00000.nc'
+FALLBACK_MODEL = '/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/20251201_TRENDY2024_default_ICB1850CNPRDCTCBC.elm.r.0801-01-01-00000.nc'
 FALLBACK_OUTPUT_DIR = "./ai_model_comparison_plots"
 FALLBACK_CSV_PREDICTIONS = './cnp_inference_entire_dataset/cnp_predictions'
 
 # Default variables to plot unless '--variables all' is used
-VARIABLES = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc']
+VARIABLES = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc', 'cpool', 'npool', 'ppool', 'primp_vr', 'secondp_vr', 'litr2c_vr', 'litr2n_vr', 'litr2p_vr', 'soil1c_vr', 'soil1n_vr', 'soil1p_vr']
 
 # Layers for column-type variables (AI has 10 layers, model has 15)
-LEVGRND_LAYERS = [0, 4, 9]  # Layers 0, 4, 9 (corresponding to AI layers 1, 5, 10)
+LEVGRND_LAYERS = [0,1,2,3,4,5,6,7,8,9]  # Layers 0, 4, 9 (corresponding to AI layers 1, 5, 10)
 
-# PFTs to plot (AI has PFT1-16, model has PFT0-16)
-# Note: AI PFT0 = Model PFT1, AI PFT1 = Model PFT2, etc.
-PFT_PICK_LIST = [0, 1, 2, 3, 4]  # PFT1, PFT2, PFT3, PFT4, PFT5 (0-indexed, so 0=PFT1, 1=PFT2, etc.)
+# PFTs to plot: 1-based (1–16). AI has PFT 1–16; model has PFT 0–16; we compare 1–16 and ignore model PFT 0.
+PFT_PICK_LIST = list(range(1, 17))  # [1, 2, ..., 16] — plot all 16 PFTs by default
 
 CSV_LONGITUDE_NAMES = ("Longitude", "Long", "long", "lon", "LON")
 CSV_LATITUDE_NAMES = ("Latitude", "Lat", "lat", "LAT")
@@ -393,6 +445,59 @@ def _build_gridcell_groups(one_d_to_grid, n_grid):
             groups[g].append(idx)
     return groups
 
+
+def _extract_elm_var_on_grid(ds, var, grid_to_cols, grid_to_pfts, n_grid, layer_idx=None, pft_idx=None):
+    """Extract an ELM restart variable as a 1D array per gridcell (length n_grid).
+
+    Used for model-vs-model comparison. Call with exactly one of layer_idx (for column/soil2d)
+    or pft_idx (for pft1d) or neither (for gridcell scalar).
+    """
+    if var not in ds.data_vars:
+        return None
+    da = ds[var]
+    dims = da.dims
+    vals = _to_nan_fillvalue(np.asarray(da.values))
+    out = np.full(n_grid, np.nan, dtype=float)
+
+    if layer_idx is not None and 'column' in dims and 'levgrnd' in dims:
+        # Column/soil 2D: ensure (column, levgrnd) order, use first column per gridcell, given layer
+        if vals.ndim == 2:
+            if dims[0] == 'levgrnd':
+                vals = vals.T
+            n_col, n_lev = vals.shape[0], vals.shape[1]
+            if layer_idx >= n_lev:
+                return out
+            for g in range(n_grid):
+                cols = grid_to_cols[g]
+                if cols:
+                    ci = cols[0]
+                    if ci < n_col:
+                        out[g] = vals[ci, layer_idx]
+        return out
+
+    if pft_idx is not None and 'pft' in dims:
+        # PFT 1D: AI has PFT 1-16, model has PFT 0-16. We compare AI 1-16 to model 1-16 (ignore model PFT 0).
+        # So for pft_idx 0..15 (user PFT 1..16) use model index at grid_to_pfts[g][pft_idx + 1].
+        if vals.ndim == 1:
+            for g in range(n_grid):
+                pfts = grid_to_pfts[g]
+                model_slot = pft_idx + 1  # model PFT 1-16 (skip slot 0)
+                if model_slot < len(pfts):
+                    pi = pfts[model_slot]
+                    if pi < vals.shape[0]:
+                        out[g] = vals[pi]
+        return out
+
+    if 'gridcell' in dims:
+        # Gridcell scalar
+        v = vals.reshape(-1) if vals.ndim > 1 else vals
+        if v.size >= n_grid:
+            out[:] = v[:n_grid]
+        return out
+
+    return None
+
+
 def _plot_map(ax, lon, lat, data, title, vmin=None, vmax=None, cmap="viridis", norm=None):
     """Plot a map with the given data."""
     ax.add_feature(cfeature.COASTLINE)
@@ -489,7 +594,7 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_ai, data_model, out_dir,
     print(f"Stats for {var}{label_suffix}:")
     print(f"  {label_ai}: sum={sum_ai:.6g} std={std_ai:.6g} min={min_ai:.6g} max={max_ai:.6g}")
     print(f"  {label_model}: sum={sum_model:.6g} std={std_model:.6g} min={min_model:.6g} max={max_model:.6g}")
-    print(f"  Metrics (AI vs Model): n={n} rmse={rmse:.6g} nrmse={nrmse:.6g} r2={r2:.6g}")
+    print(f"  Metrics ({label_ai} vs {label_model}): n={n} rmse={rmse:.6g} nrmse={nrmse:.6g} r2={r2:.6g}")
 
     stats = {
         "ai_sum": sum_ai,
@@ -520,20 +625,21 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_ai, data_model, out_dir,
     ax2 = fig.add_subplot(gs[1, 0], projection=ccrs.PlateCarree())
     _plot_map(ax2, lon, lat, data_model, f"{var} - {label_model}", vmin=vmin_orig, vmax=vmax_orig, cmap="viridis")
 
-    # Panel 3: Difference (AI - Model)
+    # Panel 3: Difference (left - right)
+    diff_title = f"{var} - Difference ({label_ai} - {label_model})"
     ax3 = fig.add_subplot(gs[2, 0], projection=ccrs.PlateCarree())
     if not np.isfinite(diff_abs) or diff_abs <= 0:
         msg = "No Difference" if diff_abs == 0 else "All NaN"
         ax3.text(0.5, 0.5, msg, ha="center", va="center", transform=ax3.transAxes,
                  fontsize=14, fontweight="bold", color="gray")
-        ax3.set_title(f"{var} - Difference (AI - Model)", fontsize=14, fontweight="bold")
+        ax3.set_title(diff_title, fontsize=14, fontweight="bold")
         ax3.set_global()
         gl = ax3.gridlines(draw_labels=True, alpha=0.5, linestyle="--")
         gl.top_labels = False
         gl.right_labels = False
     else:
         norm = TwoSlopeNorm(vmin=-diff_abs, vcenter=0, vmax=diff_abs)
-        _plot_map(ax3, lon, lat, diff, f"{var} - Difference (AI - Model)", cmap="RdBu_r", norm=norm)
+        _plot_map(ax3, lon, lat, diff, diff_title, cmap="RdBu_r", norm=norm)
 
     # Panel 4: Percent Difference Categories
     ax4 = fig.add_subplot(gs[3, 0], projection=ccrs.PlateCarree())
@@ -559,7 +665,7 @@ def _plot_tripanel(var, label_suffix, lon, lat, data_ai, data_model, out_dir,
     ax4.add_feature(cfeature.OCEAN, color="lightblue", alpha=0.5)
     ax4.add_feature(cfeature.LAND, color="lightgray", alpha=0.3)
     im4 = ax4.scatter(lon, lat, c=cat, s=5, cmap=cmap, norm=norm_cat, transform=ccrs.PlateCarree())
-    ax4.set_title(f"{var} - Percent Diff bins ((AI-Model)/Model)", fontsize=14, fontweight="bold")
+    ax4.set_title(f"{var} - Percent Diff bins (({label_ai}-{label_model})/{label_model})", fontsize=14, fontweight="bold")
     ax4.set_global()
     gl4 = ax4.gridlines(draw_labels=True, alpha=0.5, linestyle="--")
     gl4.top_labels = False
@@ -667,6 +773,10 @@ Examples:
 
   # Plot specific variables only
   python ai_model_comparison_plot.py --variables cwdc_vr tlai
+
+  # Model vs model (two ELM restart NetCDFs): PFT 1-16, top 10 soil layers
+  python ai_model_comparison_plot.py --model1 ./run1.elm.r.0021-01-01-00000.nc \\
+    --model2 ./run2.elm.r.0801-01-01-00000.nc --variable-list CNP_IO.txt --output-dir ./model_vs_model_plots
         """
     )
     
@@ -674,6 +784,10 @@ Examples:
                        help=f'Path to AI predictions NetCDF file [default: AI_PREDICTIONS_DEFAULT in variable list or {FALLBACK_AI_PREDICTIONS}]')
     parser.add_argument('--model', default=None,
                        help=f'Path to model results NetCDF file [default: MODEL_DEFAULT in variable list or {FALLBACK_MODEL}]')
+    parser.add_argument('--model1', default=None,
+                       help='Path to first ELM restart NetCDF (model-vs-model mode). Use with --model2.')
+    parser.add_argument('--model2', default=None,
+                       help='Path to second ELM restart NetCDF (model-vs-model mode). Use with --model1.')
     parser.add_argument('--output-dir', default=None,
                        help=f'Output directory for plots [default: COMPARISON_OUTPUT_DIR in variable list or {FALLBACK_OUTPUT_DIR}]')
     parser.add_argument('--variable-list', type=str,
@@ -683,7 +797,7 @@ Examples:
     parser.add_argument('--layers', nargs='*', type=int, default=LEVGRND_LAYERS,
                        help=f'Layers to plot for column variables [default: {LEVGRND_LAYERS}]')
     parser.add_argument('--pfts', nargs='*', type=int, default=PFT_PICK_LIST,
-                       help=f'PFTs to plot [default: {PFT_PICK_LIST}]')
+                       help='PFTs to plot (1-based 1..16). AI and model comparison use PFT 1-16; model PFT 0 is ignored. E.g. --pfts 1 2 3 -> _pft1, _pft2, _pft3 [default: 1..16]')
     parser.add_argument('--no-plot', action='store_true',
                        help='Disable plot generation; compute and save statistics only')
     parser.add_argument('--stats-file', type=str,
@@ -697,6 +811,7 @@ Examples:
 
     args = parser.parse_args()
 
+    model_vs_model = bool(args.model1 and args.model2)
     defaults_from_config = _load_default_paths(args.variable_list)
 
     def _resolve_default(current_value, config_key, fallback):
@@ -705,71 +820,114 @@ Examples:
             return str(candidate)
         return fallback
 
-    args.ai_predictions = _resolve_default(args.ai_predictions, 'ai_predictions_default', FALLBACK_AI_PREDICTIONS)
-    args.model = _resolve_default(args.model, 'model_default', FALLBACK_MODEL)
-    args.output_dir = _resolve_default(args.output_dir, 'comparison_output_dir', FALLBACK_OUTPUT_DIR)
-    args.csv_predictions = _resolve_default(args.csv_predictions, 'csv_predictions_default', FALLBACK_CSV_PREDICTIONS)
-
-    use_csv_predictions = bool(args.csv_predictions)
-    if args.stats_only:
-        args.no_plot = True
-
-    # Validate input files
-    if not Path(args.ai_predictions).exists():
-        raise FileNotFoundError(f"AI predictions file not found: {args.ai_predictions}")
-    if use_csv_predictions:
-        if not Path(args.csv_predictions).exists():
-            raise FileNotFoundError(f"CSV predictions source not found: {args.csv_predictions}")
+    if model_vs_model:
+        use_csv_predictions = False
+        if args.stats_only:
+            args.no_plot = True
+        args.output_dir = _resolve_default(args.output_dir, 'comparison_output_dir', FALLBACK_OUTPUT_DIR)
+        if not Path(args.model1).exists():
+            raise FileNotFoundError(f"Model 1 file not found: {args.model1}")
+        if not Path(args.model2).exists():
+            raise FileNotFoundError(f"Model 2 file not found: {args.model2}")
     else:
-        if not Path(args.model).exists():
-            raise FileNotFoundError(f"Model file not found: {args.model}")
+        args.ai_predictions = _resolve_default(args.ai_predictions, 'ai_predictions_default', FALLBACK_AI_PREDICTIONS)
+        user_provided_model = (args.model is not None)
+        args.model = _resolve_default(args.model, 'model_default', FALLBACK_MODEL)
+        args.output_dir = _resolve_default(args.output_dir, 'comparison_output_dir', FALLBACK_OUTPUT_DIR)
+        args.csv_predictions = _resolve_default(args.csv_predictions, 'csv_predictions_default', FALLBACK_CSV_PREDICTIONS)
+
+        # If user passed --model (or --restart-file), compare to that file; otherwise use CSV if path exists
+        use_csv_predictions = bool(args.csv_predictions) and not user_provided_model
+        if getattr(args, 'restart_file', None):
+            use_csv_predictions = False
+        if args.stats_only:
+            args.no_plot = True
+
+        # Validate input files
+        if not Path(args.ai_predictions).exists():
+            raise FileNotFoundError(f"AI predictions file not found: {args.ai_predictions}")
+        if use_csv_predictions:
+            if not Path(args.csv_predictions).exists():
+                raise FileNotFoundError(f"CSV predictions source not found: {args.csv_predictions}")
+        else:
+            if not Path(args.model).exists():
+                raise FileNotFoundError(f"Model file not found: {args.model}")
 
     print("="*60)
-    if use_csv_predictions:
+    if model_vs_model:
+        print("Model 1 vs Model 2 Comparison (ELM restart NetCDFs)")
+    elif use_csv_predictions:
         print("CSV vs NetCDF Comparison")
     else:
         print("AI vs Model Comparison")
     print("="*60)
-    print(f"AI predictions (NetCDF): {args.ai_predictions}")
-    if use_csv_predictions:
-        print(f"CSV predictions: {args.csv_predictions}")
+    if model_vs_model:
+        print(f"Model 1: {args.model1}")
+        print(f"Model 2: {args.model2}")
     else:
-        print(f"Model results: {args.model}")
+        print(f"AI predictions (NetCDF): {args.ai_predictions}")
+        if use_csv_predictions:
+            print(f"CSV predictions: {args.csv_predictions}")
+        else:
+            print(f"Model results: {args.model}")
     print(f"Output directory: {args.output_dir}")
     print(f"Variables to plot: {args.variables}")
     print(f"Layers to plot: {args.layers}")
     print(f"PFTs to plot: {args.pfts}")
     print("="*60)
-    
+
     # Open datasets once
-    ds_ai = xr.open_dataset(args.ai_predictions)
+    ds_ai = None
+    ds_model = None
+    ds_model1 = None
+    ds_model2 = None
     csv_predictions = None
-    if use_csv_predictions:
-        csv_predictions = load_csv_predictions(args.csv_predictions)
-        ds_model = None
+    if model_vs_model:
+        ds_model1 = xr.open_dataset(args.model1)
+        ds_model2 = xr.open_dataset(args.model2)
     else:
-        ds_model = xr.open_dataset(args.model)
+        ds_ai = xr.open_dataset(args.ai_predictions)
+        if use_csv_predictions:
+            csv_predictions = load_csv_predictions(args.csv_predictions)
+        else:
+            ds_model = xr.open_dataset(args.model)
 
     # Determine variable selection behavior
+    # Use variable list when: --variables all, or --variable-list given without --variables (use all vars from that file), or --stats-only + --variable-list
     requested_all = False
     if args.variables:
         requested_all = (len(args.variables) == 1 and str(args.variables[0]).lower() == 'all')
     if args.stats_only and args.variable_list:
         requested_all = True
+    if args.variable_list and '--variables' not in sys.argv:
+        requested_all = True
 
     variable_category_map = build_variable_category_map(args.variable_list) if args.variable_list else {}
 
-    ai_vars = set(ds_ai.data_vars.keys())
+    if model_vs_model:
+        common_vars = set(ds_model1.data_vars.keys()) & set(ds_model2.data_vars.keys())
+    else:
+        ai_vars = set(ds_ai.data_vars.keys())
+
+    def _close_all():
+        if ds_ai is not None:
+            ds_ai.close()
+        if ds_model is not None:
+            ds_model.close()
+        if ds_model1 is not None:
+            ds_model1.close()
+        if ds_model2 is not None:
+            ds_model2.close()
 
     if requested_all:
         if args.variable_list:
             if not Path(args.variable_list).exists():
-                ds_ai.close()
-                if ds_model is not None:
-                    ds_model.close()
+                _close_all()
                 raise FileNotFoundError(f"Variable list file not found: {args.variable_list}")
             all_variables = parse_variable_list_file(args.variable_list)
-            if use_csv_predictions:
+            if model_vs_model:
+                available_vars = [var for var in all_variables if var in common_vars]
+            elif use_csv_predictions:
                 available_vars = [
                     var for var in all_variables
                     if var in ai_vars and csv_has_variable(csv_predictions, var, variable_category_map.get(var))
@@ -782,12 +940,23 @@ Examples:
                 print(f"Using all variables from variable list ({len(available_vars)}): {available_vars}")
             else:
                 print("Warning: No variables from variable list found in available datasets!")
-                ds_ai.close()
-                if ds_model is not None:
-                    ds_model.close()
+                _close_all()
                 return
         else:
-            if use_csv_predictions:
+            if model_vs_model:
+                exclude_patterns = ['lon', 'lat', 'index', 'period', 'time', 'bnds']
+                discovered_vars = sorted(
+                    v for v in common_vars
+                    if not any(p in v.lower() for p in exclude_patterns)
+                )
+                if discovered_vars:
+                    args.variables = discovered_vars
+                    print(f"Using all common variables between Model 1 and Model 2 ({len(discovered_vars)}): {discovered_vars}")
+                else:
+                    print("Warning: No common variables found between the two model files!")
+                    _close_all()
+                    return
+            elif use_csv_predictions:
                 csv_vars = set(csv_predictions.get('available_vars', set()))
                 discovered_vars = sorted(ai_vars.intersection(csv_vars))
                 if discovered_vars:
@@ -795,7 +964,7 @@ Examples:
                     print(f"Using all common variables between NetCDF and CSV ({len(discovered_vars)}): {discovered_vars}")
                 else:
                     print("Warning: No common variables found between AI NetCDF predictions and CSV source!")
-                    ds_ai.close()
+                    _close_all()
                     return
             else:
                 discovered_vars = discover_common_variables(ds_ai, ds_model)
@@ -804,18 +973,27 @@ Examples:
                     print(f"Using all common variables ({len(discovered_vars)}): {discovered_vars}")
                 else:
                     print("Warning: No common variables found between AI predictions and model!")
-                    ds_ai.close(); ds_model.close()
+                    _close_all()
                     return
     else:
-        forced = ['cwdc_vr', 'soil3c_vr', 'tlai', 'deadstemc']
-        if use_csv_predictions:
+        forced = list(VARIABLES)
+        if model_vs_model:
+            selected = [v for v in forced if v in common_vars]
+            if not selected:
+                print("Warning: None of the default variables are present in both model files!")
+                _close_all()
+                return
+            missing = [v for v in forced if v not in selected]
+            if missing:
+                print(f"Note: Skipping missing default variables not present in both model files: {missing}")
+        elif use_csv_predictions:
             selected = [
                 v for v in forced
                 if v in ai_vars and csv_has_variable(csv_predictions, v, variable_category_map.get(v))
             ]
             if not selected:
                 print("Warning: None of the default variables are present in both NetCDF and CSV data!")
-                ds_ai.close()
+                _close_all()
                 return
             missing = [v for v in forced if v not in selected]
             if missing:
@@ -825,7 +1003,7 @@ Examples:
             selected = [v for v in forced if v in ai_vars and v in model_vars]
             if not selected:
                 print("Warning: None of the default variables are present in both datasets!")
-                ds_ai.close(); ds_model.close()
+                _close_all()
                 return
             missing = [v for v in forced if v not in selected]
             if missing:
@@ -833,7 +1011,19 @@ Examples:
         args.variables = selected
         print(f"Using default subset of variables ({len(selected)}): {selected}")
 
-    if use_csv_predictions:
+    if model_vs_model:
+        grid_lon, grid_lat = _gridcell_lonlat(ds_model1)
+        n_grid = ds_model1.sizes['gridcell']
+        print(f"Using Model 1 gridcell count: {n_grid}")
+        print(f"Grid coordinates: lon range [{grid_lon.min():.3f}, {grid_lon.max():.3f}], lat range [{grid_lat.min():.3f}, {grid_lat.max():.3f}]")
+        col2grid = _to_zero_based_index(_safe_get(ds_model1, 'cols1d_gridcell_index').values, n_grid)
+        pft2grid = _to_zero_based_index(_safe_get(ds_model1, 'pfts1d_gridcell_index').values, n_grid)
+        grid_to_cols = _build_gridcell_groups(col2grid, n_grid)
+        grid_to_pfts = _build_gridcell_groups(pft2grid, n_grid)
+        ai_to_model_mapping = None
+        print(f"Model mappings: total columns: {col2grid.size} | total pfts: {pft2grid.size}")
+        print(f"Example: gridcell 0 -> columns {grid_to_cols[0][:5]}, pfts {grid_to_pfts[0][:5]}")
+    elif use_csv_predictions:
         grid_lon, grid_lat = _gridcell_lonlat(ds_ai)
         n_grid = ds_ai.sizes['gridcell']
         print(f"Using AI gridcell count: {n_grid}")
@@ -871,6 +1061,62 @@ Examples:
     print(f"\nStart processing: {len(args.variables)} variables")
     stats_rows = []
     for var in args.variables:
+        if model_vs_model:
+            if var not in common_vars:
+                print(f"Skip {var} (not in both model files)")
+                continue
+            da_ref = ds_model1[var]
+            dims = da_ref.dims
+            category = infer_variable_category(var, dims, variable_category_map)
+            print(f"\nVariable {var}, dims: {dims}")
+            print(f"  NetCDF shape: {da_ref.shape}")
+
+            # Model-vs-model: PFT 1-16 (args.pfts 1-based, default 1..16), top 10 soil layers (args.layers, default 0..9)
+            if ('column' in dims and 'levgrnd' in dims):
+                n_lev = int(da_ref.sizes['levgrnd'])
+                for lev in range(n_lev):
+                    if lev not in args.layers:
+                        continue
+                    g1 = _extract_elm_var_on_grid(ds_model1, var, grid_to_cols, grid_to_pfts, n_grid, layer_idx=lev, pft_idx=None)
+                    g2 = _extract_elm_var_on_grid(ds_model2, var, grid_to_cols, grid_to_pfts, n_grid, layer_idx=lev, pft_idx=None)
+                    if g1 is None or g2 is None:
+                        print(f"  Skip {var} lev{lev} (extract failed)")
+                        continue
+                    do_plot = (not args.no_plot) and (lev in args.layers)
+                    stats = _plot_tripanel(var, f"_lev{lev}", grid_lon, grid_lat, g1, g2, args.output_dir,
+                                         label_ai='Model 1', label_model='Model 2', plot=do_plot)
+                    stats_rows.append({'variable': var, 'suffix': f"_lev{lev}", **stats})
+
+            elif 'pft' in dims:
+                n_pft = 16
+                for k in range(n_pft):
+                    pft_one_based = k + 1  # internal k is 0-based; user-facing PFT numbers are 1-based
+                    if pft_one_based not in args.pfts:
+                        continue
+                    g1 = _extract_elm_var_on_grid(ds_model1, var, grid_to_cols, grid_to_pfts, n_grid, layer_idx=None, pft_idx=k)
+                    g2 = _extract_elm_var_on_grid(ds_model2, var, grid_to_cols, grid_to_pfts, n_grid, layer_idx=None, pft_idx=k)
+                    if g1 is None or g2 is None:
+                        print(f"  Skip {var} pft{pft_one_based} (extract failed)")
+                        continue
+                    do_plot = (not args.no_plot) and (pft_one_based in args.pfts)
+                    stats = _plot_tripanel(var, f"_pft{k+1}", grid_lon, grid_lat, g1, g2, args.output_dir,
+                                         label_ai='Model 1', label_model='Model 2', plot=do_plot)
+                    stats_rows.append({'variable': var, 'suffix': f"_pft{k+1}", **stats})
+
+            elif 'gridcell' in dims:
+                g1 = _extract_elm_var_on_grid(ds_model1, var, grid_to_cols, grid_to_pfts, n_grid, layer_idx=None, pft_idx=None)
+                g2 = _extract_elm_var_on_grid(ds_model2, var, grid_to_cols, grid_to_pfts, n_grid, layer_idx=None, pft_idx=None)
+                if g1 is None or g2 is None:
+                    print(f"  Skip {var} (extract failed)")
+                    continue
+                stats = _plot_tripanel(var, '', grid_lon, grid_lat, g1, g2, args.output_dir,
+                                      label_ai='Model 1', label_model='Model 2', plot=(not args.no_plot))
+                stats_rows.append({'variable': var, 'suffix': '', **stats})
+
+            else:
+                print(f"  Skip {var} (unsupported dimensions for model-vs-model: {dims})")
+            continue
+
         if var not in ds_ai.data_vars:
             print(f"Skip {var} (not found in AI NetCDF)")
             continue
@@ -956,17 +1202,20 @@ Examples:
                 lon_subset = grid_lon[:min_len]
                 lat_subset = grid_lat[:min_len]
                 for k in range(pft_count):
+                    pft_one_based = k + 1  # --pfts is 1-based
+                    if pft_one_based not in args.pfts:
+                        continue
                     ai_slice = ai_vals[k, :min_len]
                     if k < csv_pft_count:
                         csv_slice = csv_vals[k, :min_len]
                     else:
                         csv_slice = np.full(min_len, np.nan, dtype=float)
-                    plot_flag = (not args.no_plot) and (k in args.pfts)
-                    stats = _plot_tripanel(var, f"_pft{k+1}", lon_subset, lat_subset, ai_slice, csv_slice, args.output_dir,
+                    plot_flag = not args.no_plot
+                    stats = _plot_tripanel(var, f"_pft{pft_one_based}", lon_subset, lat_subset, ai_slice, csv_slice, args.output_dir,
                                            label_ai=label_ai, label_model=label_csv, plot=plot_flag)
                     stats_rows.append({
                         'variable': var,
-                        'suffix': f"_pft{k+1}",
+                        'suffix': f"_pft{pft_one_based}",
                         **stats,
                     })
 
@@ -1084,6 +1333,9 @@ Examples:
 
                 total_pfts = vals_ai.shape[0]
                 for k in range(total_pfts):
+                    pft_one_based = k + 1  # --pfts is 1-based
+                    if pft_one_based not in args.pfts:
+                        continue
                     ai_grid = np.full(n_grid, np.nan, dtype=float)
                     model_grid = np.full(n_grid, np.nan, dtype=float)
 
@@ -1099,21 +1351,21 @@ Examples:
                             if len(ai_gridcell_idx) > 0:
                                 ai_grid[g] = vals_ai[k]
 
+                    # Model has PFT 0-16; use PFT 1-16 only (ignore PFT 0) to match AI PFT 1-16
                     for g in range(n_grid):
-                        if g < len(grid_to_pfts) and len(grid_to_pfts[g]) > 0:
-                            gridcell_pfts = grid_to_pfts[g][:16]
-                            adjusted_k = k + 1
-                            if adjusted_k < len(gridcell_pfts):
-                                model_pft_idx = gridcell_pfts[adjusted_k]
+                        if g < len(grid_to_pfts) and len(grid_to_pfts[g]) > 1:
+                            model_pft_1_to_16 = grid_to_pfts[g][1:17]  # indices for model PFT 1..16
+                            if k < len(model_pft_1_to_16):
+                                model_pft_idx = model_pft_1_to_16[k]
                                 if model_pft_idx < vals_model.shape[0]:
                                     model_grid[g] = vals_model[model_pft_idx]
 
-                    do_plot = (not args.no_plot) and (k in args.pfts)
-                    stats = _plot_tripanel(var, f"_pft{k+1}", grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
+                    do_plot = not args.no_plot
+                    stats = _plot_tripanel(var, f"_pft{pft_one_based}", grid_lon, grid_lat, ai_grid, model_grid, args.output_dir,
                                            label_ai='AI Predictions', label_model='Model Results', plot=do_plot)
                     stats_rows.append({
                         'variable': var,
-                        'suffix': f"_pft{k+1}",
+                        'suffix': f"_pft{pft_one_based}",
                         **stats,
                     })
 
@@ -1199,7 +1451,12 @@ Examples:
                 return (3, 0, 0)
 
             lines = []
-            header = 'NetCDF vs CSV Statistics Report' if use_csv_predictions else 'AI vs Model Statistics Report'
+            if model_vs_model:
+                header = 'Model 1 vs Model 2 Statistics Report'
+            elif use_csv_predictions:
+                header = 'NetCDF vs CSV Statistics Report'
+            else:
+                header = 'AI vs Model Statistics Report'
             lines.append(header)
             lines.append('=' * 80)
             for var in sorted(grouped.keys()):
@@ -1210,7 +1467,10 @@ Examples:
                 for row in rows:
                     title = f"{var}{row.get('suffix','')}"
                     lines.append(title)
-                    if use_csv_predictions:
+                    if model_vs_model:
+                        lines.append("  Model 1: sum={ai_sum:.6g} std={ai_std:.6g} min={ai_min:.6g} max={ai_max:.6g}".format(**row))
+                        lines.append("  Model 2: sum={model_sum:.6g} std={model_std:.6g} min={model_min:.6g} max={model_max:.6g}".format(**row))
+                    elif use_csv_predictions:
                         lines.append("  NetCDF: sum={ai_sum:.6g} std={ai_std:.6g} min={ai_min:.6g} max={ai_max:.6g}".format(**row))
                         lines.append("  CSV:    sum={model_sum:.6g} std={model_std:.6g} min={model_min:.6g} max={model_max:.6g}".format(**row))
                     else:
@@ -1256,7 +1516,8 @@ Examples:
                             figsize=(14, 10),
                             color=[colors.get(col, 'gray') for col in plot_cols]
                         )
-                        title = 'CSV vs NetCDF Agreement by Variable' if use_csv_predictions else 'AI vs Model Agreement by Variable'
+                        title = ('Model 1 vs Model 2 Agreement by Variable' if model_vs_model else
+                                 'CSV vs NetCDF Agreement by Variable' if use_csv_predictions else 'AI vs Model Agreement by Variable')
                         plt.title(title, fontsize=16)
                         plt.xlabel('Variable', fontsize=14)
                         plt.ylabel('Percentage (%)', fontsize=14)
@@ -1272,9 +1533,14 @@ Examples:
     else:
         print("No statistics to write.")
 
-    ds_ai.close()
+    if ds_ai is not None:
+        ds_ai.close()
     if ds_model is not None:
         ds_model.close()
+    if ds_model1 is not None:
+        ds_model1.close()
+    if ds_model2 is not None:
+        ds_model2.close()
     if args.no_plot:
         print(f"\nCompleted without plotting. Output directory: {args.output_dir}")
     else:
