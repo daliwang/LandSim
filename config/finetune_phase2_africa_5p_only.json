@@ -1,0 +1,136 @@
+{
+  "_description": "Fine-tune Phase2 P-focused model on Africa region only, 5P-focused. Use: python scripts/run_finetuning_json.py --config-json config/finetune_phase2_africa_5p_only.json --output-dir-suffix phase2_africa_5p. Run from repo root. Improves Africa 5P without changing Amazon or other variables.",
+  "finetuning_paths": {
+    "variable_list_path": "../CNP_IO_updated9_dev_dw.txt",
+    "pretrained_model_path": "../cnp_results/run_20260305_153217_phase2_pvariable_focus/cnp_predictions/model.pth",
+    "dataset_path": "/mnt/proj-shared/AI4BGC_7xw/TrainingData/Trendy_1_data_CNP",
+    "file_pattern": "training_data_batch_*.pkl",
+    "output_dir": "../cnp_results",
+    "finetuned_model_filename": "finetuned_phase2_africa_5p.pth"
+  },
+  "training_hyperparameters": {
+    "num_epochs": 50,
+    "batch_size": 128,
+    "learning_rate": 1e-5,
+    "optimizer_type": "adamw",
+    "weight_decay": 0.01,
+    "use_scheduler": true,
+    "scheduler_type": "cosine",
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.1,
+    "xsmrpool_loss_weight": 10,
+    "litter_c_loss_weight": 1,
+    "litter_n_loss_weight": 1,
+    "litter_p_loss_weight": 4,
+    "scalar_loss_weight": 0.06,
+    "vector_loss_weight": 0.4,
+    "matrix_loss_weight": 2.5
+  },
+  "reproducibility_config": {
+    "random_seed": 42,
+    "strict_determinism": false,
+    "train_split": 0.8,
+    "normalization": "individual",
+    "dropout_p": 0.12
+  },
+  "data_filtering_config": {
+    "tropical_only": false,
+    "tropical_lat_range": [-30.0, 30.0],
+    "longitudes_to_drop": [0, 358.75],
+    "natveg_only": true,
+    "natveg_filter_before_split": false,
+    "region_boxes": [
+      [-15, 15, 0, 30]
+    ]
+  },
+  "variable_weights": {
+    "pft1d_weights": {
+      "cpool": 3,
+      "npool": 4,
+      "ppool": 6,
+      "totvegc": 3,
+      "leafc": 3,
+      "leafn": 3,
+      "leafp": 4,
+      "leafc_storage": 2,
+      "leafn_storage": 2,
+      "leafp_storage": 3,
+      "deadstemc": 3,
+      "deadstemn": 3,
+      "deadstemp": 4,
+      "frootc": 2,
+      "frootn": 2,
+      "frootp": 3,
+      "frootc_storage": 1.5,
+      "frootn_storage": 1.5,
+      "frootp_storage": 2,
+      "tlai": 2
+    },
+    "soil2d_weights": {
+      "cwdc_vr": 0.1,
+      "cwdn_vr": 0.1,
+      "cwdp_vr": 0.1,
+      "primp_vr": 35,
+      "occlp_vr": 50,
+      "labilep_vr": 40,
+      "secondp_vr": 40,
+      "solutionp_vr": 40,
+      "litr2c_vr": 0.1,
+      "litr2p_vr": 0.1,
+      "litr2n_vr": 0.1,
+      "litr3c_vr": 0.1,
+      "litr3n_vr": 0.1,
+      "litr3p_vr": 0.1,
+      "soil1c_vr": 0.1,
+      "soil1n_vr": 0.1,
+      "soil1p_vr": 0.1,
+      "soil2c_vr": 0.1,
+      "soil2n_vr": 0.1,
+      "soil2p_vr": 0.1,
+      "soil3c_vr": 0.1,
+      "soil3n_vr": 0.1,
+      "soil3p_vr": 0.1,
+      "soil4c_vr": 0.1,
+      "soil4n_vr": 0.1,
+      "soil4p_vr": 0.1
+    },
+    "scalar_weights": {
+      "GPP": 0.08,
+      "NPP": 0.08,
+      "AR": 0.08,
+      "HR": 0.08
+    }
+  },
+  "tail_aware_config": {
+    "loss": "log1p_huber",
+    "epsilon": 1e-8,
+    "huber_delta": 0.7
+  },
+  "tail_aware_weights": {
+    "cpool": 3,
+    "deadstemc": 3,
+    "deadcrootc": 3,
+    "livestemc": 3,
+    "livecrootc": 3,
+    "npool": 4,
+    "ppool": 6,
+    "totvegc": 3,
+    "leafc": 3,
+    "leafn": 3,
+    "leafp": 4,
+    "labilep": 10,
+    "labilep_vr": 40,
+    "primp_vr": 35,
+    "occlp_vr": 50,
+    "secondp_vr": 40,
+    "solutionp_vr": 40
+  },
+  "pft_mask_config": {
+    "mask_absent_pfts": true,
+    "pft_presence_threshold": 0
+  },
+  "pft_zero_sparsity_config": {
+    "weight": 1,
+    "threshold": 1e-8
+  }
+}

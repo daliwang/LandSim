@@ -6,7 +6,8 @@ set -euo pipefail
 #
 # Phase 3 for new users:
 # - Full-grid inference with Phase2 model
-# - Apply 5P bias/scale correction (Amazon + Africa)
+# - Apply 5P bias/scale correction: Amazon-only, then Africa-only, then merge
+#   (same workflow as run_20260313_224805_phase2_tropical_soilp_amazon_africa)
 # - Create a tropical restart with bias-corrected Phase2 5P
 #
 # Requirements:
@@ -17,9 +18,12 @@ set -euo pipefail
 # - TS               timestamp suffix (optional; only affects output dir name)
 #
 # Usage:
-#   export PHASE2_RUN_DIR=...
+#   export PHASE2_RUN_DIR=...   # optional; default prefers run_*_phase2_tropical_soilp* then latest phase2_tropical
 #   export BASE_RESTART=...
 #   bash scripts/run_phase3_tworegions.sh
+#
+# For best Africa/Amazon 5P, use: PHASE2_RUN_DIR=cnp_results/run_20260313_224805_phase2_tropical_soilp_amazon_africa
+# See docs/PHASE3_TWOREGIONS_VS_GOOD_RUN_DIFFERENCE.md for why phase3 results can differ from that run.
 ###############################################################################
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,9 +35,13 @@ if [[ -z "${PHASE2_RUN_DIR:-}" ]] || [[ -z "${BASE_RESTART:-}" ]]; then
     local d="$1"
     [[ -f "$d/cnp_model.pt" ]] || [[ -f "$d/cnp_predictions/model.pth" ]]
   }
+  # Prefer phase2_tropical_soilp* (e.g. phase2_tropical_soilp_amazon_africa) for best Africa/Amazon 5P.
   _latest_phase2() {
     local d
-    for d in $(ls -td cnp_results/run_*_phase2_tropical 2>/dev/null); do
+    for d in $(ls -td cnp_results/run_*_phase2_tropical_soilp* 2>/dev/null); do
+      [[ -d "$d" ]] && _has_model "$d" && { echo "$d"; return 0; }
+    done
+    for d in $(ls -td cnp_results/run_*_phase2_tropical* 2>/dev/null); do
       [[ -d "$d" ]] && _has_model "$d" && { echo "$d"; return 0; }
     done
     return 1
@@ -76,19 +84,29 @@ if [[ ! -d "$INF_FULL_DIR/cnp_predictions" ]]; then
     --inference-full-grid
 fi
 
-echo "Applying 5P bias/scale correction (Amazon + Africa)..."
+# Match good-run workflow: Amazon-only correction, Africa-only correction, then merge.
+echo "Applying 5P bias/scale correction (Amazon only)..."
 python scripts/apply_5p_bias_scale_correction.py \
   --run-dir "$RUN3_DIR" \
-  --region-config-json config/training_config_two_region_five_p.json \
-  --output-subdir soil_2d_predictions_5P_bias_corrected_phase2
+  --region-config-json config/training_config_amazon_5p_box.json \
+  --output-subdir soil_2d_predictions_5P_bias_corrected_amazon
+
+echo "Applying 5P bias/scale correction (Africa only)..."
+python scripts/apply_5p_bias_scale_correction.py \
+  --run-dir "$RUN3_DIR" \
+  --region-config-json config/training_config_africa_5p_box.json \
+  --output-subdir soil_2d_predictions_5P_bias_corrected_africa
+
+echo "Merging Amazon and Africa bias-corrected 5P..."
+python scripts/merge_5p_bias_corrected_amazon_africa.py --run-dir "$RUN3_DIR"
 
 mkdir -p "$RUN3_DIR/comparison_results"
-BC_NETCDF="$RUN3_DIR/comparison_results/ai_predictions_5P_bias_corrected_phase2.nc"
+BC_NETCDF="$RUN3_DIR/comparison_results/ai_predictions_5P_bias_corrected_amazon_africa.nc"
 
 echo "Converting bias-corrected predictions to NetCDF..."
 python scripts/ai_predictions_to_netcdf.py \
   --ai-predictions "$INF_FULL_DIR/cnp_predictions/" \
-  --soil-2d-bias-corrected-subdir soil_2d_predictions_5P_bias_corrected_phase2 \
+  --soil-2d-bias-corrected-subdir soil_2d_predictions_5P_bias_corrected_amazon_africa \
   --variable-list "$VARIABLE_LIST" \
   --output "$BC_NETCDF"
 
@@ -101,7 +119,7 @@ python scripts/ai_predictions_to_restart.py \
   --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
   "--tropical-lat-range=-30,30"
 
-echo "phase3_tworegions: natveg base + Phase2 5P with Amazon+Africa bias/scale in tropics on $(date)" > "$RUN3_DIR/README_phase3_tworegions.txt"
+echo "phase3_tworegions: natveg base + Phase2 5P with Amazon-only + Africa-only bias correction merged (same workflow as good run) in tropics on $(date)" > "$RUN3_DIR/README_phase3_tworegions.txt"
 
 echo
 

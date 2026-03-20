@@ -248,9 +248,10 @@ def load_ai_predictions(
             if 'soil_2d' not in preds:
                 preds['soil_2d'] = {}
                 preds['soil2d_coords'] = {}
-            for p in sorted(bias_dir.glob('predictions_Y_*_bias_corrected.csv')):
-                # predictions_Y_<var>_bias_corrected.csv -> <var>
-                var_name = p.stem.replace('predictions_Y_', '').replace('_bias_corrected', '')
+            for p in sorted(bias_dir.glob('predictions_Y_*_bias_corrected*.csv')):
+                # predictions_Y_<var>_bias_corrected.csv or ..._bias_corrected_amazon_africa.csv -> <var>
+                stem = p.stem.replace('predictions_Y_', '')
+                var_name = stem.split('_bias_corrected')[0]
                 df = pd.read_csv(p)
                 lon, lat = _extract_coords(df)
                 preds['soil2d_coords'][var_name] = (lon, lat)

@@ -26,17 +26,31 @@ SCALE_FACTOR_VARS: Dict[str, float] = {"solutionp_vr": 1000.0}
 DECIMAL_PLACES_SCALED_VARS: int = 8  # keep small solutionp_vr values (e.g. 3e-6) visible
 
 # Variables where we minimize relative (percent) error so that layer-wise error is <10%.
-# Uses weighted least squares with weight 1/(gt+eps)^2.
-RELATIVE_ERROR_WEIGHTED_VARS: Set[str] = {"solutionp_vr"}
+# Uses weighted least squares with weight 1/(gt+eps)^2. solutionp_vr and occlp_vr are critical.
+RELATIVE_ERROR_WEIGHTED_VARS: Set[str] = {"solutionp_vr", "occlp_vr"}
 RELATIVE_ERROR_EPS: float = 1e-12
 
 # Reference sites (lon, lat) to prioritize in relative-error fit so layer error <10% there.
-REFERENCE_SITES: List[Tuple[float, float]] = [
+# We keep separate lists for Amazon and Africa so each region's fit is anchored by its own sites.
+AMAZON_REFERENCE_SITES: List[Tuple[float, float]] = [
     (303.75, -17.434553),   # default Amazon site
-    (300.0, 4.240838),      # Site A
-    (292.5, -15.549738),    # Site B
+    (300.0, 4.240838),      # Amazon Site A
+    (292.5, -15.549738),    # Amazon Site B
 ]
-REFERENCE_SITE_EXTRA_WEIGHT: float = 500.0  # extra weight for cells at these sites
+
+AFRICA_REFERENCE_SITES: List[Tuple[float, float]] = [
+    (27.5, 0.471204),       # nearest to (28, 0) in phase2 cnp_inference_entire_dataset
+    (22.5, 5.183247),       # Mid-Africa
+    (28.0, 0.0),            # Africa 28E, 0N (may not be on grid)
+    (20.0, -5.0),           # Additional central tropical Africa site
+]
+
+# Default combined list (used when no region-specific override is needed)
+REFERENCE_SITES: List[Tuple[float, float]] = AMAZON_REFERENCE_SITES + AFRICA_REFERENCE_SITES
+
+REFERENCE_SITE_EXTRA_WEIGHT_AMAZON: float = 500.0  # extra weight for Amazon reference cells
+REFERENCE_SITE_EXTRA_WEIGHT_AFRICA: float = 250.0  # slightly softer extra weight for Africa
+REFERENCE_SITE_EXTRA_WEIGHT: float = REFERENCE_SITE_EXTRA_WEIGHT_AMAZON
 REFERENCE_SITE_ATOL: float = 1e-4
 
 
@@ -350,9 +364,27 @@ def compute_and_apply_corrections(
                 scale = scale_factor_vars.get(var) if scale_factor_vars else None
                 if scale is not None and scale != 1.0:
                     mult_only = False  # use linear fit on scaled data
+
+                # Use relative-error objective only for variables that request it.
                 rel_err = var in relative_error_weighted_vars
-                ref_lon = lon[region_mask] if rel_err and reference_sites else None
-                ref_lat = lat[region_mask] if rel_err and reference_sites else None
+
+                # Choose region-specific reference sites and extra weights
+                if rel_err:
+                    if region.name.startswith("amazon"):
+                        region_ref_sites = AMAZON_REFERENCE_SITES
+                        region_extra_weight = REFERENCE_SITE_EXTRA_WEIGHT_AMAZON
+                    elif region.name.startswith("africa"):
+                        region_ref_sites = AFRICA_REFERENCE_SITES
+                        region_extra_weight = REFERENCE_SITE_EXTRA_WEIGHT_AFRICA
+                    else:
+                        region_ref_sites = reference_sites
+                        region_extra_weight = REFERENCE_SITE_EXTRA_WEIGHT
+                else:
+                    region_ref_sites = None
+                    region_extra_weight = REFERENCE_SITE_EXTRA_WEIGHT
+
+                ref_lon = lon[region_mask] if rel_err and region_ref_sites else None
+                ref_lat = lat[region_mask] if rel_err and region_ref_sites else None
                 a, b = fit_bias_scale(
                     pred_vals,
                     gt_vals,
@@ -362,12 +394,19 @@ def compute_and_apply_corrections(
                     relative_eps=RELATIVE_ERROR_EPS,
                     ref_site_lon=ref_lon,
                     ref_site_lat=ref_lat,
-                    ref_sites=reference_sites if rel_err else None,
-                    ref_site_extra_weight=REFERENCE_SITE_EXTRA_WEIGHT,
+                    ref_sites=region_ref_sites,
+                    ref_site_extra_weight=region_extra_weight,
                     ref_site_atol=REFERENCE_SITE_ATOL,
                 )
-                # For relative-error vars: if ref site still has >10% error, nudge (a,b) so ref site is exact (minimal change)
-                if rel_err and reference_sites and ref_lon is not None and ref_lat is not None:
+                # For relative-error vars: if ref site still has >10% error, nudge (a,b) so ref site is exact (minimal change).
+                # We only enforce this hard constraint for Amazon regions to avoid overfitting Africa to noisy GT.
+                if (
+                    rel_err
+                    and region_ref_sites
+                    and region.name.startswith("amazon")
+                    and ref_lon is not None
+                    and ref_lat is not None
+                ):
                     for rlon, rlat in reference_sites:
                         at_site = np.isclose(ref_lon, rlon, atol=REFERENCE_SITE_ATOL) & np.isclose(
                             ref_lat, rlat, atol=REFERENCE_SITE_ATOL
@@ -437,6 +476,12 @@ def compute_and_apply_corrections(
                     raw = (a * pred_vals * scale + b) / scale
                 else:
                     raw = a * pred_vals + b
+
+                # For Africa regions, apply a modest blend between raw prediction and fully corrected value
+                # to avoid over-correcting in noisier GT regimes.
+                if region.name.startswith("africa"):
+                    alpha = 0.7  # 70% corrected, 30% original
+                    raw = alpha * raw + (1.0 - alpha) * pred_vals
                 # Concentrations must be non-negative
                 corrected_df.loc[region_mask, col_name] = np.maximum(raw, 0.0)
 
