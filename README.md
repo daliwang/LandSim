@@ -1,6 +1,6 @@
 # LandSim v0.1 – Land Simulator for Multimodal Dynamics
 
-LandSim (formerly AI4BGC) is a deep learning framework for modeling terrestrial ecosystem dynamics with modern neural architectures and a flexible data pipeline.
+LandSim is a foundation model for terrestrial ecosystem dynamics with modern neural architectures and a flexible data pipeline.
 
 ---
 
