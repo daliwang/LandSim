@@ -566,3 +566,35 @@ python scripts/ai_predictions_to_netcdf.py \
   --output-dir cnp_results/run_20260311_204845_phase3_tworegions/analysis/amazon_5p_restart_comparison_twocorrections
 
   python train_cnp_model.py --training-config-json config/training_config_phase2_tropical_soilp_only.json --variable-list CNP_IO_updated9_dev_dw.txt --tropical-lat-range -30,30 --output-dir-suffix phase2_tropical_soilp_amazon_africa
+
+
+# --- 05/28/2026: TESNORTHERA full-domain export-only CSV + normal-spinup restart ---
+# Uses the completed batched model inference predictions.pkl for the full north domain
+# (259,535 samples), so this does not rerun the expensive GPU inference.
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+
+TESNORTH_RUN=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260528_0946_tesnorthera_inference_batched_from_tesnorth10pc
+TESNORTH_INFER="$TESNORTH_RUN/cnp_inference_entire_domain"
+TESNORTH_TRAIN_RUN=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260319_134216_tesnorth10pc
+TESNORTH_VAR_LIST=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/CNP_IO_tesnorth10pct.txt
+TESNORTH_RESTART=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/TESNORTHERA5_20adspin_restartfile/uELM_NORTHERA5_ERA5REF_I1850uELMCNPRDCTCBC.elm.r.0021-01-01-00000.nc
+
+python scripts/export_saved_predictions_to_csv.py \
+  --inference-dir "$TESNORTH_INFER" \
+  --config "$TESNORTH_TRAIN_RUN/cnp_config.json" \
+  --scalers-dir "$TESNORTH_TRAIN_RUN/cnp_predictions/scalers" \
+  --derive-np-from-c \
+  2>&1 | tee "$TESNORTH_RUN/export_saved_predictions_to_csv.log"
+
+python scripts/ai_predictions_to_netcdf.py \
+  --ai-predictions "$TESNORTH_INFER/cnp_predictions" \
+  --variable-list "$TESNORTH_VAR_LIST" \
+  --output "$TESNORTH_INFER/comparison_results/ai_predictions_for_restart.nc" \
+  2>&1 | tee "$TESNORTH_RUN/ai_predictions_to_netcdf.log"
+
+python -u scripts/ai_predictions_to_restart.py \
+  --ai-predictions "$TESNORTH_INFER/comparison_results/ai_predictions_for_restart.nc" \
+  --restart-file "$TESNORTH_RESTART" \
+  --output "$TESNORTH_RUN/updated_restart_normal_spinup_uELM_NORTHERA5_ERA5REF_I1850uELMCNPRDCTCBC.elm.r.0021-01-01-00000.nc" \
+  --variable-list "$TESNORTH_VAR_LIST" \
+  2>&1 | tee "$TESNORTH_RUN/ai_predictions_to_restart.kdtree.log"

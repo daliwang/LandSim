@@ -44,6 +44,9 @@ It is based on:
 
 - `docs/WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md`
 - `docs/INSTRUCTIONS_TRENDY_1_AI_RESTART_CREATION.md`
+- [REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md](./REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md) — bias/scale methodology, full-region objectives for `solutionp_vr` / `occlp_vr`, and improvement directions.
+- [PHASE3_TWOREGIONS_VS_GOOD_RUN_DIFFERENCE.md](./PHASE3_TWOREGIONS_VS_GOOD_RUN_DIFFERENCE.md) — split Amazon/Africa correction + merge vs older single-config Phase3.
+- Quantitative **Amazon / Africa 5P pred vs GT**: `scripts/compare_5p_gt_two_regions_inference.py` (`pred-eval`).
 
 The recommended way to run all three phases is to use
 `scripts/run_phase_restarts.sh`, described at the end of this document.

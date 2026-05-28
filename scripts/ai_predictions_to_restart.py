@@ -87,13 +87,16 @@ def create_spatial_mapping(ds_ai: xr.Dataset, ds_model: xr.Dataset) -> tuple[np.
     print(f"  AI coordinates: {len(ai_lon)} gridcells")
     print(f"  Model coordinates: {len(model_lon)} gridcells")
     
-    # Create spatial mapping using nearest neighbor (exact same as working script)
-    from scipy.spatial.distance import cdist
+    # Create spatial mapping using nearest neighbor without materializing the
+    # full model x AI distance matrix. The full northern domain has ~260k
+    # gridcells, so scipy.spatial.distance.cdist would require hundreds of GB.
+    from scipy.spatial import cKDTree
     ai_coords = np.column_stack([ai_lon, ai_lat])
     model_coords = np.column_stack([model_lon, model_lat])
-    distances = cdist(model_coords, ai_coords)
-    model_to_ai_mapping = np.argmin(distances, axis=1) # 索引是模型格点, 值是最近的 AI 格点
+    tree = cKDTree(ai_coords)
+    distances, model_to_ai_mapping = tree.query(model_coords, k=1)
     print(f"  Spatial mapping created: {len(model_to_ai_mapping)} Model -> {len(set(model_to_ai_mapping))} AI")
+    print(f"  Nearest-neighbor distance max: {float(np.max(distances)):.6g}")
     # Get grid information from the MODEL file as the master coordinate system
     n_grid = ds_model.sizes["gridcell"]
     print(f"  Using MODEL gridcell count: {n_grid}")

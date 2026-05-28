@@ -49,7 +49,9 @@ AFRICA_REFERENCE_SITES: List[Tuple[float, float]] = [
 REFERENCE_SITES: List[Tuple[float, float]] = AMAZON_REFERENCE_SITES + AFRICA_REFERENCE_SITES
 
 REFERENCE_SITE_EXTRA_WEIGHT_AMAZON: float = 500.0  # extra weight for Amazon reference cells
-REFERENCE_SITE_EXTRA_WEIGHT_AFRICA: float = 250.0  # slightly softer extra weight for Africa
+REFERENCE_SITE_EXTRA_WEIGHT_AFRICA: float = 250.0  # slightly softer extra weight for Africa (legacy / v2)
+# regional_fit_v3: match Amazon ref-site emphasis in Africa for solutionp_vr / occlp_vr only
+REFERENCE_SITE_EXTRA_WEIGHT_AFRICA_V3: float = REFERENCE_SITE_EXTRA_WEIGHT_AMAZON
 REFERENCE_SITE_EXTRA_WEIGHT: float = REFERENCE_SITE_EXTRA_WEIGHT_AMAZON
 REFERENCE_SITE_ATOL: float = 1e-4
 
@@ -66,6 +68,20 @@ class RegionBox:
 
     def contains(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
         return (lat >= self.lat_min) & (lat <= self.lat_max) & (lon >= self.lon_min) & (lon <= self.lon_max)
+
+
+def _region_geo_kind(region: RegionBox) -> str:
+    """Classify box as Amazon vs Africa from lon/lat bounds.
+
+    ``load_region_boxes`` labels the first JSON box ``amazon`` even for Africa-only configs;
+    geographic bounds disambiguate for ref-site weighting and blend behavior.
+    """
+    lon_mid = 0.5 * (float(region.lon_min) + float(region.lon_max))
+    if float(region.lon_min) >= 200.0 or lon_mid >= 200.0:
+        return "amazon"
+    if float(region.lon_max) <= 40.0 and float(region.lon_min) >= 0.0:
+        return "africa"
+    return "other"
 
 
 def load_region_boxes(
@@ -135,6 +151,7 @@ def fit_bias_scale(
     ref_sites: Optional[List[Tuple[float, float]]] = None,
     ref_site_extra_weight: float = 500.0,
     ref_site_atol: float = 1e-4,
+    relative_weight_cap: Optional[float] = None,
 ) -> Tuple[float, float]:
     """Fit GT ≈ a * pred + b via least squares (or a * pred only if multiplicative_only).
 
@@ -175,9 +192,12 @@ def fit_bias_scale(
     if relative_error_weighted:
         # Minimize sum w_i * (y_i - a*x_i - b)^2 with w_i = 1/(y_i+eps)^2
         w = 1.0 / (y.astype(float) + relative_eps) ** 2
+        if relative_weight_cap is not None and relative_weight_cap > 0:
+            w = np.minimum(w, float(relative_weight_cap))
         # Boost weight for reference-site cells so fit targets <10% error there
         if (
-            ref_sites
+            ref_site_extra_weight > 0
+            and ref_sites
             and ref_site_lon is not None
             and ref_site_lat is not None
             and ref_site_lon.shape == ref_site_lat.shape
@@ -201,6 +221,70 @@ def fit_bias_scale(
     return float(a), float(b)
 
 
+def _ref_site_project_minimal_change(
+    a: float,
+    b: float,
+    pred_ref: float,
+    gt_ref: float,
+    scale: Optional[float],
+) -> Tuple[float, float]:
+    """One-step projection so a'*pred_ref + b' matches gt_ref (scaled-space if scale set)."""
+    if scale is not None and scale != 1.0:
+        pred_s = pred_ref * scale
+        tgt = gt_ref * scale
+        lam = 2.0 * (a * pred_s + b - tgt) / (pred_s**2 + 1.0)
+        a = a - lam * pred_s / 2.0
+        b = b - lam / 2.0
+    else:
+        lam = 2.0 * (a * pred_ref + b - gt_ref) / (pred_ref**2 + 1.0)
+        a = float(a - lam * pred_ref / 2.0)
+        b = float(b - lam / 2.0)
+    return a, b
+
+
+def _iterative_ref_site_projection(
+    a: float,
+    b: float,
+    pred_vals: np.ndarray,
+    gt_vals: np.ndarray,
+    ref_lon: np.ndarray,
+    ref_lat: np.ndarray,
+    region_ref_sites: List[Tuple[float, float]],
+    scale: Optional[float],
+    max_sweeps: int = 8,
+    rel_tol_pct: float = 10.0,
+) -> Tuple[float, float]:
+    """Repeatedly nudge (a,b) so listed reference cells approach GT; multiple sweeps for Africa-scale misfit."""
+    for _ in range(max_sweeps):
+        improved = False
+        for rlon, rlat in region_ref_sites:
+            at_site = np.isclose(ref_lon, rlon, atol=REFERENCE_SITE_ATOL) & np.isclose(
+                ref_lat, rlat, atol=REFERENCE_SITE_ATOL
+            )
+            if not np.any(at_site):
+                continue
+            idx = int(np.where(at_site)[0][0])
+            pred_ref = float(pred_vals[idx])
+            gt_ref = float(gt_vals[idx])
+            if scale and scale != 1.0:
+                pred_s = pred_ref * scale
+                corrected_ref = (a * pred_s + b) / scale
+            else:
+                corrected_ref = a * pred_ref + b
+            if corrected_ref < 0:
+                a, b = _ref_site_project_minimal_change(a, b, pred_ref, gt_ref, scale)
+                improved = True
+                continue
+            rel_pct = 100.0 * abs(corrected_ref - gt_ref) / (gt_ref + 1e-12)
+            if rel_pct <= rel_tol_pct:
+                continue
+            a, b = _ref_site_project_minimal_change(a, b, pred_ref, gt_ref, scale)
+            improved = True
+        if not improved:
+            break
+    return a, b
+
+
 def compute_and_apply_corrections(
     run_dir: str,
     region_boxes: List[RegionBox],
@@ -210,6 +294,9 @@ def compute_and_apply_corrections(
     scale_factor_vars: Optional[Dict[str, float]] = None,
     relative_error_weighted_vars: Optional[Set[str]] = None,
     reference_sites: Optional[List[Tuple[float, float]]] = None,
+    *,
+    regional_fit_v2: bool = False,
+    regional_fit_v3: bool = False,
 ) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
     """Compute per-variable, per-layer, per-region bias/scale corrections and apply them.
 
@@ -224,6 +311,43 @@ def compute_and_apply_corrections(
         relative_error_weighted_vars = RELATIVE_ERROR_WEIGHTED_VARS
     if reference_sites is None:
         reference_sites = REFERENCE_SITES
+
+    # regional_fit_v2: region-wide emphasis for solutionp_vr / occlp_vr (see docs/REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md)
+    # regional_fit_v3: same Amazon treatment as v2; Africa gets Amazon-strength ref-site WLS + iterative ref projection.
+    if regional_fit_v2 and regional_fit_v3:
+        raise ValueError("regional_fit_v2 and regional_fit_v3 are mutually exclusive")
+
+    if regional_fit_v3:
+        relative_weight_cap_mode: Optional[float] = 1e12
+        symmetric_reference_projection = True
+        africa_correction_alpha = 1.0
+        africa_rel_ref_weight = REFERENCE_SITE_EXTRA_WEIGHT_AFRICA_V3
+        africa_iterative_ref_projection = True
+    elif regional_fit_v2:
+        relative_weight_cap_mode = 1e12
+        symmetric_reference_projection = True
+        africa_correction_alpha = 1.0
+        africa_rel_ref_weight = REFERENCE_SITE_EXTRA_WEIGHT_AFRICA
+        africa_iterative_ref_projection = False
+    else:
+        relative_weight_cap_mode = None
+        symmetric_reference_projection = False
+        africa_correction_alpha = 0.7
+        africa_rel_ref_weight = REFERENCE_SITE_EXTRA_WEIGHT_AFRICA
+        africa_iterative_ref_projection = False
+
+    if regional_fit_v2:
+        print(
+            "regional_fit_v2: cap relative-error weights, disable reference-site WLS boost, "
+            "symmetric ref-site projection (Amazon + Africa), full Africa correction (no blend)."
+        )
+    if regional_fit_v3:
+        print(
+            "regional_fit_v3: Amazon same as v2 (capped WLS, no ref inflation). "
+            "Africa: capped WLS + Amazon-strength ref-site weights for solutionp_vr/occlp_vr, "
+            "iterative ref-site projection, full correction (no blend)."
+        )
+
     predictions_root = os.path.join(
         run_dir,
         "cnp_inference_entire_dataset",
@@ -370,10 +494,11 @@ def compute_and_apply_corrections(
 
                 # Choose region-specific reference sites and extra weights
                 if rel_err:
-                    if region.name.startswith("amazon"):
+                    gk = _region_geo_kind(region)
+                    if gk == "amazon":
                         region_ref_sites = AMAZON_REFERENCE_SITES
                         region_extra_weight = REFERENCE_SITE_EXTRA_WEIGHT_AMAZON
-                    elif region.name.startswith("africa"):
+                    elif gk == "africa":
                         region_ref_sites = AFRICA_REFERENCE_SITES
                         region_extra_weight = REFERENCE_SITE_EXTRA_WEIGHT_AFRICA
                     else:
@@ -382,6 +507,16 @@ def compute_and_apply_corrections(
                 else:
                     region_ref_sites = None
                     region_extra_weight = REFERENCE_SITE_EXTRA_WEIGHT
+
+                if rel_err and region_ref_sites:
+                    if regional_fit_v2:
+                        w_extra = 0.0
+                    elif regional_fit_v3:
+                        w_extra = 0.0 if _region_geo_kind(region) == "amazon" else float(africa_rel_ref_weight)
+                    else:
+                        w_extra = region_extra_weight
+                else:
+                    w_extra = region_extra_weight
 
                 ref_lon = lon[region_mask] if rel_err and region_ref_sites else None
                 ref_lat = lat[region_mask] if rel_err and region_ref_sites else None
@@ -395,19 +530,38 @@ def compute_and_apply_corrections(
                     ref_site_lon=ref_lon,
                     ref_site_lat=ref_lat,
                     ref_sites=region_ref_sites,
-                    ref_site_extra_weight=region_extra_weight,
+                    ref_site_extra_weight=w_extra,
                     ref_site_atol=REFERENCE_SITE_ATOL,
+                    relative_weight_cap=relative_weight_cap_mode,
                 )
-                # For relative-error vars: if ref site still has >10% error, nudge (a,b) so ref site is exact (minimal change).
-                # We only enforce this hard constraint for Amazon regions to avoid overfitting Africa to noisy GT.
-                if (
+                # For relative-error vars: optional minimal-change projection so ref gridcells approach GT.
+                # Legacy: Amazon only. v2: Amazon + Africa, single nudge. v3: Africa uses iterative sweeps.
+                gk = _region_geo_kind(region)
+                apply_ref_projection = (
                     rel_err
                     and region_ref_sites
-                    and region.name.startswith("amazon")
                     and ref_lon is not None
                     and ref_lat is not None
+                    and (gk == "amazon" or (symmetric_reference_projection and gk == "africa"))
+                )
+                if (
+                    apply_ref_projection
+                    and regional_fit_v3
+                    and gk == "africa"
+                    and africa_iterative_ref_projection
                 ):
-                    for rlon, rlat in reference_sites:
+                    a, b = _iterative_ref_site_projection(
+                        a,
+                        b,
+                        pred_vals,
+                        gt_vals,
+                        ref_lon,
+                        ref_lat,
+                        region_ref_sites,
+                        scale,
+                    )
+                elif apply_ref_projection:
+                    for rlon, rlat in region_ref_sites:
                         at_site = np.isclose(ref_lon, rlon, atol=REFERENCE_SITE_ATOL) & np.isclose(
                             ref_lat, rlat, atol=REFERENCE_SITE_ATOL
                         )
@@ -424,20 +578,15 @@ def compute_and_apply_corrections(
                         rel_pct = 100 * abs(corrected_ref - gt_ref) / (gt_ref + 1e-12)
                         if corrected_ref >= 0 and rel_pct <= 10:
                             break
-                        # Project (a,b) onto constraint a'*pred_ref + b' = gt_ref (in original space)
-                        # Minimize (a'-a)^2+(b'-b)^2 s.t. a'*pred_ref + b' = gt_ref. Solution:
-                        # lambda = 2*(a*pred_ref + b - gt_ref) / (pred_ref**2 + 1), a' = a - lambda*pred_ref/2, b' = b - lambda/2
                         if scale and scale != 1.0:
                             pred_orig = pred_ref
-                            # In scaled space: a*pred_s + b = gt_s would give (a*pred_s+b)/scale = gt_orig so a*pred_s+b = gt_orig*scale
-                            # Constraint in scaled space: a'*pred_s + b' = gt_ref*scale
                             pred_s = pred_orig * scale
                             tgt = gt_ref * scale
-                            lam = 2.0 * (a * pred_s + b - tgt) / (pred_s ** 2 + 1.0)
+                            lam = 2.0 * (a * pred_s + b - tgt) / (pred_s**2 + 1.0)
                             a = a - lam * pred_s / 2.0
                             b = b - lam / 2.0
                         else:
-                            lam = 2.0 * (a * pred_ref + b - gt_ref) / (pred_ref ** 2 + 1.0)
+                            lam = 2.0 * (a * pred_ref + b - gt_ref) / (pred_ref**2 + 1.0)
                             a = float(a - lam * pred_ref / 2.0)
                             b = float(b - lam / 2.0)
                         break
@@ -477,10 +626,9 @@ def compute_and_apply_corrections(
                 else:
                     raw = a * pred_vals + b
 
-                # For Africa regions, apply a modest blend between raw prediction and fully corrected value
-                # to avoid over-correcting in noisier GT regimes.
-                if region.name.startswith("africa"):
-                    alpha = 0.7  # 70% corrected, 30% original
+                # For Africa regions, optionally blend toward raw pred (legacy 0.7). regional_fit_v2 uses 1.0 (full correction).
+                if _region_geo_kind(region) == "africa" and africa_correction_alpha < 1.0:
+                    alpha = float(africa_correction_alpha)
                     raw = alpha * raw + (1.0 - alpha) * pred_vals
                 # Concentrations must be non-negative
                 corrected_df.loc[region_mask, col_name] = np.maximum(raw, 0.0)
@@ -571,6 +719,25 @@ def main() -> None:
             "so the default Amazon site (lat ~ -17) uses a southern fit. Float, or 'none' to disable. Default: -5.0"
         ),
     )
+    fit_group = parser.add_mutually_exclusive_group()
+    fit_group.add_argument(
+        "--regional-fit-v2",
+        action="store_true",
+        help=(
+            "Region-wide emphasis for relative-error vars (solutionp_vr, occlp_vr): cap WLS weights, "
+            "disable reference-site weight inflation, apply ref-site projection in Amazon and Africa, "
+            "and use full corrected values in Africa (no 70/30 blend). See docs/REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md."
+        ),
+    )
+    fit_group.add_argument(
+        "--regional-fit-v3",
+        action="store_true",
+        help=(
+            "Amazon identical to v2 (capped WLS, no ref inflation). Africa: same caps plus "
+            "Amazon-strength reference-site WLS weights and iterative ref-site projection for "
+            "solutionp_vr/occlp_vr; full Africa correction (no blend)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -630,12 +797,22 @@ def main() -> None:
         output_subdir=args.output_subdir,
         multiplicative_only_vars=multiplicative_only_vars,
         scale_factor_vars=scale_factor_vars,
+        regional_fit_v2=bool(args.regional_fit_v2),
+        regional_fit_v3=bool(args.regional_fit_v3),
     )
 
     # Save parameters to analysis/ for documentation and reuse
     analysis_dir = os.path.join(run_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
-    params_path = os.path.join(analysis_dir, "bias_scale_params_5P_two_regions.json")
+    if args.regional_fit_v2 or args.regional_fit_v3:
+        safe_sub = "".join(
+            c if c.isalnum() or c in "._-" else "_" for c in args.output_subdir
+        )
+        tag = "regional_fit_v3" if args.regional_fit_v3 else "regional_fit_v2"
+        params_name = f"bias_scale_params_5P_{tag}_{safe_sub}.json"
+    else:
+        params_name = "bias_scale_params_5P_two_regions.json"
+    params_path = os.path.join(analysis_dir, params_name)
     with open(params_path, "w", encoding="utf-8") as f:
         json.dump(params, f, indent=2)
     print(f"Saved bias/scale parameters to {params_path}")

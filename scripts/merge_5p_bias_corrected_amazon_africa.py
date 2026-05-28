@@ -97,6 +97,14 @@ def main() -> None:
         default="soil_2d_predictions_5P_bias_corrected_amazon_africa",
         help="Output subdir for merged 5P CSVs.",
     )
+    parser.add_argument(
+        "--output-filename-suffix",
+        default="_bias_corrected_amazon_africa",
+        help=(
+            "Suffix for merged prediction filenames: predictions_Y_<var><suffix>.csv "
+            "(default: _bias_corrected_amazon_africa; e.g. _bias_corrected_amazon_africa_v2 for A/B)."
+        ),
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.run_dir).resolve()
@@ -166,7 +174,7 @@ def main() -> None:
         for col in layer_cols:
             out_df.loc[mask_afr, col] = afr_df.loc[mask_afr, col].to_numpy()
 
-        out_path = out_dir / f"predictions_Y_{var}_bias_corrected_amazon_africa.csv"
+        out_path = out_dir / f"predictions_Y_{var}{args.output_filename_suffix}.csv"
         out_df.to_csv(out_path, index=False)
         print(f"  Wrote merged predictions to {out_path}")
 
