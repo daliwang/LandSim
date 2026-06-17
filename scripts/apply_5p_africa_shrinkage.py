@@ -176,6 +176,21 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--predictions-subdir",
+        default="soil_2d_predictions_5P_bias_corrected_phase2",
+        help="Subdirectory under cnp_predictions with prediction CSVs to shrink.",
+    )
+    parser.add_argument(
+        "--predictions-suffix",
+        default="_bias_corrected",
+        help="Filename suffix after variable name (e.g. _hybrid_labilep_secondp_primp_v3).",
+    )
+    parser.add_argument(
+        "--variables",
+        default=",".join(FIVE_P),
+        help="Comma-separated 5P variables to shrink (others copied unchanged if present).",
+    )
+    parser.add_argument(
         "--output-subdir",
         default="soil_2d_predictions_5P_bias_corrected_africa_shrinkage",
         help=(
@@ -183,30 +198,41 @@ def main() -> None:
             "Africa-shrunk 5P CSVs will be written."
         ),
     )
+    parser.add_argument(
+        "--output-suffix",
+        default="_bias_corrected_africa_shrinkage",
+        help="Suffix for output CSV filenames.",
+    )
     args = parser.parse_args()
+
+    variables = [v.strip() for v in args.variables.split(",") if v.strip()]
+    unknown = set(variables) - set(FIVE_P)
+    if unknown:
+        raise SystemExit(f"Unknown variables: {sorted(unknown)}")
 
     run_dir = Path(args.run_dir).resolve()
     predictions_root = run_dir / "cnp_inference_entire_dataset" / "cnp_predictions"
     gt_dir = predictions_root / "soil_2d_ground_truth"
-    bias_dir = predictions_root / "soil_2d_predictions_5P_bias_corrected_phase2"
+    bias_dir = predictions_root / args.predictions_subdir
     out_dir = predictions_root / args.output_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if not gt_dir.is_dir():
         raise SystemExit(f"Ground-truth dir not found: {gt_dir}")
     if not bias_dir.is_dir():
-        raise SystemExit(f"Bias-corrected predictions dir not found: {bias_dir}")
+        raise SystemExit(f"Predictions dir not found: {bias_dir}")
 
     print(f"Run dir: {run_dir}")
     print(f"GT dir: {gt_dir}")
-    print(f"Bias-corrected 5P dir: {bias_dir}")
+    print(f"Input predictions dir: {bias_dir}")
     print(f"Output (Africa shrinkage) dir: {out_dir}")
+    print(f"Variables to shrink: {variables}")
 
     all_params = {}
 
     for var in FIVE_P:
         gt_path = gt_dir / f"ground_truth_Y_{var}.csv"
-        pred_path = bias_dir / f"predictions_Y_{var}_bias_corrected.csv"
+        pred_path = bias_dir / f"predictions_Y_{var}{args.predictions_suffix}.csv"
         if not gt_path.is_file() or not pred_path.is_file():
             print(f"Skipping {var}: missing GT or prediction CSV ({gt_path}, {pred_path})")
             continue
@@ -220,23 +246,27 @@ def main() -> None:
         if gt_df.shape != pred_df.shape:
             raise SystemExit(f"Shape mismatch for {var}: GT {gt_df.shape}, PRED {pred_df.shape}")
 
-        mask_af = _africa_mask(gt_df)
-        n_af = int(mask_af.sum())
-        print(f"  Africa rows: {n_af}")
-        if n_af == 0:
-            print("  No Africa rows found; skipping shrinkage for this variable.")
+        if var not in variables:
             out_df = pred_df.copy()
+            print(f"  Not in --variables; copying unchanged.")
         else:
-            factors = compute_africa_shrinkage_factors(gt_df, pred_df, var)
-            out_df = apply_africa_shrinkage(gt_df, pred_df, var, factors)
-            all_params[var] = {
-                "factors": factors,
-                "africa_rows": n_af,
-            }
+            mask_af = _africa_mask(gt_df)
+            n_af = int(mask_af.sum())
+            print(f"  Africa rows: {n_af}")
+            if n_af == 0:
+                print("  No Africa rows found; skipping shrinkage for this variable.")
+                out_df = pred_df.copy()
+            else:
+                factors = compute_africa_shrinkage_factors(gt_df, pred_df, var)
+                out_df = apply_africa_shrinkage(gt_df, pred_df, var, factors)
+                all_params[var] = {
+                    "factors": factors,
+                    "africa_rows": n_af,
+                }
 
-        out_path = out_dir / f"predictions_Y_{var}_bias_corrected_africa_shrinkage.csv"
+        out_path = out_dir / f"predictions_Y_{var}{args.output_suffix}.csv"
         out_df.to_csv(out_path, index=False)
-        print(f"  Wrote Africa-shrunk predictions to {out_path}")
+        print(f"  Wrote to {out_path}")
 
     if all_params:
         analysis_dir = run_dir / "analysis"

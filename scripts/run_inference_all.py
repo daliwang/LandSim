@@ -20,6 +20,7 @@ Key flags:
     --use-training-config: Use exact training configuration (default: True)
     --strict-loading: Use strict model loading to catch mismatches early (default: True)
     --variable-list: Path to variable list file (optional, will auto-detect from config)
+    --derive-np-from-c / --no-derive-np-from-c: Enforce or skip N/P derivation from C (default: on)
 """
 
 import argparse
@@ -1833,8 +1834,16 @@ def main():
     parser.add_argument("--no-mask-absent-pfts", dest="mask_absent_pfts", action="store_false", help="Disable masking of absent PFTs")
     parser.set_defaults(mask_absent_pfts=True)
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
-    parser.add_argument("--derive-np-from-c", action='store_true', default=True, 
-                       help="Enforce CNP stoichiometric ratios by deriving N/P variables from C predictions after inference (default: True)")
+    parser.add_argument(
+        "--derive-np-from-c",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After inference, derive N/P from C predictions to enforce stoichiometric ratios "
+            "(default: True). Use --no-derive-np-from-c for Phase2/Phase3 restarts when tropical "
+            "CNP ratios should remain as the model predicted them."
+        ),
+    )
     parser.add_argument("--inference-full-grid", action='store_true', default=False,
                        help="Run inference on full global grid (set tropical_only=False). Use for Phase 2 tropical-trained models when merging P variables into a global restart; otherwise only validation/tropical gridcells would be in the predictions NetCDF.")
     parser.add_argument("--inference-two-regions-only", action='store_true', default=False,

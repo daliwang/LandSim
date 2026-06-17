@@ -297,6 +297,7 @@ def compute_and_apply_corrections(
     *,
     regional_fit_v2: bool = False,
     regional_fit_v3: bool = False,
+    regional_fit_v4: bool = False,
 ) -> Dict[str, Dict[str, Dict[str, Dict[str, float]]]]:
     """Compute per-variable, per-layer, per-region bias/scale corrections and apply them.
 
@@ -314,10 +315,15 @@ def compute_and_apply_corrections(
 
     # regional_fit_v2: region-wide emphasis for solutionp_vr / occlp_vr (see docs/REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md)
     # regional_fit_v3: same Amazon treatment as v2; Africa gets Amazon-strength ref-site WLS + iterative ref projection.
-    if regional_fit_v2 and regional_fit_v3:
-        raise ValueError("regional_fit_v2 and regional_fit_v3 are mutually exclusive")
+    # regional_fit_v4: v3 plus labilep_vr in the relative-error / ref-site treatment (solutionp/occlp unchanged).
+    fit_modes = sum(bool(x) for x in (regional_fit_v2, regional_fit_v3, regional_fit_v4))
+    if fit_modes > 1:
+        raise ValueError("regional_fit_v2, regional_fit_v3, and regional_fit_v4 are mutually exclusive")
 
-    if regional_fit_v3:
+    if regional_fit_v4:
+        relative_error_weighted_vars = set(relative_error_weighted_vars) | {"labilep_vr"}
+
+    if regional_fit_v3 or regional_fit_v4:
         relative_weight_cap_mode: Optional[float] = 1e12
         symmetric_reference_projection = True
         africa_correction_alpha = 1.0
@@ -346,6 +352,11 @@ def compute_and_apply_corrections(
             "regional_fit_v3: Amazon same as v2 (capped WLS, no ref inflation). "
             "Africa: capped WLS + Amazon-strength ref-site weights for solutionp_vr/occlp_vr, "
             "iterative ref-site projection, full correction (no blend)."
+        )
+    if regional_fit_v4:
+        print(
+            "regional_fit_v4: same as v3 for solutionp_vr/occlp_vr, plus labilep_vr uses "
+            "relative-error WLS, capped weights, and Africa iterative ref-site projection."
         )
 
     predictions_root = os.path.join(
@@ -511,7 +522,7 @@ def compute_and_apply_corrections(
                 if rel_err and region_ref_sites:
                     if regional_fit_v2:
                         w_extra = 0.0
-                    elif regional_fit_v3:
+                    elif regional_fit_v3 or regional_fit_v4:
                         w_extra = 0.0 if _region_geo_kind(region) == "amazon" else float(africa_rel_ref_weight)
                     else:
                         w_extra = region_extra_weight
@@ -546,7 +557,7 @@ def compute_and_apply_corrections(
                 )
                 if (
                     apply_ref_projection
-                    and regional_fit_v3
+                    and (regional_fit_v3 or regional_fit_v4)
                     and gk == "africa"
                     and africa_iterative_ref_projection
                 ):
@@ -738,6 +749,14 @@ def main() -> None:
             "solutionp_vr/occlp_vr; full Africa correction (no blend)."
         ),
     )
+    fit_group.add_argument(
+        "--regional-fit-v4",
+        action="store_true",
+        help=(
+            "Same as v3 for solutionp_vr and occlp_vr. Additionally applies relative-error WLS, "
+            "capped weights, and Africa iterative ref-site projection to labilep_vr."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -799,16 +818,22 @@ def main() -> None:
         scale_factor_vars=scale_factor_vars,
         regional_fit_v2=bool(args.regional_fit_v2),
         regional_fit_v3=bool(args.regional_fit_v3),
+        regional_fit_v4=bool(args.regional_fit_v4),
     )
 
     # Save parameters to analysis/ for documentation and reuse
     analysis_dir = os.path.join(run_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
-    if args.regional_fit_v2 or args.regional_fit_v3:
+    if args.regional_fit_v2 or args.regional_fit_v3 or args.regional_fit_v4:
         safe_sub = "".join(
             c if c.isalnum() or c in "._-" else "_" for c in args.output_subdir
         )
-        tag = "regional_fit_v3" if args.regional_fit_v3 else "regional_fit_v2"
+        if args.regional_fit_v4:
+            tag = "regional_fit_v4"
+        elif args.regional_fit_v3:
+            tag = "regional_fit_v3"
+        else:
+            tag = "regional_fit_v2"
         params_name = f"bias_scale_params_5P_{tag}_{safe_sub}.json"
     else:
         params_name = "bias_scale_params_5P_two_regions.json"
