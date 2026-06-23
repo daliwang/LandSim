@@ -154,7 +154,7 @@ class StaticVariableEncoder(nn.Module):
         
         # 2. Embeddings
         self.var_embed = nn.Parameter(torch.zeros(1, self.num_tokens, embed_dim))
-        self.group_embed = nn.Embedding(len(set(group_ids)) + 1, embed_dim)
+        self.group_embed = nn.Embedding(max(group_ids) + 1, embed_dim)
         self.register_buffer('group_ids_tensor', torch.tensor(group_ids, dtype=torch.long))
         
         self._init_weights()

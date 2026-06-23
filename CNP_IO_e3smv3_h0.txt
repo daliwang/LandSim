@@ -11,8 +11,9 @@ FILE_PATTERN: training_data_batch_*.pkl
 TIME SERIES VARIABLES (Climate Forcing) - 6 variables:
 • FLDS, PSRF, FSDS, QBOT, PRECTmms, TBOT 
 
-SURFACE PROPERTIES - 49 variables:
-• Latitude, Longitude, AREA, landfrac, LANDFRAC_PFT, PCT_NATVEG
+SURFACE PROPERTIES - 48 variables:
+# landfrac omitted: not in E3SMv3_h0; LANDFRAC_PFT is equivalent
+• Latitude, Longitude, AREA, LANDFRAC_PFT, PCT_NATVEG
 
 • OCCLUDED_P, SECONDARY_P, LABILE_P, APATITE_P
 
@@ -32,8 +33,8 @@ PFT PARAMETERS (Plant Functional Type Characteristics) - 44 variables:
 • pft_roota_par, pft_rootb_par, pft_rootprof_beta, pft_season_decid, pft_slatop, pft_smpsc, pft_smpso, pft_stem_leaf, pft_stress_decid 
 • pft_taulnir, pft_taulvis, pft_tausnir, pft_tausvis, pft_woody, pft_xl, pft_z0mr
 
-SCALAR VARIABLES (1D - 4 variables):
-• GPP, NPP, AR, HR
+SCALAR VARIABLES (1D - 0 variables):
+# GPP, NPP, AR, HR not present in E3SMv3_h0 batches
 
 1D PFT VARIABLES (41 variables):
 

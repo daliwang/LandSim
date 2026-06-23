@@ -918,7 +918,7 @@ def get_cnp_combined_config(
         transformer_heads=8,  # Reduced from 8
         
         # Output dimensions - align soil2D head to selected vars and 1x10 slice
-        scalar_output_size=4,
+        scalar_output_size=len(output_scalar),
         vector_output_size=14,
         vector_length=16,
         matrix_output_size=len(output_2d),

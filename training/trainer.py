@@ -479,14 +479,13 @@ class ModelTrainer:
                     pass
 
             # Compute loss with variable-specific weights for scalar variables
-            if self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
+            scalar_vars = self.data_info.get('x_list_scalar_columns', [])
+            if not scalar_vars:
+                loss = torch.tensor(0.0, device=self.device, dtype=torch.float32)
+            elif self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
                 # Apply variable-specific weights to scalar variables
                 scalar_loss = 0.0
                 scalar_pred = outputs['scalar']
-                
-                # Get variable names
-                scalar_vars = self.data_info.get('x_list_scalar_columns', [])
-                
                 for i, var_name in enumerate(scalar_vars):
                     if i < scalar_pred.size(1):  # Ensure index is within bounds
                         var_weight = self.scalar_var_weights.get(var_name, 1.0)
@@ -900,10 +899,12 @@ class ModelTrainer:
 
                 # Compute loss - matching training loss computation for fair comparison
                 # Scalar loss with variable-specific weights (if enabled)
-                if self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
+                scalar_vars = self.data_info.get('x_list_scalar_columns', [])
+                if not scalar_vars:
+                    loss = torch.tensor(0.0, device=self.device, dtype=torch.float32)
+                elif self.use_variable_weights and hasattr(self, 'scalar_var_weights') and self.scalar_var_weights:
                     scalar_loss = 0.0
                     scalar_pred = outputs['scalar']
-                    scalar_vars = self.data_info.get('x_list_scalar_columns', [])
                     for i, var_name in enumerate(scalar_vars):
                         if i < scalar_pred.size(1):
                             var_weight = self.scalar_var_weights.get(var_name, 1.0)
@@ -1558,8 +1559,10 @@ class ModelTrainer:
         # Scalar
         pred_scalar_full = predictions['scalar'].cpu().numpy()
         target_scalar_full = targets['y_scalar'].cpu().numpy()
-        # Overall scalar metrics
-        mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
+        num_scalar = pred_scalar_full.shape[1]
+        if num_scalar > 0:
+            # Overall scalar metrics
+            mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
         # Ensure arrays have the same shape before flattening
         if pred_scalar_full.shape != target_scalar_full.shape:
             print(f"Warning: Shape mismatch - pred: {pred_scalar_full.shape}, target: {target_scalar_full.shape}")
@@ -1570,33 +1573,33 @@ class ModelTrainer:
             target_scalar_full = target_scalar_full[:min_shape[0], :min_shape[1]]
             mask_all = ~np.isnan(pred_scalar_full) & ~np.isnan(target_scalar_full)
         
-        # Flatten arrays and mask for overall metrics
-        pred_flat = pred_scalar_full.flatten()
-        target_flat = target_scalar_full.flatten()
-        mask_flat = mask_all.flatten()
-        mse_scalar_all = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
-        metrics['scalar_rmse'] = np.sqrt(mse_scalar_all)
-        metrics['scalar_mse'] = mse_scalar_all
-        # Per-scalar metrics with names
-        num_scalar = pred_scalar_full.shape[1]
-        scalar_names = self.data_info.get('y_list_scalar_columns', [f'scalar_{i}' for i in range(num_scalar)])
-        if len(scalar_names) != num_scalar:
-            scalar_names = [f'scalar_{i}' for i in range(num_scalar)]
-        for s in range(num_scalar):
-            pred_s = pred_scalar_full[:, s]
-            targ_s = target_scalar_full[:, s]
-            mask_s = ~np.isnan(pred_s) & ~np.isnan(targ_s)
-            if np.sum(mask_s) > 0:
-                mse_s = mean_squared_error(targ_s[mask_s], pred_s[mask_s])
-                rmse_s = np.sqrt(mse_s)
-                mean_s = np.mean(targ_s[mask_s])
-                nrmse_s = rmse_s / mean_s if mean_s != 0 else float('inf')
-                r2_s = r2_score(targ_s[mask_s], pred_s[mask_s])
-                name_s = scalar_names[s]
-                metrics[f'{name_s}_mse'] = mse_s
-                metrics[f'{name_s}_rmse'] = rmse_s
-                metrics[f'{name_s}_nrmse'] = nrmse_s
-                metrics[f'{name_s}_r2'] = r2_s
+        if num_scalar > 0:
+            # Flatten arrays and mask for overall metrics
+            pred_flat = pred_scalar_full.flatten()
+            target_flat = target_scalar_full.flatten()
+            mask_flat = mask_all.flatten()
+            mse_scalar_all = mean_squared_error(target_flat[mask_flat], pred_flat[mask_flat])
+            metrics['scalar_rmse'] = np.sqrt(mse_scalar_all)
+            metrics['scalar_mse'] = mse_scalar_all
+            # Per-scalar metrics with names
+            scalar_names = self.data_info.get('y_list_scalar_columns', [f'scalar_{i}' for i in range(num_scalar)])
+            if len(scalar_names) != num_scalar:
+                scalar_names = [f'scalar_{i}' for i in range(num_scalar)]
+            for s in range(num_scalar):
+                pred_s = pred_scalar_full[:, s]
+                targ_s = target_scalar_full[:, s]
+                mask_s = ~np.isnan(pred_s) & ~np.isnan(targ_s)
+                if np.sum(mask_s) > 0:
+                    mse_s = mean_squared_error(targ_s[mask_s], pred_s[mask_s])
+                    rmse_s = np.sqrt(mse_s)
+                    mean_s = np.mean(targ_s[mask_s])
+                    nrmse_s = rmse_s / mean_s if mean_s != 0 else float('inf')
+                    r2_s = r2_score(targ_s[mask_s], pred_s[mask_s])
+                    name_s = scalar_names[s]
+                    metrics[f'{name_s}_mse'] = mse_s
+                    metrics[f'{name_s}_rmse'] = rmse_s
+                    metrics[f'{name_s}_nrmse'] = nrmse_s
+                    metrics[f'{name_s}_r2'] = r2_s
         # PFT 1D - Detailed metrics per variable and PFT
         pred_pft_1d = predictions['pft_1d'].cpu().numpy()
         target_pft_1d = targets['y_pft_1d'].cpu().numpy()
