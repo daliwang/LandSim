@@ -178,13 +178,14 @@ def _discover_variables_from_files(predictions_dir: Path) -> Optional[Dict[str, 
 def load_ai_predictions(
     predictions_dir: Path,
     soil_2d_bias_corrected_subdir: Optional[str] = None,
+    soil_2d_overlay_suffix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Load AI model predictions from the predictions directory.
 
     If soil_2d_bias_corrected_subdir is set (e.g. soil_2d_predictions_5P_bias_corrected_phase2),
-    after loading soil from soil_2d_predictions we also load any
-    predictions_Y_<var>_bias_corrected.csv from that subdir and overlay them onto preds['soil_2d'],
-    so that the NetCDF uses bias-corrected 5P where applied.
+    after loading soil from soil_2d_predictions we also load overlay CSVs from that subdir:
+    - default glob: predictions_Y_<var>_bias_corrected*.csv
+    - if soil_2d_overlay_suffix is set: predictions_Y_<var><suffix>.csv
     """
     print(f"Loading AI predictions from: {predictions_dir}")
     
@@ -248,15 +249,22 @@ def load_ai_predictions(
             if 'soil_2d' not in preds:
                 preds['soil_2d'] = {}
                 preds['soil2d_coords'] = {}
-            for p in sorted(bias_dir.glob('predictions_Y_*_bias_corrected*.csv')):
-                # predictions_Y_<var>_bias_corrected.csv or ..._bias_corrected_amazon_africa.csv -> <var>
+            if soil_2d_overlay_suffix:
+                pattern = f"predictions_Y_*{soil_2d_overlay_suffix}.csv"
+                overlay_paths = sorted(bias_dir.glob(pattern))
+            else:
+                overlay_paths = sorted(bias_dir.glob('predictions_Y_*_bias_corrected*.csv'))
+            for p in overlay_paths:
                 stem = p.stem.replace('predictions_Y_', '')
-                var_name = stem.split('_bias_corrected')[0]
+                if soil_2d_overlay_suffix and stem.endswith(soil_2d_overlay_suffix):
+                    var_name = stem[: -len(soil_2d_overlay_suffix)]
+                else:
+                    var_name = stem.split('_bias_corrected')[0]
                 df = pd.read_csv(p)
                 lon, lat = _extract_coords(df)
                 preds['soil2d_coords'][var_name] = (lon, lat)
                 preds['soil_2d'][var_name] = _drop_coords(df)
-                print(f"  Overlaid bias-corrected soil predictions for {var_name}: {df.shape}")
+                print(f"  Overlaid soil predictions for {var_name} from {p.name}: {df.shape}")
         else:
             print(f"  Warning: soil 2D bias-corrected subdir not found: {bias_dir}")
     
@@ -493,6 +501,9 @@ def main():
                        help='Subdir under --ai-predictions containing bias-corrected soil 2D CSVs '
                             '(e.g. soil_2d_predictions_5P_bias_corrected_phase2 from apply_5p_bias_scale_correction.py). '
                             'Files named predictions_Y_<var>_bias_corrected.csv will overlay raw soil 2D for those variables.')
+    parser.add_argument('--soil-2d-overlay-suffix', default=None,
+                       help='Filename suffix for overlay CSVs in --soil-2d-bias-corrected-subdir '
+                            '(e.g. _hybrid_lsp_legacy_oc_solution loads predictions_Y_<var><suffix>.csv).')
     
     args = parser.parse_args()
     
@@ -548,6 +559,7 @@ Examples:
     ai_preds = load_ai_predictions(
         ai_predictions_dir,
         soil_2d_bias_corrected_subdir=getattr(args, 'soil_2d_bias_corrected_subdir', None),
+        soil_2d_overlay_suffix=getattr(args, 'soil_2d_overlay_suffix', None),
     )
 
     # Report current lon/lat ranges from CSV coordinates

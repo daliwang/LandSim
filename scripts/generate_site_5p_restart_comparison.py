@@ -12,10 +12,20 @@ from extract_elm_restart_point import extract_single_point_elm
 
 
 # Fixed run directories and global restart paths (same as current workflow)
-# Default run directories (can be overridden via --phase3-run-dir for phase3)
-PHASE1_RUN_DIR = "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_113900_phase1_global"
-PHASE2_RUN_DIR = "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_175250_phase2_tropical"
-PHASE3_RUN_DIR = "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_210715_phase3_tworegions"
+# Override via env: PHASE1_RUN_DIR, PHASE2_RUN_DIR, PHASE3_RUN_DIR
+# (--phase3-run-dir also overrides phase3 at runtime)
+PHASE1_RUN_DIR = os.environ.get(
+    "PHASE1_RUN_DIR",
+    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_113900_phase1_global",
+)
+PHASE2_RUN_DIR = os.environ.get(
+    "PHASE2_RUN_DIR",
+    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_175250_phase2_tropical",
+)
+PHASE3_RUN_DIR = os.environ.get(
+    "PHASE3_RUN_DIR",
+    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_210715_phase3_tworegions",
+)
 
 PHASE1_GLOBAL_RESTART = os.path.join(PHASE1_RUN_DIR, "updated_restart_base.nc")
 PHASE2_GLOBAL_RESTART = os.path.join(
@@ -107,13 +117,17 @@ def generate_site_restarts(
     lat: float,
     site_name: str,
     phase3_run_dir: Optional[str] = None,
+    phase3_restart: Optional[str] = None,
 ) -> Dict[str, str]:
     """Extract phase1/phase2/phase3 single-point restarts for this site."""
     site_id = _safe_site_name(site_name, lon, lat)
     p3_dir = phase3_run_dir if phase3_run_dir else PHASE3_RUN_DIR
-    phase3_restart = os.path.join(
-        p3_dir, "updated_restart_phase3_tworegions_5P_bias_corrected_tropical.nc"
-    )
+    if phase3_restart:
+        phase3_restart_path = os.path.abspath(phase3_restart)
+    else:
+        phase3_restart_path = os.path.join(
+            p3_dir, "updated_restart_phase3_tworegions_5P_bias_corrected_tropical.nc"
+        )
 
     out_paths = {
         "phase1_global": os.path.join(PHASE1_RUN_DIR, f"{site_id}_phase1_global_restart.nc"),
@@ -139,7 +153,7 @@ def generate_site_restarts(
         target_lon=lon,
     )
     extract_single_point_elm(
-        source_nc=phase3_restart,
+        source_nc=phase3_restart_path,
         output_nc=out_paths["phase3_tworegions"],
         target_lat=lat,
         target_lon=lon,
@@ -289,6 +303,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--phase3-restart",
+        type=str,
+        default="",
+        help=(
+            "Path to Phase3 global restart NetCDF. Overrides the default filename "
+            "inside --phase3-run-dir (or the script default run)."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default="",
@@ -304,6 +327,7 @@ def main() -> None:
     site_name = args.site_name
     site_id = _safe_site_name(site_name, lon, lat)
     phase3_run_dir = os.path.abspath(args.phase3_run_dir) if args.phase3_run_dir else None
+    phase3_restart = os.path.abspath(args.phase3_restart) if args.phase3_restart else None
 
     if args.output_dir:
         output_dir = os.path.abspath(args.output_dir)
@@ -318,7 +342,11 @@ def main() -> None:
     print(f"Output directory: {output_dir}")
 
     restart_paths = generate_site_restarts(
-        lon=lon, lat=lat, site_name=site_name, phase3_run_dir=phase3_run_dir
+        lon=lon,
+        lat=lat,
+        site_name=site_name,
+        phase3_run_dir=phase3_run_dir,
+        phase3_restart=phase3_restart,
     )
     compare_5p_for_site(
         lon=lon,
