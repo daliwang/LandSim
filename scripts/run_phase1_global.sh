@@ -16,6 +16,9 @@ set -euo pipefail
 # - CONFIG_GLOBAL   training config JSON for global model
 # - VARIABLE_LIST   CNP_IO variable list file
 # - RESTART_TEMPLATE  path to original ELM restart .nc (required)
+
+# e.g. /mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/
+# 20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc
 #
 # Outputs:
 # - NATVEG_RUN_DIR  (exported): global model run directory

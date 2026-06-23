@@ -6,9 +6,9 @@ This guide explains how to enable CNP stoichiometric ratio enforcement during in
 
 ## Quick Start
 
-### Option 1: Enable during inference (Recommended)
+### Option 1: Enable during inference (default)
 
-Simply add the `--derive-np-from-c` flag when running inference:
+By default, inference derives N/P from C after the forward pass. To enable explicitly:
 
 ```bash
 python scripts/run_inference_all.py \
@@ -16,6 +16,18 @@ python scripts/run_inference_all.py \
     --output-dir cnp_inference_with_ratios \
     --derive-np-from-c
 ```
+
+To **skip** derivation (e.g. Phase2/Phase3 tropical restarts without fixed CNP ratios):
+
+```bash
+python scripts/run_inference_all.py \
+    --model cnp_results/run_YYYYMMDD_phase2_tropical/cnp_model.pt \
+    --output-dir cnp_inference_entire_dataset \
+    --inference-full-grid \
+    --no-derive-np-from-c
+```
+
+See [RERUN_PHASE2_PHASE3_NO_CNP_FIX.md](./RERUN_PHASE2_PHASE3_NO_CNP_FIX.md) for the full Phase2 + Phase3 rerun workflow.
 
 This will:
 1. Run normal inference (predicting all CNP variables)

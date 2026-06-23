@@ -1,6 +1,6 @@
 import argparse
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,14 +12,19 @@ from extract_elm_restart_point import extract_single_point_elm
 
 
 # Fixed run directories and global restart paths (same as current workflow)
-PHASE1_RUN_DIR = (
-    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260311_165538_phase1_global"
+# Override via env: PHASE1_RUN_DIR, PHASE2_RUN_DIR, PHASE3_RUN_DIR
+# (--phase3-run-dir also overrides phase3 at runtime)
+PHASE1_RUN_DIR = os.environ.get(
+    "PHASE1_RUN_DIR",
+    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_113900_phase1_global",
 )
-PHASE2_RUN_DIR = (
-    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260311_174843_phase2_tropical"
+PHASE2_RUN_DIR = os.environ.get(
+    "PHASE2_RUN_DIR",
+    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_175250_phase2_tropical",
 )
-PHASE3_RUN_DIR = (
-    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260311_204845_phase3_tworegions"
+PHASE3_RUN_DIR = os.environ.get(
+    "PHASE3_RUN_DIR",
+    "/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260315_210715_phase3_tworegions",
 )
 
 PHASE1_GLOBAL_RESTART = os.path.join(PHASE1_RUN_DIR, "updated_restart_base.nc")
@@ -107,9 +112,22 @@ def _load_profiles_from_restart(path: str) -> Dict[str, np.ndarray]:
     return profs
 
 
-def generate_site_restarts(lon: float, lat: float, site_name: str) -> Dict[str, str]:
+def generate_site_restarts(
+    lon: float,
+    lat: float,
+    site_name: str,
+    phase3_run_dir: Optional[str] = None,
+    phase3_restart: Optional[str] = None,
+) -> Dict[str, str]:
     """Extract phase1/phase2/phase3 single-point restarts for this site."""
     site_id = _safe_site_name(site_name, lon, lat)
+    p3_dir = phase3_run_dir if phase3_run_dir else PHASE3_RUN_DIR
+    if phase3_restart:
+        phase3_restart_path = os.path.abspath(phase3_restart)
+    else:
+        phase3_restart_path = os.path.join(
+            p3_dir, "updated_restart_phase3_tworegions_5P_bias_corrected_tropical.nc"
+        )
 
     out_paths = {
         "phase1_global": os.path.join(PHASE1_RUN_DIR, f"{site_id}_phase1_global_restart.nc"),
@@ -117,7 +135,7 @@ def generate_site_restarts(lon: float, lat: float, site_name: str) -> Dict[str, 
             PHASE2_RUN_DIR, f"{site_id}_phase2_tropical_restart.nc"
         ),
         "phase3_tworegions": os.path.join(
-            PHASE3_RUN_DIR, f"{site_id}_phase3_tworegions_restart.nc"
+            p3_dir, f"{site_id}_phase3_tworegions_restart.nc"
         ),
     }
 
@@ -135,7 +153,7 @@ def generate_site_restarts(lon: float, lat: float, site_name: str) -> Dict[str, 
         target_lon=lon,
     )
     extract_single_point_elm(
-        source_nc=PHASE3_GLOBAL_RESTART,
+        source_nc=phase3_restart_path,
         output_nc=out_paths["phase3_tworegions"],
         target_lat=lat,
         target_lon=lon,
@@ -276,6 +294,24 @@ def main() -> None:
         help="Optional human-readable site name used in filenames and plot titles.",
     )
     parser.add_argument(
+        "--phase3-run-dir",
+        type=str,
+        default="",
+        help=(
+            "Phase3 run directory (e.g. cnp_results/run_YYYYMMDD_HHMMSS_phase3_tworegions). "
+            "If set, restarts and plots use this run instead of the script default."
+        ),
+    )
+    parser.add_argument(
+        "--phase3-restart",
+        type=str,
+        default="",
+        help=(
+            "Path to Phase3 global restart NetCDF. Overrides the default filename "
+            "inside --phase3-run-dir (or the script default run)."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default="",
@@ -290,12 +326,14 @@ def main() -> None:
     lat = args.lat
     site_name = args.site_name
     site_id = _safe_site_name(site_name, lon, lat)
+    phase3_run_dir = os.path.abspath(args.phase3_run_dir) if args.phase3_run_dir else None
+    phase3_restart = os.path.abspath(args.phase3_restart) if args.phase3_restart else None
 
     if args.output_dir:
         output_dir = os.path.abspath(args.output_dir)
     else:
         output_dir = os.path.join(
-            PHASE3_RUN_DIR,
+            phase3_run_dir if phase3_run_dir else PHASE3_RUN_DIR,
             "analysis",
             f"{site_id}_5p_restart_comparison",
         )
@@ -303,7 +341,13 @@ def main() -> None:
     print(f"Site: {site_id} (lon={lon}, lat={lat})")
     print(f"Output directory: {output_dir}")
 
-    restart_paths = generate_site_restarts(lon=lon, lat=lat, site_name=site_name)
+    restart_paths = generate_site_restarts(
+        lon=lon,
+        lat=lat,
+        site_name=site_name,
+        phase3_run_dir=phase3_run_dir,
+        phase3_restart=phase3_restart,
+    )
     compare_5p_for_site(
         lon=lon,
         lat=lat,

@@ -1,5 +1,5 @@
 {
-  "_description": "Phase 2 tropical-only model (Amazon + Africa): Train on tropical natveg grid cells with strong focus on soil P variables; solutionp_vr weighted highest. Use with Phase 1 global restart. Train: python train_cnp_model.py --training-config-json config/training_config_phase2_tropical_soilp_only.json --variable-list CNP_IO_updated9_dev_dw.txt --tropical-lat-range -30,30 --output-dir-suffix phase2_tropical_soilp_only",
+  "_description": "Amazon-only 5P region config: used to drive bias/scale correction on Amazon box only. Data filtering keeps only Amazon natveg cells for fitting, but model training can still be global. Primary use is with apply_5p_bias_scale_correction.py via --region-config-json. Amazon box: lat [-30, 10], lon [270, 330].",
   "training_hyperparameters": {
     "num_epochs": 150,
     "batch_size": 128,
@@ -15,7 +15,7 @@
     "litter_n_loss_weight": 1,
     "litter_p_loss_weight": 4,
     "scalar_loss_weight": 0.06,
-    "vector_loss_weight": 0.5,
+    "vector_loss_weight": 0.4,
     "matrix_loss_weight": 2.5
   },
   "reproducibility_config": {
@@ -26,11 +26,14 @@
     "dropout_p": 0.12
   },
   "data_filtering_config": {
-    "tropical_only": true,
+    "tropical_only": false,
     "tropical_lat_range": [-30.0, 30.0],
     "longitudes_to_drop": [0, 358.75],
     "natveg_only": true,
-    "natveg_filter_before_split": false
+    "natveg_filter_before_split": false,
+    "region_boxes": [
+      [-30.0, 10.0, 270.0, 330.0]
+    ]
   },
   "variable_weights": {
     "pft1d_weights": {
@@ -56,32 +59,32 @@
       "tlai": 2
     },
     "soil2d_weights": {
-      "cwdc_vr": 1,
-      "cwdn_vr": 1,
-      "cwdp_vr": 2,
-      "primp_vr": 28,
-      "occlp_vr": 42,
-      "labilep_vr": 28,
-      "secondp_vr": 24,
-      "solutionp_vr": 50,
-      "litr2c_vr": 4,
-      "litr2p_vr": 16,
-      "litr2n_vr": 4,
-      "litr3c_vr": 3,
-      "litr3n_vr": 3,
-      "litr3p_vr": 12,
-      "soil1c_vr": 4,
-      "soil1n_vr": 4,
-      "soil1p_vr": 14,
-      "soil2c_vr": 2,
-      "soil2n_vr": 2,
-      "soil2p_vr": 10,
-      "soil3c_vr": 2,
-      "soil3n_vr": 2,
-      "soil3p_vr": 8,
-      "soil4c_vr": 1.5,
-      "soil4n_vr": 1.5,
-      "soil4p_vr": 6
+      "cwdc_vr": 0.1,
+      "cwdn_vr": 0.1,
+      "cwdp_vr": 0.1,
+      "primp_vr": 35,
+      "occlp_vr": 50,
+      "labilep_vr": 40,
+      "secondp_vr": 40,
+      "solutionp_vr": 40,
+      "litr2c_vr": 0.1,
+      "litr2p_vr": 0.1,
+      "litr2n_vr": 0.1,
+      "litr3c_vr": 0.1,
+      "litr3n_vr": 0.1,
+      "litr3p_vr": 0.1,
+      "soil1c_vr": 0.1,
+      "soil1n_vr": 0.1,
+      "soil1p_vr": 0.1,
+      "soil2c_vr": 0.1,
+      "soil2n_vr": 0.1,
+      "soil2p_vr": 0.1,
+      "soil3c_vr": 0.1,
+      "soil3n_vr": 0.1,
+      "soil3p_vr": 0.1,
+      "soil4c_vr": 0.1,
+      "soil4n_vr": 0.1,
+      "soil4p_vr": 0.1
     },
     "scalar_weights": {
       "GPP": 0.08,
@@ -116,29 +119,11 @@
     "frootn": 2,
     "frootp": 3,
     "labilep": 10,
-    "labilep_vr": 28,
-    "primp_vr": 28,
-    "occlp_vr": 42,
-    "secondp_vr": 24,
-    "solutionp_vr": 50,
-    "litr2c_vr": 4,
-    "litr2p_vr": 16,
-    "litr2n_vr": 4,
-    "litr3c_vr": 3,
-    "litr3p_vr": 12,
-    "litr3n_vr": 3,
-    "soil1c_vr": 4,
-    "soil1n_vr": 4,
-    "soil1p_vr": 14,
-    "soil2c_vr": 2,
-    "soil2n_vr": 2,
-    "soil2p_vr": 10,
-    "soil3c_vr": 2,
-    "soil3n_vr": 2,
-    "soil3p_vr": 8,
-    "soil4c_vr": 1.5,
-    "soil4n_vr": 1.5,
-    "soil4p_vr": 6
+    "labilep_vr": 40,
+    "primp_vr": 35,
+    "occlp_vr": 50,
+    "secondp_vr": 40,
+    "solutionp_vr": 40
   },
   "pft_mask_config": {
     "mask_absent_pfts": true,
@@ -163,3 +148,4 @@
     "livecrootc": "abs"
   }
 }
+

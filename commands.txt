@@ -509,7 +509,7 @@ python scripts/extract_elm_restart_point.py \
   --restart-file cnp_results/run_20260311_204845_phase3_tworegions/updated_restart_phase3_tworegions_5P_bias_corrected_tropical.nc \
   --lat 0.0 \
   --lon 28.0 \
-  --output-file cnp_results/run_20260311_204845_phase3_tworegions/Africa_phase3_tworegions_restart.nc
+  --output-filcnp_results/run_20260313_224805_phase2_tropical_soilp_amazon_africae cnp_results/run_20260311_204845_phase3_tworegions/Africa_phase3_tworegions_restart.nc
 
 python scripts/generate_site_5p_restart_comparison.py   --lon 303.75   --lat -17.434553   --site-name amazon_303_17S
 python scripts/generate_site_5p_restart_comparison.py  --lon 292.5  --lat -15.55   --site-name amazon_292_15S
@@ -519,4 +519,82 @@ python scripts/generate_site_5p_restart_comparison.py   --lon 28   --lat 0   --s
 python scripts/generate_site_5p_restart_comparison.py   --lon 14   --lat 0   --site-name africa
 
 
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
 
+# Amazon-only bias/scale
+python scripts/apply_5p_bias_scale_correction.py \
+  --run-dir cnp_results/run_20260311_204845_phase3_tworegions\
+  --region-config-json config/training_config_amazon_5p_box.json \
+  --output-subdir soil_2d_predictions_5P_bias_corrected_amazon
+
+# Africa-only bias/scale
+python scripts/apply_5p_bias_scale_correction.py \
+  --run-dir cnp_results/run_20260311_204845_phase3_tworegions\
+  --region-config-json config/training_config_africa_5p_box.json \
+  --output-subdir soil_2d_predictions_5P_bias_corrected_africa
+
+python scripts/merge_5p_bias_corrected_amazon_africa.py \
+  --run-dir cnp_results/run_20260311_204845_phase3_tworegions
+
+
+python scripts/ai_predictions_to_netcdf.py \
+  --ai-predictions cnp_results/run_20260311_204845_phase3_tworegions/cnp_inference_entire_dataset/cnp_predictions/ \
+  --soil-2d-bias-corrected-subdir soil_2d_predictions_5P_bias_corrected_amazon_africa \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --output cnp_results/run_20260311_204845_phase3_tworegions/comparison_results/ai_predictions_5P_bias_corrected_amazon_africa.nc
+
+
+  python scripts/ai_predictions_to_restart.py \
+  --ai-predictions cnp_results/run_20260311_204845_phase3_tworegions/comparison_results/ai_predictions_5P_bias_corrected_amazon_africa.nc \
+  --restart-file cnp_results/run_20260311_174843_phase2_tropical/updated_restart_phase2_tropical_5P_raw.nc \
+  --output cnp_results/run_20260311_204845_phase3_tworegions/updated_restart_phase3_tworegions_5P_bias_corrected_amazon_africa.nc \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
+  --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
+  "--tropical-lat-range=-30,30"
+
+  python scripts/generate_site_5p_restart_comparison.py \
+  --lon 28.0 \
+  --lat 0.0 \
+  --site-name africa_28_0_amazon_africa_nc \
+  --output-dir cnp_results/run_20260311_204845_phase3_tworegions/analysis/africa_28_0_amazon_africa_5p_restart_comparison
+
+
+  python scripts/generate_site_5p_restart_comparison.py \
+  --lon 303.75 \
+  --lat -17.43 \
+  --site-name amazon303_tworegion_biascorrection \
+  --output-dir cnp_results/run_20260311_204845_phase3_tworegions/analysis/amazon_5p_restart_comparison_twocorrections
+
+  python train_cnp_model.py --training-config-json config/training_config_phase2_tropical_soilp_only.json --variable-list CNP_IO_updated9_dev_dw.txt --tropical-lat-range -30,30 --output-dir-suffix phase2_tropical_soilp_amazon_africa
+
+
+# --- 05/28/2026: TESNORTHERA full-domain export-only CSV + normal-spinup restart ---
+# Uses the completed batched model inference predictions.pkl for the full north domain
+# (259,535 samples), so this does not rerun the expensive GPU inference.
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+
+TESNORTH_RUN=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260528_0946_tesnorthera_inference_batched_from_tesnorth10pc
+TESNORTH_INFER="$TESNORTH_RUN/cnp_inference_entire_domain"
+TESNORTH_TRAIN_RUN=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/cnp_results/run_20260319_134216_tesnorth10pc
+TESNORTH_VAR_LIST=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/CNP_IO_tesnorth10pct.txt
+TESNORTH_RESTART=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/TESNORTHERA5_20adspin_restartfile/uELM_NORTHERA5_ERA5REF_I1850uELMCNPRDCTCBC.elm.r.0021-01-01-00000.nc
+
+python scripts/export_saved_predictions_to_csv.py \
+  --inference-dir "$TESNORTH_INFER" \
+  --config "$TESNORTH_TRAIN_RUN/cnp_config.json" \
+  --scalers-dir "$TESNORTH_TRAIN_RUN/cnp_predictions/scalers" \
+  --derive-np-from-c \
+  2>&1 | tee "$TESNORTH_RUN/export_saved_predictions_to_csv.log"
+
+python scripts/ai_predictions_to_netcdf.py \
+  --ai-predictions "$TESNORTH_INFER/cnp_predictions" \
+  --variable-list "$TESNORTH_VAR_LIST" \
+  --output "$TESNORTH_INFER/comparison_results/ai_predictions_for_restart.nc" \
+  2>&1 | tee "$TESNORTH_RUN/ai_predictions_to_netcdf.log"
+
+python -u scripts/ai_predictions_to_restart.py \
+  --ai-predictions "$TESNORTH_INFER/comparison_results/ai_predictions_for_restart.nc" \
+  --restart-file "$TESNORTH_RESTART" \
+  --output "$TESNORTH_RUN/updated_restart_normal_spinup_uELM_NORTHERA5_ERA5REF_I1850uELMCNPRDCTCBC.elm.r.0021-01-01-00000.nc" \
+  --variable-list "$TESNORTH_VAR_LIST" \
+  2>&1 | tee "$TESNORTH_RUN/ai_predictions_to_restart.kdtree.log"

@@ -161,6 +161,8 @@ python ../../scripts/generate_prediction_quality_report.py cnp_inference_entire_
 - Second reads that CSV and writes `cnp_inference_entire_dataset/analysis/` (quality report, plots, `quality_summary_report.txt`, `top_bad_plots/`, etc.).
 - Replace `cnp_inference_entire_dataset` with your actual inference subdirectory name if different.
 
+**Amazon / Africa five-P only:** To compare predictions to ground truth inside the standard Amazon and Africa boxes (and across multiple runs), use `scripts/compare_5p_gt_two_regions_inference.py` (`pred-eval`). Methodology for Phase3 bias correction of those variables: [REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md](./REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md); workflow: [WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md](./WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md).
+
 ### 4.1) Highlight a site in all scatter plots (optional)
 Highlight a given site (lon/lat) in every GT vs Pred scatter plot. The site will be marked as a red star.
 

@@ -9,8 +9,10 @@ This document gives step-by-step instructions to repeat the process in **docs/WO
 This workflow assumes you have **two trained CNP models**:
 
 1. A **global natveg_improved-like model** with a global restart file.
-2. A **tropical Phase2 P-focused model** (`phase2_pvariable_focus`-like) with a
-   trained checkpoint and inference outputs.
+2. A **tropical-only Phase2 model** trained with the updated
+   `config/training_config_phase2_tropical_soilp_only.json` (emphasis on the
+   five soil P variables), with a trained checkpoint and inference outputs
+   (e.g. a run like `run_20260313_224805_phase2_tropical_soilp_amazon_africa`).
 
 If you are a **new user** and do not yet have these models, first follow
 Section 0 in `docs/WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md` to train them
@@ -34,21 +36,22 @@ with `train_cnp_model.py`. In short:
   export BASE_RESTART_FILE="$NATVEG_RUN_DIR/updated_restart_...your_file.nc"
   ```
 
-- Tropical P-focused model (phase2_tropical-like):
+- Tropical-only Phase2 model (updated config, emphasis on 5 P variables):
 
   ```bash
   cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
 
   python train_cnp_model.py \
-    --config config/training_config_phase2_tropical_soilp_only.json \
-    --run-dir cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom \
+    --training-config-json config/training_config_phase2_tropical_soilp_only.json \
+    --output-dir cnp_results \
+    --output-dir-suffix phase2_tropical_soilp_amazon_africa \
     --variable-list CNP_IO_updated9_dev_dw.txt
   ```
 
   Then set:
 
   ```bash
-  export PHASE2_RUN_DIR="cnp_results/run_YYYYMMDD_HHMMSS_phase2_pvariable_focus_custom"
+  export PHASE2_RUN_DIR="cnp_results/run_YYYYMMDD_HHMMSS_phase2_tropical_soilp_amazon_africa"
   ```
 
 If you already have trained runs, you can reuse them. The paths used below
@@ -57,7 +60,9 @@ assume the **existing** experiments (adjust if your run IDs differ):
 - **Natveg run:** `cnp_results/run_20260228_214757_natveg_improved`
 - **Base restart file:**  
   `cnp_results/run_20260228_214757_natveg_improved/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc`
-- **Phase2 run:** `cnp_results/run_20260305_153217_phase2_pvariable_focus`
+- **Phase2 run:** Tropical-only run with the updated Phase2 config (5 P emphasis), e.g. `cnp_results/run_20260313_224805_phase2_tropical_soilp_amazon_africa`. This is the basis run for Phase3.
+
+For the full **three-phase workflow** (phase1_global, phase2_tropical, phase3_tworegions): Phase2 is tropical-only with `config/training_config_phase2_tropical_soilp_only.json`; Phase3 is **two-region (Amazon + Africa) bias correction and merge** of the 5 P variables. See **docs/WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md**.
 
 ---
 
@@ -81,16 +86,18 @@ Use `TRENDY_RUN_DIR` in the steps below so the new restart and any logs live und
 
 ---
 
-## Path A: Tropical-only inference → 4P or 5P restart (no bias/scale, or with bias/scale)
+## Path A: Tropical-only inference → Phase2 restart (raw 5P in tropics)
 
-Use this if you only have (or only want) **tropical** Phase2 predictions.
+Use this if you only have (or only want) **tropical** Phase2 predictions from
+the updated Phase2 run (tropical-only, 5 P emphasis). Set `PHASE2_RUN_DIR` to
+your run (e.g. `cnp_results/run_20260313_224805_phase2_tropical_soilp_amazon_africa`).
 
 ### A1. Phase2 tropical-only inference (if not already done)
 
 ```bash
-cd cnp_results/run_20260305_153217_phase2_pvariable_focus
+cd "$PHASE2_RUN_DIR"
 python ../../scripts/run_inference_all.py \
-  --model cnp_predictions/model.pth \
+  --model cnp_model.pt \
   --output-dir cnp_inference_tropical_only
 cd ../..
 ```
@@ -99,126 +106,108 @@ cd ../..
 
 ```bash
 python scripts/ai_predictions_to_netcdf.py \
-  --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/cnp_inference_tropical_only/cnp_predictions \
-  --output cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_tropical_only.nc
+  --ai-predictions "$PHASE2_RUN_DIR/cnp_inference_tropical_only/cnp_predictions" \
+  --output "$PHASE2_RUN_DIR/comparison_results/ai_predictions_tropical_only.nc" \
+  --variable-list CNP_IO_updated9_dev_dw.txt
 ```
 
-### A3. Update natveg restart (4 P variables, raw Phase2)
+### A3. Update natveg restart (5 P variables, raw Phase2)
 
 ```bash
 python scripts/ai_predictions_to_restart.py \
-  --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_tropical_only.nc \
-  --restart-file cnp_results/run_20260228_214757_natveg_improved/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
-  --output "$TRENDY_RUN_DIR/updated_restart_phase2_tropical_4p.nc" \
+  --ai-predictions "$PHASE2_RUN_DIR/comparison_results/ai_predictions_tropical_only.nc" \
+  --restart-file "$BASE_RESTART_FILE" \
+  --output "$TRENDY_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc" \
   --variable-list CNP_IO_updated9_dev_dw.txt \
-  --variables-to-update occlp_vr,labilep_vr,solutionp_vr,secondp_vr \
+  --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
   "--tropical-lat-range=-30,30"
 ```
 
-**New restart file:** `$TRENDY_RUN_DIR/updated_restart_phase2_tropical_4p.nc`
+**New restart file:** `$TRENDY_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc`
 
-To use **5P with bias/scale** on tropical-only: first run the bias/scale step (Section B2 below) on the **tropical** CSVs (script expects `cnp_inference_entire_dataset` layout; if your tropical run writes elsewhere, either symlink or run bias/scale from a copy that matches that layout), then build a NetCDF from the bias-corrected CSVs and run `ai_predictions_to_restart.py` with `--variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr` and `--output "$TRENDY_RUN_DIR/updated_restart_phase2_5P_bias_corrected_tropical.nc"`.
+For **5P with two-region bias/scale** (Phase3): use Path B below — full-grid inference, then **Amazon and Africa bias correction separately**, then **merge** with `scripts/merge_5p_bias_corrected_amazon_africa.py`, then build NetCDF and restart. See **docs/WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md** §3 Path 3B.
 
 ---
 
-## Path B: Full-grid inference → 5P bias/scale → tropical restart (recommended for 5P bias/scale)
+## Path B: Full-grid inference → two-region 5P bias correction and merge → global restart
 
-Use this to get **bias-corrected 5P in Amazon + Africa** and a single global NetCDF.
+Use this to get **bias-corrected 5P in Amazon + Africa**: apply bias/scale for
+Amazon only and Africa only, **merge** with `scripts/merge_5p_bias_corrected_amazon_africa.py`,
+then build a global restart from the Phase1 base. This is Phase3 of the
+three-phase workflow.
 
 ### B1. Phase2 full-grid inference
 
-From repo root. You can set the output directory with `--output-dir` (default is `cnp_inference_entire_dataset` under the current directory). Example: write outputs into the Phase2 run directory, or into your trendy run directory.
-
-** Output into your trendy run directory** (then bias/scale script must be pointed at this run’s paths or you copy/symlink the expected structure):
+From repo root. Run full-grid inference into your **Phase2 run** (the tropical-only run with updated config, e.g. `run_20260313_224805_phase2_tropical_soilp_amazon_africa`). Set `PHASE2_RUN_DIR` to that path.
 
 ```bash
-# TRENDY_RUN_DIR set in Step 0
 python scripts/run_inference_all.py \
-  --model cnp_results/run_20260305_153217_phase2_pvariable_focus/cnp_predictions/model.pth \
-  --output-dir "$TRENDY_RUN_DIR/cnp_inference_entire_dataset" \
+  --model "$PHASE2_RUN_DIR/cnp_model.pt" \
+  --output-dir "$PHASE2_RUN_DIR/cnp_inference_entire_dataset" \
+  --variable-list CNP_IO_updated9_dev_dw.txt \
   --inference-full-grid
 ```
 
-This creates `.../cnp_predictions/` and `.../soil_2d_ground_truth/` under the given `--output-dir`. The bias/scale script (B2) expects `--run-dir` to be the run that contains `cnp_inference_entire_dataset`; if you use Option 2, set `--run-dir "$TRENDY_RUN_DIR"` in B2 and ensure the run has that subdir.
+This creates `cnp_predictions/` and `soil_2d_ground_truth/` under `$PHASE2_RUN_DIR/cnp_inference_entire_dataset`. The next steps use `--run-dir "$PHASE2_RUN_DIR"`.
 
-### B2. Apply 5P bias/scale correction (Amazon + Africa)
+### B2. Apply 5P bias/scale for Amazon only, then Africa only
 
-Use as `--run-dir` the directory that **contains** `cnp_inference_entire_dataset/` (where B1 wrote the CSVs). If you used **Option 1** in B1, that is the Phase2 run dir; if you used **Option 2**, that is `$TRENDY_RUN_DIR`.
+Apply bias correction **separately** for the two regions, then merge (B3). Use `--run-dir "$PHASE2_RUN_DIR"`.
 
-**If you used Option 1 (output under Phase2 run):**
-
-```bash
-python scripts/apply_5p_bias_scale_correction.py \
-  --run-dir cnp_results/run_20260305_153217_phase2_pvariable_focus \
-  --region-config-json config/training_config_two_region_five_p.json \
-  --output-subdir soil_2d_predictions_5P_bias_corrected_phase2
-```
-
-**If you used Option 2 (output under TRENDY_RUN_DIR):**
+**Amazon only:**
 
 ```bash
 python scripts/apply_5p_bias_scale_correction.py \
-  --run-dir "$TRENDY_RUN_DIR" \
-  --region-config-json config/training_config_two_region_five_p.json \
-  --output-subdir soil_2d_predictions_5P_bias_corrected_phase2
+  --run-dir "$PHASE2_RUN_DIR" \
+  --region-config-json config/training_config_amazon_5p_box.json \
+  --output-subdir soil_2d_predictions_5P_bias_corrected_amazon
 ```
 
-Corrected CSVs end up under `<run-dir>/cnp_inference_entire_dataset/cnp_predictions/soil_2d_predictions_5P_bias_corrected_phase2/`. Bias/scale params are written to `<run-dir>/analysis/bias_scale_params_5P_two_regions.json`.
-
-Optional: copy bias/scale params into the trendy run for provenance (if Phase2 run was used for B2, copy from there):
+**Africa only:**
 
 ```bash
-cp cnp_results/run_20260305_153217_phase2_pvariable_focus/analysis/bias_scale_params_5P_two_regions.json \
-   "$TRENDY_RUN_DIR/bias_scale_params_5P_two_regions_phase2.json"
+python scripts/apply_5p_bias_scale_correction.py \
+  --run-dir "$PHASE2_RUN_DIR" \
+  --region-config-json config/training_config_africa_5p_box.json \
+  --output-subdir soil_2d_predictions_5P_bias_corrected_africa
 ```
 
-### B3. NetCDF from bias-corrected 5P predictions
-
-Use the same run directory you used in B2 (Phase2 run dir or `$TRENDY_RUN_DIR`).
+### B3. Merge Amazon and Africa corrected 5P
 
 ```bash
-# If you used Option 1 in B1/B2 (Phase2 run dir):
+python scripts/merge_5p_bias_corrected_amazon_africa.py \
+  --run-dir "$PHASE2_RUN_DIR"
+```
+
+This creates `$PHASE2_RUN_DIR/cnp_inference_entire_dataset/cnp_predictions/soil_2d_predictions_5P_bias_corrected_amazon_africa/`.
+
+### B4. NetCDF from merged bias-corrected 5P (amazon_africa)
+
+```bash
+mkdir -p "$PHASE2_RUN_DIR/comparison_results"
+
 python scripts/ai_predictions_to_netcdf.py \
-  --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/cnp_inference_entire_dataset/cnp_predictions/ \
-  --soil-2d-bias-corrected-subdir soil_2d_predictions_5P_bias_corrected_phase2 \
+  --ai-predictions "$PHASE2_RUN_DIR/cnp_inference_entire_dataset/cnp_predictions/" \
+  --soil-2d-bias-corrected-subdir soil_2d_predictions_5P_bias_corrected_amazon_africa \
   --variable-list CNP_IO_updated9_dev_dw.txt \
-  --output cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_5P_bias_corrected_phase2.nc
-
-# If you used Option 2, write NetCDF into your run dir:
-mkdir -p "$TRENDY_RUN_DIR/comparison_results"
-
-python scripts/ai_predictions_to_netcdf.py \
-  --ai-predictions "$TRENDY_RUN_DIR/cnp_inference_entire_dataset/cnp_predictions/" \
-  --soil-2d-bias-corrected-subdir soil_2d_predictions_5P_bias_corrected_phase2 \
-  --variable-list CNP_IO_updated9_dev_dw.txt \
-  --output "$TRENDY_RUN_DIR/comparison_results/ai_predictions_5P_bias_corrected_phase2.nc"
+  --output "$PHASE2_RUN_DIR/comparison_results/ai_predictions_5P_bias_corrected_amazon_africa.nc"
 ```
 
-### B4. Generate new restart (5P in tropics, from natveg base)
+### B5. Generate global restart (Phase1 base + 5P in tropics)
 
-Use the path to the NetCDF you produced in B3 (Phase2 run dir or `$TRENDY_RUN_DIR/comparison_results/...`).
+Use the Phase1 **base restart** (`$BASE_RESTART_FILE`) so the result is a full global restart with 5P updated only in the tropics (Amazon and Africa bias-corrected; other tropics raw Phase2).
 
 ```bash
-# If Option 1 was used (NetCDF in Phase2 run dir):
 python scripts/ai_predictions_to_restart.py \
-  --ai-predictions cnp_results/run_20260305_153217_phase2_pvariable_focus/comparison_results/ai_predictions_5P_bias_corrected_phase2.nc \
-  --restart-file cnp_results/run_20260228_214757_natveg_improved/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
-  --output "$TRENDY_RUN_DIR/updated_restart_phase2_5P_bias_corrected_tropical.nc" \
-  --variable-list CNP_IO_updated9_dev_dw.txt \
-  --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
-  "--tropical-lat-range=-30,30"
-
-# If Option 2 was used (NetCDF in trendy run dir):
-python scripts/ai_predictions_to_restart.py \
-  --ai-predictions "$TRENDY_RUN_DIR/comparison_results/ai_predictions_5P_bias_corrected_phase2.nc" \
-  --restart-file cnp_results/run_20260228_214757_natveg_improved/updated_restart_CNP_IO_updated9_dev_dw_20251201_TRENDY2024_default_ICB1850CNRDCTCBC_ad_spinup.elm.r.0021-01-01-00000.nc \
-  --output "$TRENDY_RUN_DIR/updated_restart_phase2_5P_bias_corrected_tropical.nc" \
+  --ai-predictions "$PHASE2_RUN_DIR/comparison_results/ai_predictions_5P_bias_corrected_amazon_africa.nc" \
+  --restart-file "$BASE_RESTART_FILE" \
+  --output "$TRENDY_RUN_DIR/updated_restart_global_5P_bias_corrected_amazon_africa.nc" \
   --variable-list CNP_IO_updated9_dev_dw.txt \
   --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
   "--tropical-lat-range=-30,30"
 ```
 
-**New restart file:** `$TRENDY_RUN_DIR/updated_restart_phase2_5P_bias_corrected_tropical.nc`
+**New restart file:** `$TRENDY_RUN_DIR/updated_restart_global_5P_bias_corrected_amazon_africa.nc`
 
 ---
 
@@ -232,21 +221,24 @@ python scripts/ai_predictions_to_restart.py \
    Example README:
 
    ```bash
-   echo "Restart created: $(date). Path B (full-grid + 5P bias/scale). Base: natveg_improved. Phase2: run_20260305_153217_phase2_pvariable_focus." > "$TRENDY_RUN_DIR/README_restart.txt"
+   echo "Restart created: $(date). Path B (two-region 5P bias correction + merge). Base: natveg_improved. Phase2: run_*_phase2_tropical_soilp_amazon_africa." > "$TRENDY_RUN_DIR/README_restart.txt"
    ```
 
 2. **Run the land model** using the new restart and validate (e.g. Amazon/Africa 5P profiles, NPP, fluxes) as in **docs/WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md**.
 
 ---
 
-## Summary checklist (Path B – 5P bias/scale)
+## Summary checklist (Path B – two-region 5P bias correction and merge)
 
 - [ ] `git checkout -b trendy_1_ai_restart_creation`
 - [ ] Create `TRENDY_RUN_DIR=cnp_results/run_<timestamp>_trendy_1_ai_restart_creation`
-- [ ] Run Phase2 **full-grid** inference (`--inference-full-grid`)
-- [ ] Run **apply_5p_bias_scale_correction.py** (Phase2 run-dir, two-region config)
-- [ ] Run **ai_predictions_to_netcdf.py** on bias-corrected 5P CSVs
-- [ ] Run **ai_predictions_to_restart.py** (natveg base restart → `$TRENDY_RUN_DIR/updated_restart_phase2_5P_bias_corrected_tropical.nc`, 5P, `--tropical-lat-range=-30,30`)
+- [ ] Set `PHASE2_RUN_DIR` to your tropical-only Phase2 run (e.g. `run_*_phase2_tropical_soilp_amazon_africa`)
+- [ ] Run Phase2 **full-grid** inference into `$PHASE2_RUN_DIR/cnp_inference_entire_dataset`
+- [ ] Run **apply_5p_bias_scale_correction.py** for Amazon only (`training_config_amazon_5p_box.json`)
+- [ ] Run **apply_5p_bias_scale_correction.py** for Africa only (`training_config_africa_5p_box.json`)
+- [ ] Run **merge_5p_bias_corrected_amazon_africa.py** (`--run-dir "$PHASE2_RUN_DIR"`)
+- [ ] Run **ai_predictions_to_netcdf.py** on merged `soil_2d_predictions_5P_bias_corrected_amazon_africa`
+- [ ] Run **ai_predictions_to_restart.py** (Phase1 base → `updated_restart_global_5P_bias_corrected_amazon_africa.nc`, 5P, `--tropical-lat-range=-30,30`)
 - [ ] Document and validate
 
-Reference: **docs/WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md**.
+Reference: **docs/WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md**.

@@ -20,6 +20,7 @@ Key flags:
     --use-training-config: Use exact training configuration (default: True)
     --strict-loading: Use strict model loading to catch mismatches early (default: True)
     --variable-list: Path to variable list file (optional, will auto-detect from config)
+    --derive-np-from-c / --no-derive-np-from-c: Enforce or skip N/P derivation from C (default: on)
 """
 
 import argparse
@@ -233,6 +234,7 @@ def run_inference_all(
     derive_np_from_c: bool = True,
     inference_full_grid: bool = False,
     inference_two_regions_only: bool = False,
+    inference_batch_size: int = 0,
 ) -> Path:
     """Run inference with the trained CNP model over the entire dataset.
     
@@ -1240,58 +1242,96 @@ def run_inference_all(
         if hasattr(module, 'training'):
             module.training = False
     
-    # Move inputs to device
-    for k in list(model_inputs.keys()):
-        if isinstance(model_inputs[k], torch.Tensor):
-            model_inputs[k] = model_inputs[k].to(device)
-    
-    with torch.no_grad():
-        # CRITICAL FIX: Use AMP if CUDA is available to match training evaluation
-        use_amp = torch.cuda.is_available()
-        
-        if use_amp:
-            with torch.amp.autocast('cuda'):
-                # Support optional water if present
-                if 'water' in model_inputs:
-                    predictions = model(
-                        model_inputs.get('time_series'),
-                        model_inputs.get('static'),
-                        model_inputs.get('pft_param'),
-                        model_inputs.get('scalar'),
-                        model_inputs.get('variables_1d_pft'),
-                        model_inputs.get('variables_2d_soil'),
-                        model_inputs.get('water')
-                    )
+    def _call_model(inputs: dict) -> dict:
+        if 'water' in inputs:
+            return model(
+                inputs.get('time_series'),
+                inputs.get('static'),
+                inputs.get('pft_param'),
+                inputs.get('scalar'),
+                inputs.get('variables_1d_pft'),
+                inputs.get('variables_2d_soil'),
+                inputs.get('water')
+            )
+        return model(
+            inputs.get('time_series'),
+            inputs.get('static'),
+            inputs.get('pft_param'),
+            inputs.get('scalar'),
+            inputs.get('variables_1d_pft'),
+            inputs.get('variables_2d_soil')
+        )
+
+    use_amp = torch.cuda.is_available()
+    n_inference_samples = next(
+        (
+            int(v.shape[0])
+            for v in model_inputs.values()
+            if isinstance(v, torch.Tensor) and v.ndim > 0
+        ),
+        0,
+    )
+
+    if inference_batch_size and inference_batch_size > 0 and n_inference_samples > inference_batch_size:
+        logging.info(
+            "Running batched inference: %s samples with batch size %s",
+            n_inference_samples,
+            inference_batch_size,
+        )
+        prediction_chunks = {}
+
+        with torch.no_grad():
+            for start in range(0, n_inference_samples, inference_batch_size):
+                end = min(start + inference_batch_size, n_inference_samples)
+                batch_inputs = {}
+                for key, value in model_inputs.items():
+                    if isinstance(value, torch.Tensor):
+                        if value.ndim > 0 and value.shape[0] == n_inference_samples:
+                            batch_inputs[key] = value[start:end].to(device, non_blocking=True)
+                        else:
+                            batch_inputs[key] = value.to(device, non_blocking=True)
+                    else:
+                        batch_inputs[key] = value
+
+                if use_amp:
+                    with torch.amp.autocast('cuda'):
+                        batch_predictions = _call_model(batch_inputs)
                 else:
-                    predictions = model(
-                        model_inputs.get('time_series'),
-                        model_inputs.get('static'),
-                        model_inputs.get('pft_param'),
-                        model_inputs.get('scalar'),
-                        model_inputs.get('variables_1d_pft'),
-                        model_inputs.get('variables_2d_soil')
-                    )
-        else:
-            # Support optional water if present
-            if 'water' in model_inputs:
-                predictions = model(
-                    model_inputs.get('time_series'),
-                    model_inputs.get('static'),
-                    model_inputs.get('pft_param'),
-                    model_inputs.get('scalar'),
-                    model_inputs.get('variables_1d_pft'),
-                    model_inputs.get('variables_2d_soil'),
-                    model_inputs.get('water')
+                    batch_predictions = _call_model(batch_inputs)
+
+                for key, value in batch_predictions.items():
+                    if isinstance(value, torch.Tensor):
+                        prediction_chunks.setdefault(key, []).append(value.detach().cpu())
+                    else:
+                        prediction_chunks.setdefault(key, []).append(value)
+
+                del batch_inputs, batch_predictions
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                logging.info(
+                    "Completed inference batch %s:%s / %s",
+                    start,
+                    end,
+                    n_inference_samples,
                 )
+
+        predictions = {
+            key: torch.cat(chunks, dim=0) if chunks and isinstance(chunks[0], torch.Tensor) else chunks
+            for key, chunks in prediction_chunks.items()
+        }
+    else:
+        # Move inputs to device for the original all-at-once path.
+        for k in list(model_inputs.keys()):
+            if isinstance(model_inputs[k], torch.Tensor):
+                model_inputs[k] = model_inputs[k].to(device)
+
+        with torch.no_grad():
+            if use_amp:
+                with torch.amp.autocast('cuda'):
+                    predictions = _call_model(model_inputs)
             else:
-                predictions = model(
-                    model_inputs.get('time_series'),
-                    model_inputs.get('static'),
-                    model_inputs.get('pft_param'),
-                    model_inputs.get('scalar'),
-                    model_inputs.get('variables_1d_pft'),
-                    model_inputs.get('variables_2d_soil')
-                )
+                predictions = _call_model(model_inputs)
     
     # Optionally apply PFT absence mask before saving predictions
     if mask_absent_pfts and isinstance(test_data, dict) and 'pft_presence_mask' in test_data and isinstance(predictions, dict) and 'pft_1d' in predictions:
@@ -1366,9 +1406,10 @@ def run_inference_all(
                     lat_idx = maybe_static_cols.index(lat_name)
                     longitude_values = maybe_static[:, lon_idx]
                     latitude_values = maybe_static[:, lat_idx]
-            # Stronger preference: if the loader DataFrame has explicit coordinates, use those.
-            # This ensures we respect the exact site(s) selected for inference, even if static inverse lacks or mislabels coords.
-            if hasattr(_loader, 'df') and isinstance(_loader.df, pd.DataFrame):
+            # Fall back to the raw loader DataFrame only if inverse-transformed static
+            # coordinates are unavailable. The loader shuffles tensors during
+            # preprocessing, so static coordinates preserve prediction row order.
+            if longitude_values is None and latitude_values is None and hasattr(_loader, 'df') and isinstance(_loader.df, pd.DataFrame):
                 if 'Longitude' in _loader.df.columns and 'Latitude' in _loader.df.columns:
                     if isinstance(test_data, dict) and 'static' in test_data:
                         n = len(test_data['static'])
@@ -1584,8 +1625,10 @@ def run_inference_all(
             if 'soil_2d' in predictions and hasattr(predictions['soil_2d'], 'numel') and predictions['soil_2d'].numel() > 0:
                 soil_pred = predictions['soil_2d'].detach().cpu().numpy()
                 n_samples = soil_pred.shape[0]
-                # Determine columns/layers using test targets when available
-                num_columns = 18
+                # Determine columns/layers using test targets when available.
+                # In inference-only datasets, Y_soil_2d is absent; predictions
+                # are produced for the restart-updater layout: 1 column x 10 layers.
+                num_columns = 1
                 num_layers = 10
                 if isinstance(test_data, dict) and 'y_soil_2d' in test_data and hasattr(test_data['y_soil_2d'], 'shape'):
                     tgt_shape = tuple(test_data['y_soil_2d'].shape)
@@ -1803,12 +1846,22 @@ def main():
     parser.add_argument("--no-mask-absent-pfts", dest="mask_absent_pfts", action="store_false", help="Disable masking of absent PFTs")
     parser.set_defaults(mask_absent_pfts=True)
     parser.add_argument("--refit-normalization", action='store_true', default=False, help="Refit scalers on inference data (default: False; use training scalers)")
-    parser.add_argument("--derive-np-from-c", action='store_true', default=True, 
-                       help="Enforce CNP stoichiometric ratios by deriving N/P variables from C predictions after inference (default: True)")
+    parser.add_argument(
+        "--derive-np-from-c",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "After inference, derive N/P from C predictions to enforce stoichiometric ratios "
+            "(default: True). Use --no-derive-np-from-c for Phase2/Phase3 restarts when tropical "
+            "CNP ratios should remain as the model predicted them."
+        ),
+    )
     parser.add_argument("--inference-full-grid", action='store_true', default=False,
                        help="Run inference on full global grid (set tropical_only=False). Use for Phase 2 tropical-trained models when merging P variables into a global restart; otherwise only validation/tropical gridcells would be in the predictions NetCDF.")
     parser.add_argument("--inference-two-regions-only", action='store_true', default=False,
                        help="Run inference only on Amazon + Central Africa region boxes. Use for two-region finetuned models when you want predictions only in those regions.")
+    parser.add_argument("--inference-batch-size", type=int, default=0,
+                       help="If >0, run model inference in chunks of this many samples to reduce GPU memory use.")
     args = parser.parse_args()
     
     # Setup logging
@@ -1843,6 +1896,7 @@ def main():
             derive_np_from_c=args.derive_np_from_c,
             inference_full_grid=getattr(args, 'inference_full_grid', False),
             inference_two_regions_only=getattr(args, 'inference_two_regions_only', False),
+            inference_batch_size=getattr(args, 'inference_batch_size', 0),
         )
         print(f"Inference completed successfully. Results saved to: {output_path}")
         

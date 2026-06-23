@@ -12,6 +12,13 @@ This document records the end-to-end procedure to:
 
 The goal is to have a reproducible protocol you can follow again for future runs.
 
+**See also**
+
+- [REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md](./REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md) — methodology review, reference-site weighting vs full-box fitting, and recommendations for `solutionp_vr` / `occlp_vr`.
+- [PHASE3_TWOREGIONS_VS_GOOD_RUN_DIFFERENCE.md](./PHASE3_TWOREGIONS_VS_GOOD_RUN_DIFFERENCE.md) — why Phase3 uses Amazon-only → Africa-only → `merge_5p_bias_corrected_amazon_africa.py` like the “good” Phase2 run.
+- [WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md](./WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md) — three-phase restart orchestration (`run_phase3_tworegions.sh`, merged 5P CSV layout).
+- Regional **prediction vs ground truth** tables: `scripts/compare_5p_gt_two_regions_inference.py` (`pred-eval`); broader pipeline: [CNP_pipeline_runbook.md](./CNP_pipeline_runbook.md).
+
 ---
 
 ### 1. Train (or select) the global model: `natveg_improved`
@@ -171,7 +178,10 @@ This is the recommended path if you want a **single global NetCDF** where:
 predictions as the baseline. The fit and corrections are restricted to the two-region
 boxes (Amazon + Africa); elsewhere the CSVs remain raw Phase2.
 
+For **Phase3-style** workflows, the recommended pattern is **two** passes of `apply_5p_bias_scale_correction.py` (Amazon-only config, then Africa-only config) followed by **`scripts/merge_5p_bias_corrected_amazon_africa.py`**. Rationale and tuning notes: [REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md](./REPORT_PHASE3_5P_BIAS_CORRECTION_REVIEW.md), [PHASE3_TWOREGIONS_VS_GOOD_RUN_DIFFERENCE.md](./PHASE3_TWOREGIONS_VS_GOOD_RUN_DIFFERENCE.md).
+
 - **Script:** `scripts/apply_5p_bias_scale_correction.py`
+- **Merge (split regional fits into one CSV set):** `scripts/merge_5p_bias_corrected_amazon_africa.py`
 - **Key command (example):**
 
 ```bash
