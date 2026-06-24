@@ -14,6 +14,10 @@ set -euo pipefail
 # Skip training:
 #   export PHASE2_RUN_DIR=cnp_results/run_..._e3smv3_h0_phase2_tropical
 #   bash scripts/run_e3smv3_h0_phase2_tropical.sh
+#
+# Skip training and inference (resume NetCDF + restart only):
+#   export PHASE2_RUN_DIR=... BASE_RESTART=...
+#   bash scripts/run_e3smv3_h0_phase2_tropical.sh   # auto-detects existing inference
 ###############################################################################
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -88,16 +92,37 @@ fi
 TROP_INF_DIR="$PHASE2_RUN_DIR/cnp_inference_tropical_only"
 mkdir -p "$TROP_INF_DIR"
 
-echo "Running tropical-only inference..."
-# shellcheck disable=SC2086
-python scripts/run_inference_all.py \
-  --model "$PHASE2_RUN_DIR/cnp_model.pt" \
-  --output-dir "$TROP_INF_DIR" \
-  --variable-list "$VARIABLE_LIST" \
-  $INFERENCE_EXTRA_FLAGS
+_has_tropical_inference() {
+  [[ -d "$1/cnp_predictions" ]] && [[ -f "$1/predictions.pkl" ]]
+}
+
+if _has_tropical_inference "$TROP_INF_DIR"; then
+  echo "Using existing tropical inference at $TROP_INF_DIR."
+elif [[ "${SKIP_INFERENCE:-0}" == "1" ]]; then
+  echo "Error: SKIP_INFERENCE=1 but no inference outputs in $TROP_INF_DIR" >&2
+  exit 1
+else
+  echo "Running tropical-only inference..."
+  python scripts/run_inference_all.py \
+    --model "$PHASE2_RUN_DIR/cnp_model.pt" \
+    --output-dir "$TROP_INF_DIR" \
+    --variable-list "$VARIABLE_LIST" \
+    --no-derive-np-from-c \
+    --inference-batch-size "${INFERENCE_BATCH_SIZE}"
+fi
 
 TROP_NETCDF="$PHASE2_RUN_DIR/comparison_results/ai_predictions_tropical_only.nc"
 mkdir -p "$PHASE2_RUN_DIR/comparison_results"
+
+if [[ -f "$PHASE2_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc" ]] \
+  && [[ -f "$TROP_NETCDF" ]]; then
+  echo "Phase 2 restart already exists: $PHASE2_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc"
+  echo
+  echo "Phase 2 complete."
+  echo "  export PHASE2_RUN_DIR=$PHASE2_RUN_DIR"
+  echo "  Phase2 restart: $PHASE2_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc"
+  exit 0
+fi
 
 echo "Converting tropical predictions to NetCDF..."
 python scripts/ai_predictions_to_netcdf.py \

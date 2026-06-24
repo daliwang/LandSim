@@ -66,13 +66,13 @@ echo "  INFERENCE_EXTRA_FLAGS=$INFERENCE_EXTRA_FLAGS"
 INF_FULL_DIR="$RUN3_DIR/cnp_inference_entire_dataset"
 if [[ ! -d "$INF_FULL_DIR/cnp_predictions" ]]; then
   echo "Running full-grid Phase2 inference (long step)..."
-  # shellcheck disable=SC2086
   python scripts/run_inference_all.py \
     --model "$PHASE2_RUN_DIR/cnp_model.pt" \
     --output-dir "$INF_FULL_DIR" \
     --variable-list "$VARIABLE_LIST" \
     --inference-full-grid \
-    $INFERENCE_EXTRA_FLAGS
+    --no-derive-np-from-c \
+    --inference-batch-size "${INFERENCE_BATCH_SIZE}"
 fi
 
 echo "Applying 5P bias/scale correction (Amazon, regional_fit_v3)..."

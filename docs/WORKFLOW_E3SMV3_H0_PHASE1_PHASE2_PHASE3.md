@@ -1,6 +1,8 @@
 # E3SMv3_h0: Phase 1 (global), Phase 2 (tropical), Phase 3 (two-region bias correction)
 
-This runbook repeats the three-phase workflow used for the Trendy reference runs, using the new training dataset at `/mnt/proj-shared/AI4BGC_7xw/TrainingData/E3SMv3_h0` (396 `training_data_batch_*.pkl` files).
+This runbook repeats the three-phase workflow used for the Trendy reference runs, using the training dataset at `/mnt/proj-shared/AI4BGC_7xw/TrainingData/E3SMv3_h0` (396 `training_data_batch_*.pkl` files).
+
+Use git branch **`e3smv3case`** (includes E3SM-specific training fixes, commit `92473ed` or later).
 
 **Trendy reference runs**
 
@@ -10,18 +12,26 @@ This runbook repeats the three-phase workflow used for the Trendy reference runs
 | Phase 2 tropical | `cnp_results/run_20260315_175250_phase2_tropical` |
 | Phase 3 two-region | `cnp_results/run_20260512_083650_phase3_tworegions_(africa_improvement)` |
 
-**New files in this repo**
+**E3SMv3_h0 runs (Jun 2026 experiment)**
+
+| Phase | Run directory | Notes |
+|-------|---------------|-------|
+| Phase 1 global | `cnp_results/run_20260623_172201_e3smv3_h0_phase1_global` | 120 epochs, ~292 min train; inference with `--derive-np-from-c --inference-batch-size 4096` |
+| Phase 2 tropical | `cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical` | 150 epochs, ~141 min train; tropical inference ~105k cells |
+| Phase 3 two-region | `cnp_results/run_20260624_153307_e3smv3_h0_phase3_tworegions` | ~54 min total; full-grid inference 395784 cells (batch 4096) → Amazon/Africa v3 → merge |
+
+**Pipeline scripts and config**
 
 | File | Purpose |
 |------|---------|
 | `CNP_IO_e3smv3_h0.txt` | Variable list for E3SMv3_h0 (see **dataset differences** below) |
-| `config/e3smv3_h0_env.sh` | Shared environment (data path, configs, restart placeholder) |
+| `config/e3smv3_h0_env.sh` | Data paths, configs, restart template, inference batch size |
 | `scripts/run_e3smv3_h0_phase1_global.sh` | Phase 1 train → inference → base restart |
 | `scripts/run_e3smv3_h0_phase2_tropical.sh` | Phase 2 train → tropical inference → phase2 restart |
 | `scripts/run_e3smv3_h0_phase3_tworegions.sh` | Phase 3 full-grid inference → v3 bias correction → merge → restart |
 | `scripts/run_e3smv3_h0_validation.sh` | Post-run validation and site comparisons |
 
-Training configs are unchanged from the Trendy runs:
+Training configs match the Trendy runs:
 
 - Phase 1: `config/training_config_experiment_3_global_natveg_improved.json` (120 epochs)
 - Phase 2: `config/training_config_phase2_tropical_soilp_only.json` (150 epochs, tropical-only filter)
@@ -35,9 +45,23 @@ The E3SM batches use the same PFT / soil / forcing layout as Trendy, but two gro
 | `landfrac` | present | **absent** — use `LANDFRAC_PFT` instead (48 surface vars) |
 | `GPP`, `NPP`, `AR`, `HR` | present | **absent** — scalar section is empty (0 scalar inputs/outputs) |
 
-Commit `92473ed` on `e3smv3case` adapts training for zero scalar variables (`scalar_output_size` from the IO list, skip scalar loss/metrics, static group-embedding fix). Use branch `e3smv3case` for E3SM runs.
+Code on `e3smv3case` adapts training for zero scalar variables (`scalar_output_size` from the IO list, skip scalar loss/metrics, static group-embedding fix).
 
 **Batch ordering:** files are named `training_data_batch_01.pkl` … `396.pkl`. Early batches (e.g. 01–03) are Antarctic ice with `PCT_NATVEG=0`; natveg training needs later batches. For a quick smoke test, symlink batches with land (e.g. 110–112) — see §0.1.
+
+### Inference defaults (`config/e3smv3_h0_env.sh`)
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `INFERENCE_BATCH_SIZE` | `4096` | All inference steps (~396k or ~105k E3SM gridcells) |
+| `PHASE1_INFERENCE_EXTRA_FLAGS` | `--derive-np-from-c --inference-batch-size 4096` | Phase 1 script |
+| `INFERENCE_EXTRA_FLAGS` | `--no-derive-np-from-c --inference-batch-size 4096` | Documentation / manual runs |
+
+Phase 2 and Phase 3 scripts pass **explicit** `--no-derive-np-from-c --inference-batch-size "${INFERENCE_BATCH_SIZE}"` to `run_inference_all.py` (avoids bash line-continuation bugs with unquoted `$INFERENCE_EXTRA_FLAGS` on its own line).
+
+Override batch size if GPU OOM persists: `export INFERENCE_BATCH_SIZE=2048` before `source config/e3smv3_h0_env.sh`.
+
+**Model checkpoint path:** training saves `cnp_predictions/model.pth`. `run_inference_all.py` resolves `cnp_model.pt` → `cnp_predictions/model.pth` automatically.
 
 ---
 
@@ -45,25 +69,23 @@ Commit `92473ed` on `e3smv3case` adapts training for zero scalar variables (`sca
 
 ```bash
 cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+git checkout e3smv3case
 source config/e3smv3_h0_env.sh
 
 # ELM restart template (default in config/e3smv3_h0_env.sh):
 export RESTART_TEMPLATE=/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/E3SMV3_025/20240214.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.adsp.elm.r.0021-01-01-00000.nc
 
-# Optional timestamp for all three phases (keeps run dirs aligned):
+# Optional timestamp for Phase 3 run dir:
 export TS=$(date +%Y%m%d_%H%M%S)
+
+mkdir -p logs
+chmod +x scripts/run_e3smv3_h0_*.sh
 ```
 
 Verify the dataset:
 
 ```bash
 ls "$E3SM_DATA_DIR"/training_data_batch_*.pkl | wc -l   # expect 396
-```
-
-Make scripts executable (once):
-
-```bash
-chmod +x scripts/run_e3smv3_h0_*.sh
 ```
 
 ### 0.1 Quick smoke test (3 batches, 5 epochs)
@@ -99,17 +121,25 @@ Do **not** use `--max-files 3` on the full `E3SMv3_h0` directory alone; that sel
 
 ## 1. Phase 1 — global model + base restart
 
-**Goal:** Train global natveg model on E3SMv3_h0, run full-grid inference, write `updated_restart_base.nc` from your ELM restart template.
+**Goal:** Train global natveg model on E3SMv3_h0, run full-grid inference, write `updated_restart_base.nc` from the ELM restart template.
+
+**Inference:** `--derive-np-from-c --inference-batch-size 4096` (required for ~396k gridcells).
 
 ### Option A — automation script
 
 ```bash
 source config/e3smv3_h0_env.sh
-# Full Phase 1 (training + inference + base restart):
-bash scripts/run_e3smv3_h0_phase1_global.sh
 
-# Or train only first, then inference/restart later:
+# Full Phase 1 (training + inference + base restart):
+nohup bash scripts/run_e3smv3_h0_phase1_global.sh \
+  > logs/e3smv3_h0_phase1_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# Train only (no inference/restart):
 # TRAIN_ONLY=1 bash scripts/run_e3smv3_h0_phase1_global.sh
+
+# Skip training — resume inference + restart:
+# export NATVEG_RUN_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase1_global
+# bash scripts/run_e3smv3_h0_phase1_global.sh
 ```
 
 ### Option B — manual commands
@@ -131,7 +161,7 @@ export NATVEG_RUN_DIR=$(ls -td cnp_results/run_*_e3smv3_h0_phase1_global | head 
 
 # 1.2 Full-grid inference (batched; required for ~396k E3SM gridcells)
 python scripts/run_inference_all.py \
-  --model "$NATVEG_RUN_DIR/cnp_model.pt" \
+  --model "$NATVEG_RUN_DIR/cnp_predictions/model.pth" \
   --output-dir "$NATVEG_RUN_DIR/cnp_inference_entire_dataset" \
   --variable-list CNP_IO_e3smv3_h0.txt \
   --inference-full-grid \
@@ -154,7 +184,9 @@ python scripts/ai_predictions_to_restart.py \
 export BASE_RESTART="$NATVEG_RUN_DIR/updated_restart_base.nc"
 ```
 
-**Outputs:** `cnp_results/run_*_e3smv3_h0_phase1_global/` with `cnp_model.pt`, `updated_restart_base.nc`.
+**Outputs:** `cnp_predictions/model.pth`, `cnp_inference_entire_dataset/predictions.pkl`, `ai_predictions_global.nc`, `updated_restart_base.nc`.
+
+**Success check:** log ends with `Phase 1 complete.` and `updated_restart_base.nc` exists (~53 GB).
 
 ---
 
@@ -162,16 +194,39 @@ export BASE_RESTART="$NATVEG_RUN_DIR/updated_restart_base.nc"
 
 **Goal:** Train tropical-only model; overwrite five soil P variables in \([-30°, 30°]\) on top of Phase 1 base restart.
 
+**Inference:** `--no-derive-np-from-c --inference-batch-size 4096` (required — unbatched run OOM'd on ~105k tropical cells).
+
+### Option A — automation script
+
+```bash
+source config/e3smv3_h0_env.sh
+export BASE_RESTART=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global/updated_restart_base.nc
+
+nohup bash scripts/run_e3smv3_h0_phase2_tropical.sh \
+  > logs/e3smv3_h0_phase2_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+```
+
+**Resume / skip options (script auto-detects):**
+
+| Set | Skips |
+|-----|-------|
+| `PHASE2_RUN_DIR=...` | Training |
+| Existing `cnp_inference_tropical_only/predictions.pkl` | Inference |
+| Existing `updated_restart_phase2_tropical_5P_raw.nc` + NetCDF | NetCDF + restart |
+
+```bash
+# Example: skip training and inference, run NetCDF + restart only:
+export PHASE2_RUN_DIR=cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical
+export BASE_RESTART=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global/updated_restart_base.nc
+bash scripts/run_e3smv3_h0_phase2_tropical.sh
+```
+
+### Option B — manual commands
+
 ```bash
 source config/e3smv3_h0_env.sh
 export BASE_RESTART=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase1_global/updated_restart_base.nc
 
-bash scripts/run_e3smv3_h0_phase2_tropical.sh
-```
-
-Or manually:
-
-```bash
 python train_cnp_model.py \
   --training-config-json config/training_config_phase2_tropical_soilp_only.json \
   --variable-list CNP_IO_e3smv3_h0.txt \
@@ -183,7 +238,7 @@ python train_cnp_model.py \
 export PHASE2_RUN_DIR=$(ls -td cnp_results/run_*_e3smv3_h0_phase2_tropical | head -1)
 
 python scripts/run_inference_all.py \
-  --model "$PHASE2_RUN_DIR/cnp_model.pt" \
+  --model "$PHASE2_RUN_DIR/cnp_predictions/model.pth" \
   --output-dir "$PHASE2_RUN_DIR/cnp_inference_tropical_only" \
   --variable-list CNP_IO_e3smv3_h0.txt \
   --no-derive-np-from-c \
@@ -203,7 +258,9 @@ python scripts/ai_predictions_to_restart.py \
   "--tropical-lat-range=-30,30"
 ```
 
-**Outputs:** `updated_restart_phase2_tropical_5P_raw.nc`
+**Outputs:** `comparison_results/ai_predictions_tropical_only.nc`, `updated_restart_phase2_tropical_5P_raw.nc`.
+
+**Success check:** log ends with `Phase 2 complete.` and restart file exists (~53 GB).
 
 ---
 
@@ -211,13 +268,18 @@ python scripts/ai_predictions_to_restart.py \
 
 **Goal:** Match `run_20260512_083650_phase3_tworegions_(africa_improvement)`: Amazon v3 + Africa v3 + merge → global restart with bias-corrected 5P in tropics.
 
+**Inference:** full-grid with `--no-derive-np-from-c --inference-batch-size 4096` (same ~396k grid as Phase 1).
+
 ```bash
 source config/e3smv3_h0_env.sh
-export BASE_RESTART=.../updated_restart_base.nc
-export PHASE2_RUN_DIR=.../run_*_e3smv3_h0_phase2_tropical
+export BASE_RESTART=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global/updated_restart_base.nc
+export PHASE2_RUN_DIR=cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical
 
-bash scripts/run_e3smv3_h0_phase3_tworegions.sh
+nohup bash scripts/run_e3smv3_h0_phase3_tworegions.sh \
+  > logs/e3smv3_h0_phase3_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
+
+The Phase 3 script skips full-grid inference if `$RUN3_DIR/cnp_inference_entire_dataset/cnp_predictions` already exists.
 
 Manual steps (same as `docs/RERUN_PHASE2_PHASE3_NO_CNP_FIX.md` §3):
 
@@ -227,7 +289,7 @@ mkdir -p "$RUN3_DIR"
 
 # 3.1 Full-grid inference (longest step; batched for ~396k E3SM gridcells)
 python scripts/run_inference_all.py \
-  --model "$PHASE2_RUN_DIR/cnp_model.pt" \
+  --model "$PHASE2_RUN_DIR/cnp_predictions/model.pth" \
   --output-dir "$RUN3_DIR/cnp_inference_entire_dataset" \
   --variable-list CNP_IO_e3smv3_h0.txt \
   --inference-full-grid \
@@ -272,8 +334,10 @@ python scripts/ai_predictions_to_restart.py \
   "--tropical-lat-range=-30,30"
 ```
 
-**Final restart:**  
-`$RUN3_DIR/updated_restart_phase3_tworegions_5P_bias_corrected_amazon_africa_v3_tropical.nc`
+**Final restart (Jun 2026 run):**  
+`cnp_results/run_20260624_153307_e3smv3_h0_phase3_tworegions/updated_restart_phase3_tworegions_5P_bias_corrected_amazon_africa_v3_tropical.nc` (~53 GB)
+
+Log: `logs/e3smv3_h0_phase3_20260624_153307.log`
 
 ---
 
@@ -283,9 +347,9 @@ After all three phases complete:
 
 ```bash
 source config/e3smv3_h0_env.sh
-export NATVEG_RUN_DIR=.../run_*_e3smv3_h0_phase1_global
-export PHASE2_RUN_DIR=.../run_*_e3smv3_h0_phase2_tropical
-export RUN3_DIR=.../run_*_e3smv3_h0_phase3_tworegions
+export NATVEG_RUN_DIR=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global
+export PHASE2_RUN_DIR=cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical
+export RUN3_DIR=cnp_results/run_20260624_153307_e3smv3_h0_phase3_tworegions
 
 bash scripts/run_e3smv3_h0_validation.sh
 ```
@@ -294,7 +358,7 @@ Individual checks:
 
 | Check | Command |
 |-------|---------|
-| Training loss / metrics | Inspect `$NATVEG_RUN_DIR/cnp_training_*.log`, `validation_stats.csv` |
+| Training loss / metrics | Inspect `$NATVEG_RUN_DIR/cnp_training_*.log`, `cnp_training_losses.csv` |
 | NPOOL/PPOOL per PFT | `python scripts/validation_npool_ppool_per_pft.py $NATVEG_RUN_DIR` |
 | 5P pred vs GT (Amazon/Africa) | `python scripts/compare_5p_gt_two_regions_inference.py pred-eval --runs-json $RUN3_DIR/analysis/5p_pred_eval_runs.json` |
 | Site vertical profiles | `python scripts/generate_site_5p_restart_comparison.py --lon 28 --lat 0 --phase3-run-dir $RUN3_DIR` |
@@ -304,39 +368,64 @@ Individual checks:
 
 ## 5. Suggested launch order
 
-Run phases **sequentially**; inspect each before starting the next.
+Run phases **sequentially**; inspect each log before starting the next.
 
 ```bash
 cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
 source config/e3smv3_h0_env.sh
+mkdir -p logs
 
-# Step 1: Phase 1 (training + inference + base restart)
+# Step 1: Phase 1
 nohup bash scripts/run_e3smv3_h0_phase1_global.sh \
   > logs/e3smv3_h0_phase1_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+# Wait for "Phase 1 complete."
+export NATVEG_RUN_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase1_global
+export BASE_RESTART=$NATVEG_RUN_DIR/updated_restart_base.nc
 
-# Step 2: Phase 2 training (can start after Phase 1 training finishes)
+# Step 2: Phase 2 (after Phase 1 complete)
 nohup bash scripts/run_e3smv3_h0_phase2_tropical.sh \
   > logs/e3smv3_h0_phase2_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+# Wait for "Phase 2 complete."
+export PHASE2_RUN_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase2_tropical
 
 # Step 3: Phase 3 (after Phase 2 complete)
 nohup bash scripts/run_e3smv3_h0_phase3_tworegions.sh \
   > logs/e3smv3_h0_phase3_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+export RUN3_DIR=cnp_results/run_20260624_153307_e3smv3_h0_phase3_tworegions
 
 # Step 4: validation
 bash scripts/run_e3smv3_h0_validation.sh
 ```
 
-Create `logs/` if needed: `mkdir -p logs`
+---
+
+## 6. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `canUse32BitIndexMath ... false` during Phase 1 inference | Full ~396k grid in one GPU forward pass | Add `--inference-batch-size 4096` (default in scripts) |
+| `CUDA out of memory` during Phase 2 inference | ~105k tropical cells unbatched | Add `--inference-batch-size 4096`; try `2048` if needed |
+| `able-list: command not found` in Phase 2 script | Bash misparsed multiline `python` command when `$INFERENCE_EXTRA_FLAGS` was on its own line | Fixed in `run_e3smv3_h0_phase2_tropical.sh` — uses explicit flags |
+| Zero natveg training samples in smoke test | `--max-files 3` picks polar batches 01–03 | Symlink land batches (110–112); see §0.1 |
+| Training works but scalar loss crashes | E3SM has no `GPP`/`NPP`/`AR`/`HR` | Use `e3smv3case` branch + `CNP_IO_e3smv3_h0.txt` |
+| Inference succeeded but restart step missing | Script exited early (`set -e`) | Re-run script with `PHASE2_RUN_DIR` set; inference auto-skipped |
+
+**Monitoring logs:**
+
+```bash
+tail -f logs/e3smv3_h0_phase1_*.log
+grep -E 'Phase [123] complete|ERROR|failed' logs/e3smv3_h0_phase*.log
+```
 
 ---
 
 ## Notes
 
-- **Training time:** E3SMv3_h0 has 396 batches (~1000 gridcells each). Expect much longer wall time than the Trendy Phase 1 run. Use `nohup` or a job scheduler.
-- **ELM restart:** `RESTART_TEMPLATE` defaults to `ELM_data/E3SMV3_025/20240214.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.adsp.elm.r.0021-01-01-00000.nc`.
-- **Inference (Phase 1):** `run_e3smv3_h0_phase1_global.sh` uses `--derive-np-from-c --inference-batch-size 4096` (`PHASE1_INFERENCE_EXTRA_FLAGS` in `config/e3smv3_h0_env.sh`). Batch size avoids PyTorch 32-bit index errors on the full E3SM grid.
-- **Inference (Phase 2/3):** `--no-derive-np-from-c --inference-batch-size 4096` via `INFERENCE_EXTRA_FLAGS` in `config/e3smv3_h0_env.sh` (see `docs/RERUN_PHASE2_PHASE3_NO_CNP_FIX.md`).
-- **Scalar fluxes:** E3SMv3_h0 has no `GPP`/`NPP`/`AR`/`HR` columns; the model trains PFT 1D + soil 2D targets only. This is intentional in `CNP_IO_e3smv3_h0.txt`.
-- **Phase 3 alternative:** For selective v3 (only `primp_vr` corrected), see `scripts/run_phase3_path_a_selective_v3.sh` and `docs/PHASE3_PATH_A_SELECTIVE_V3.md` — point `INFER_SRC` at your new `$RUN3_DIR/cnp_inference_entire_dataset`.
+- **Experiment status (Jun 2026):** All three phases completed on E3SMv3_h0. Final ELM restart for tropical 5P bias correction: `run_20260624_153307_e3smv3_h0_phase3_tworegions/updated_restart_phase3_tworegions_5P_bias_corrected_amazon_africa_v3_tropical.nc`.
+- **Training time:** 396 batches × ~1000 gridcells each. Phase 1 train ~5 h, Phase 2 train ~2.5 h (Jun 2026 GPU node). Use `nohup` or a job scheduler.
+- **ELM restart:** `RESTART_TEMPLATE` defaults to `ELM_data/E3SMV3_025/20240214.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.adsp.elm.r.0021-01-01-00000.nc` (not committed — large file).
+- **Phase 1 vs Phase 2/3 inference:** Phase 1 uses `--derive-np-from-c`; Phase 2/3 use `--no-derive-np-from-c` (see `docs/RERUN_PHASE2_PHASE3_NO_CNP_FIX.md`).
+- **Scalar fluxes:** E3SMv3_h0 has no scalar flux columns; model trains PFT 1D + soil 2D only.
+- **Phase 3 alternative:** For selective v3 (only `primp_vr` corrected), see `scripts/run_phase3_path_a_selective_v3.sh` and `docs/PHASE3_PATH_A_SELECTIVE_V3.md`.
 
 **See also:** `docs/WORKFLOW_PHASE1_PHASE2_PHASE3_RESTARTS.md`, `docs/WORKFLOW_5P_TWO_REGIONS_BIAS_SCALE_AND_RESTARTS.md`
