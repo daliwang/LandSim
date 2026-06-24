@@ -33,6 +33,7 @@ echo "=== E3SMv3_h0 Phase 1: global training + base restart ==="
 echo "  DATA_PATHS=$DATA_PATHS"
 echo "  VARIABLE_LIST=$VARIABLE_LIST"
 echo "  CONFIG_GLOBAL=$CONFIG_GLOBAL"
+echo "  PHASE1_INFERENCE_EXTRA_FLAGS=$PHASE1_INFERENCE_EXTRA_FLAGS"
 
 if [[ -n "${NATVEG_RUN_DIR:-}" ]]; then
   if ! _has_model "$NATVEG_RUN_DIR"; then
@@ -81,7 +82,7 @@ python scripts/run_inference_all.py \
   --output-dir "$INF_GLOBAL" \
   --variable-list "$VARIABLE_LIST" \
   --inference-full-grid \
-  $INFERENCE_EXTRA_FLAGS
+  $PHASE1_INFERENCE_EXTRA_FLAGS
 
 echo "Converting global predictions to NetCDF..."
 python scripts/ai_predictions_to_netcdf.py \

@@ -61,6 +61,7 @@ echo "=== E3SMv3_h0 Phase 3: two-region v3 bias correction + restart ==="
 echo "  PHASE2_RUN_DIR=$PHASE2_RUN_DIR"
 echo "  BASE_RESTART=$BASE_RESTART"
 echo "  RUN3_DIR=$RUN3_DIR"
+echo "  INFERENCE_EXTRA_FLAGS=$INFERENCE_EXTRA_FLAGS"
 
 INF_FULL_DIR="$RUN3_DIR/cnp_inference_entire_dataset"
 if [[ ! -d "$INF_FULL_DIR/cnp_predictions" ]]; then

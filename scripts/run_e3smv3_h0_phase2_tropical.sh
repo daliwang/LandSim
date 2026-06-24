@@ -51,6 +51,7 @@ _has_model() {
 echo "=== E3SMv3_h0 Phase 2: tropical training + raw 5P restart ==="
 echo "  BASE_RESTART=$BASE_RESTART"
 echo "  CONFIG_TROPICAL=$CONFIG_TROPICAL"
+echo "  INFERENCE_EXTRA_FLAGS=$INFERENCE_EXTRA_FLAGS"
 
 if [[ -n "${PHASE2_RUN_DIR:-}" ]]; then
   if ! _has_model "$PHASE2_RUN_DIR"; then

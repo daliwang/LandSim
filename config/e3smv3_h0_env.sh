@@ -34,8 +34,12 @@ export PHASE3_SUFFIX="${PHASE3_SUFFIX:-e3smv3_h0_phase3_tworegions}"
 # export PHASE2_RUN_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase2_tropical
 # export RUN3_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase3_tworegions
 
-# --- Inference options (recommended for Phase 2/3; see docs/RERUN_PHASE2_PHASE3_NO_CNP_FIX.md) ---
-export INFERENCE_EXTRA_FLAGS="${INFERENCE_EXTRA_FLAGS:---no-derive-np-from-c}"
+# --- Inference options ---
+# Phase 1 global: derive N/P from C; batched inference (~396k E3SM gridcells)
+export INFERENCE_BATCH_SIZE="${INFERENCE_BATCH_SIZE:-4096}"
+export PHASE1_INFERENCE_EXTRA_FLAGS="${PHASE1_INFERENCE_EXTRA_FLAGS:---derive-np-from-c --inference-batch-size ${INFERENCE_BATCH_SIZE}}"
+# Phase 2/3 (see docs/RERUN_PHASE2_PHASE3_NO_CNP_FIX.md); batched to avoid GPU OOM on E3SM grid
+export INFERENCE_EXTRA_FLAGS="${INFERENCE_EXTRA_FLAGS:---no-derive-np-from-c --inference-batch-size ${INFERENCE_BATCH_SIZE}}"
 
 _check_restart_template() {
   if [[ ! -f "$RESTART_TEMPLATE" ]]; then
