@@ -30,9 +30,20 @@ export PHASE3_SUFFIX="${PHASE3_SUFFIX:-e3smv3_h0_phase3_tworegions}"
 
 # --- Optional: set these after each phase completes ---
 # export NATVEG_RUN_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase1_global
+# export PHASE1_RUN_DIR=$NATVEG_RUN_DIR
 # export BASE_RESTART=$NATVEG_RUN_DIR/updated_restart_base.nc
 # export PHASE2_RUN_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase2_tropical
 # export RUN3_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase3_tworegions
+
+# --- Training options (H200-friendly; global default in train_cnp_model.py remains 128) ---
+export TRAINING_BATCH_SIZE="${TRAINING_BATCH_SIZE:-1024}"
+# Parallel pickle reads for ~396 E3SM batch files (DataLoaderIndividual)
+export LOAD_WORKERS="${LOAD_WORKERS:-8}"
+
+# Preprocessed tensor cache (opt-in): skips ~20 min preprocess+normalize on reruns
+export USE_PREPROCESSED_CACHE="${USE_PREPROCESSED_CACHE:-0}"
+export PREPROCESSED_CACHE_DIR="${PREPROCESSED_CACHE_DIR:-$E3SM_DATA_DIR/.preprocessed_cache}"
+# export REBUILD_PREPROCESSED_CACHE=1   # force cache rebuild on next training run
 
 # --- Inference options ---
 # Phase 1 global: derive N/P from C; batched inference (~396k E3SM gridcells)

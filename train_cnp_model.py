@@ -50,6 +50,16 @@ sys.path.append(str(Path(__file__).parent))
 
 from config.training_config import get_cnp_model_config
 from data.data_loader_individual import DataLoaderIndividual
+from data.preprocessed_cache import (
+    cache_is_valid,
+    cache_paths,
+    compute_cache_fingerprint,
+    env_flag_enabled,
+    list_data_files,
+    load_preprocessed_cache,
+    resolve_cache_dir,
+    save_preprocessed_cache,
+)
 from models.cnp_combined_model import CNPCombinedModel
 from training.trainer import ModelTrainer
 
@@ -236,6 +246,27 @@ def main():
         type=str,
         default=None,
         help='Glob pattern for training files (e.g., enhanced_1_training_data_batch_*.pkl)'
+    )
+    parser.add_argument(
+        '--use-preprocessed-cache',
+        action='store_true',
+        help='Load/save preprocessed train/val tensors to skip pickle load+preprocess+normalize on reruns'
+    )
+    parser.add_argument(
+        '--preprocessed-cache-dir',
+        type=str,
+        default=None,
+        help='Directory for preprocessed tensor cache (default: <data_path>/.preprocessed_cache)'
+    )
+    parser.add_argument(
+        '--rebuild-preprocessed-cache',
+        action='store_true',
+        help='Force rebuild of preprocessed cache even when a valid cache exists'
+    )
+    parser.add_argument(
+        '--preprocessed-cache-only',
+        action='store_true',
+        help='Build or verify preprocessed cache and exit before model training'
     )
     parser.add_argument(
         '--tropical-only',
@@ -484,6 +515,13 @@ def main():
                 logger.info(f"Applied data overrides: {update_kwargs}")
             except Exception as e:
                 logger.warning(f"Failed to apply data overrides: {e}")
+        load_workers_env = os.environ.get('LOAD_WORKERS')
+        if load_workers_env is not None:
+            try:
+                config.update_data_config(load_workers=int(load_workers_env))
+                logger.info(f"Applied parallel data load workers: {int(load_workers_env)}")
+            except Exception as e:
+                logger.warning(f"Failed to apply LOAD_WORKERS={load_workers_env}: {e}")
         # Optional tropical-only filtering
         if args.tropical_only:
             tropical_kwargs = {'tropical_only': True}
@@ -1036,175 +1074,236 @@ def main():
         assert config.data_config.y_list_columns_2d == ['Y_' + v for v in config.data_config.x_list_columns_2d], \
             f"2D columns not aligned!\nX: {config.data_config.x_list_columns_2d}\nY: {config.data_config.y_list_columns_2d}"
 
-        # Initialize data loader
-        logger.info("Loading data...")
+        normalization_method = args.normalization
+        if hasattr(args, '_normalization_from_config') and args._normalization_from_config:
+            normalization_method = args._normalization_from_config
+            logger.info(f"Using normalization from config: {normalization_method}")
+
+        use_preprocessed_cache = (
+            args.use_preprocessed_cache
+            or args.preprocessed_cache_only
+            or env_flag_enabled('USE_PREPROCESSED_CACHE')
+        )
+        rebuild_preprocessed_cache = (
+            args.rebuild_preprocessed_cache
+            or args.preprocessed_cache_only
+            or env_flag_enabled('REBUILD_PREPROCESSED_CACHE')
+        )
+        cache_dir_arg = args.preprocessed_cache_dir or os.environ.get('PREPROCESSED_CACHE_DIR')
+        pft_presence_threshold = float(
+            getattr(config.preprocessing_config, 'pft_presence_threshold', None)
+            if getattr(config.preprocessing_config, 'pft_presence_threshold', None) is not None
+            else getattr(config.training_config, 'pft_presence_threshold', 0.0)
+            or 0.0
+        )
+
+        cache_fingerprint = None
+        cache_manifest = None
+        cache_file_paths = None
+        cached_bundle = None
+        if use_preprocessed_cache:
+            data_files = list_data_files(config.data_config)
+            cache_fingerprint, cache_manifest = compute_cache_fingerprint(
+                config.data_config,
+                config.preprocessing_config,
+                normalization_method=normalization_method,
+                pft_presence_threshold=pft_presence_threshold,
+                files=data_files,
+            )
+            cache_dir = resolve_cache_dir(cache_dir_arg, config.data_config)
+            cache_file_paths = cache_paths(cache_dir, cache_fingerprint)
+            logger.info(
+                "Preprocessed cache enabled (fingerprint=%s..., dir=%s)",
+                cache_fingerprint[:12],
+                cache_dir,
+            )
+            if (
+                cache_is_valid(cache_file_paths, cache_fingerprint)
+                and not rebuild_preprocessed_cache
+            ):
+                cached_bundle = load_preprocessed_cache(cache_file_paths)
+            elif rebuild_preprocessed_cache:
+                logger.info("Rebuilding preprocessed cache (forced)")
+            else:
+                logger.info("Preprocessed cache miss; running full data pipeline")
+
         logger.info("Using DataLoaderIndividual for consistent PFT indexing")
         data_loader = DataLoaderIndividual(
             config.data_config,
             config.preprocessing_config
         )
-        # Check raw data for non-zero values after loading
-        raw_data = data_loader.load_data()
-        
-        # Print all variables after loading
-        if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
-            logger.info("=" * 80)
-            logger.info("训练数据集变量列表 (Training Dataset Variables):")
-            logger.info("=" * 80)
-            logger.info(f"总变量数: {len(data_loader.df.columns)}")
-            logger.info(f"数据集形状: {data_loader.df.shape}")
-            logger.info("\n所有变量列表 (All Variables):")
-            for i, col in enumerate(sorted(data_loader.df.columns), 1):
-                logger.info(f"  {i:4d}. {col}")
-            logger.info("=" * 80)
-        
-        logger.info("Checking raw data for soil2D variables...")
-        for key, value in raw_data.items():
-            if 'soil' in key.lower() and '2d' in key.lower():
-                if isinstance(value, pd.Series):
-                    non_zero_count = 0
-                    total_items = len(value)
-                    for item in value:
-                        if isinstance(item, (list, tuple, np.ndarray)):
-                            if isinstance(item, np.ndarray):
-                                non_zero_count += np.count_nonzero(item)
-                            else:
-                                for sub_item in item:
-                                    if isinstance(sub_item, (list, tuple, np.ndarray)):
-                                        if isinstance(sub_item, np.ndarray):
-                                            non_zero_count += np.count_nonzero(sub_item)
-                                        else:
-                                            non_zero_count += sum(1 for x in sub_item if x != 0)
-                                    else:
-                                        non_zero_count += 1 if sub_item != 0 else 0
-                        else:
-                            non_zero_count += 1 if item != 0 else 0
-                    logger.info(f"  Raw {key}: total items={total_items}, non-zero count={non_zero_count}")
-                else:
-                    logger.info(f"  Raw {key}: type={type(value)}")
 
-        # After loading data
-        if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
-            verify_locations(data_loader.df, "All the data")
+        split_data = None
+        normalized_scalers = None
+        data_info = None
 
-        # Proceed with preprocessing and normalization
-        logger.info("Preprocessing data...")
-        preprocessed_data = data_loader.preprocess_data()
-        logger.info("Data preprocessed successfully.")
-        data_info = data_loader.get_data_info()
-        # Check preprocessed data for soil2D variables
-        logger.info("Checking preprocessed data for soil2D variables...")
-        if preprocessed_data is not None:
-            for key, value in preprocessed_data.items():
-                if 'soil' in key.lower() and '2d' in key.lower():
-                    if isinstance(value, (np.ndarray, torch.Tensor)):
-                        non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
-                        logger.info(f"  Preprocessed {key}: shape={value.shape}, non-zero count={non_zero_count}")
-                    else:
-                        logger.info(f"  Preprocessed {key}: type={type(value)}")
+        if cached_bundle is not None:
+            split_data = {
+                'train': cached_bundle['train'],
+                'test': cached_bundle['test'],
+                'train_size': cached_bundle.get('train_size'),
+                'test_size': cached_bundle.get('test_size'),
+            }
+            normalized_scalers = cached_bundle['scalers']
+            data_info = cached_bundle['data_info']
+            logger.info(
+                "Skipped pickle load, preprocess, normalize, and split (preprocessed cache hit)"
+            )
         else:
-            logger.warning("Preprocessed data is None, skipping check.")
-        # Normalize data
-        logger.info("Normalizing data...")
-        # Apply normalization from config if it was set and CLI didn't override
-        normalization_method = args.normalization
-        if hasattr(args, '_normalization_from_config') and args._normalization_from_config:
-            # Config provided normalization and CLI didn't explicitly override (default is 'individual')
-            normalization_method = args._normalization_from_config
-            logger.info(f"Using normalization from config: {normalization_method}")
-        if normalization_method == 'group':
-            normalized_data = data_loader.normalize_data()
-            logger.info("Applied group normalization (same as original system)")
-        elif normalization_method == 'individual':
-            normalized_data = data_loader.normalize_data_individual()
-            logger.info("Applied individual normalization to all variables")
-            # Log after individual normalization for soil2D
-            logger.info("Checking data after individual normalization for soil2D variables...")
+            logger.info("Loading data...")
+            raw_data = data_loader.load_data()
+
+            if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
+                logger.info("=" * 80)
+                logger.info("训练数据集变量列表 (Training Dataset Variables):")
+                logger.info("=" * 80)
+                logger.info(f"总变量数: {len(data_loader.df.columns)}")
+                logger.info(f"数据集形状: {data_loader.df.shape}")
+                logger.info("\n所有变量列表 (All Variables):")
+                for i, col in enumerate(sorted(data_loader.df.columns), 1):
+                    logger.info(f"  {i:4d}. {col}")
+                logger.info("=" * 80)
+
+            logger.info("Checking raw data for soil2D variables...")
+            for key, value in raw_data.items():
+                if 'soil' in key.lower() and '2d' in key.lower():
+                    if isinstance(value, pd.Series):
+                        non_zero_count = 0
+                        total_items = len(value)
+                        for item in value:
+                            if isinstance(item, (list, tuple, np.ndarray)):
+                                if isinstance(item, np.ndarray):
+                                    non_zero_count += np.count_nonzero(item)
+                                else:
+                                    for sub_item in item:
+                                        if isinstance(sub_item, (list, tuple, np.ndarray)):
+                                            if isinstance(sub_item, np.ndarray):
+                                                non_zero_count += np.count_nonzero(sub_item)
+                                            else:
+                                                non_zero_count += sum(1 for x in sub_item if x != 0)
+                                        else:
+                                            non_zero_count += 1 if sub_item != 0 else 0
+                            else:
+                                non_zero_count += 1 if item != 0 else 0
+                        logger.info(f"  Raw {key}: total items={total_items}, non-zero count={non_zero_count}")
+                    else:
+                        logger.info(f"  Raw {key}: type={type(value)}")
+
+            if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
+                verify_locations(data_loader.df, "All the data")
+
+            logger.info("Preprocessing data...")
+            preprocessed_data = data_loader.preprocess_data()
+            logger.info("Data preprocessed successfully.")
+            data_info = data_loader.get_data_info()
+            logger.info("Checking preprocessed data for soil2D variables...")
+            if preprocessed_data is not None:
+                for key, value in preprocessed_data.items():
+                    if 'soil' in key.lower() and '2d' in key.lower():
+                        if isinstance(value, (np.ndarray, torch.Tensor)):
+                            non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
+                            logger.info(f"  Preprocessed {key}: shape={value.shape}, non-zero count={non_zero_count}")
+                        else:
+                            logger.info(f"  Preprocessed {key}: type={type(value)}")
+            else:
+                logger.warning("Preprocessed data is None, skipping check.")
+
+            logger.info("Normalizing data...")
+            if normalization_method == 'group':
+                normalized_data = data_loader.normalize_data()
+                logger.info("Applied group normalization (same as original system)")
+            elif normalization_method == 'individual':
+                normalized_data = data_loader.normalize_data_individual()
+                logger.info("Applied individual normalization to all variables")
+                logger.info("Checking data after individual normalization for soil2D variables...")
+                for key, value in normalized_data.items():
+                    if 'soil' in key.lower() and '2d' in key.lower():
+                        if isinstance(value, (np.ndarray, torch.Tensor)):
+                            non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
+                            logger.info(f"  After Individual Normalization {key}: shape={value.shape}, non-zero count={non_zero_count}")
+                        else:
+                            logger.info(f"  After Individual Normalization {key}: type={type(value)}")
+            else:
+                normalized_data = data_loader.normalize_data_hybrid(
+                    use_individual_for=['scalar', 'pft_1d', 'soil_2d', 'y_scalar', 'y_pft_1d', 'y_soil_2d'],
+                    group_soil_vars=['sminn_vr', 'smin_no3_vr', 'smin_nh4_vr']
+                )
+                logger.info("Applied hybrid normalization: individual for most variables, group for soil minerals variables")
+                if 'xsmrpool_loss_weight' not in config.__dict__:
+                    config.xsmrpool_loss_weight = 2.0
+                if 'soil_mineral_loss_weight' not in config.__dict__:
+                    config.soil_mineral_loss_weight = 1.5
+
+            logger.info("Data normalized successfully.")
+            logger.info("Checking normalized data for soil2D variables...")
             for key, value in normalized_data.items():
                 if 'soil' in key.lower() and '2d' in key.lower():
                     if isinstance(value, (np.ndarray, torch.Tensor)):
                         non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
-                        logger.info(f"  After Individual Normalization {key}: shape={value.shape}, non-zero count={non_zero_count}")
+                        logger.info(f"  Normalized {key}: shape={value.shape}, non-zero count={non_zero_count}")
                     else:
-                        logger.info(f"  After Individual Normalization {key}: type={type(value)}")
-        else:  # hybrid
-            normalized_data = data_loader.normalize_data_hybrid(
-                use_individual_for=['scalar', 'pft_1d', 'soil_2d', 'y_scalar', 'y_pft_1d', 'y_soil_2d'],
-                group_soil_vars=['sminn_vr', 'smin_no3_vr', 'smin_nh4_vr']
-            )
-            logger.info("Applied hybrid normalization: individual for most variables, group for soil minerals variables")
+                        logger.info(f"  Normalized {key}: type={type(value)}")
 
-            # Add xsmrpool-specific loss weighting
-            if 'xsmrpool_loss_weight' not in config.__dict__:
-                config.xsmrpool_loss_weight = 2.0  # Increase weight for xsmrpool
-            if 'soil_mineral_loss_weight' not in config.__dict__:
-                config.soil_mineral_loss_weight = 1.5  # Increase weight for soil minerals
-        logger.info("Data normalized successfully.")
-        # Log details of normalized data for soil2D variables
-        logger.info("Checking normalized data for soil2D variables...")
-        for key, value in normalized_data.items():
-            if 'soil' in key.lower() and '2d' in key.lower():
-                if isinstance(value, (np.ndarray, torch.Tensor)):
-                    non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
-                    logger.info(f"  Normalized {key}: shape={value.shape}, non-zero count={non_zero_count}")
-                else:
-                    logger.info(f"  Normalized {key}: type={type(value)}")
-        # Split data
-        logger.info("Splitting data into train and test sets...")
-        split_data = data_loader.split_data(normalized_data)
-        logger.info("Data split successfully.")
+            logger.info("Splitting data into train and test sets...")
+            split_data = data_loader.split_data(normalized_data)
+            normalized_scalers = normalized_data['scalers']
+            logger.info("Data split successfully.")
 
-        # Verify locations in training and validation data
-        if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
-            # Get indices used for training and validation
-            train_indices = data_loader.train_indices
-            test_indices = data_loader.test_indices
-            
-            # Extract training and validation dataframes
-            train_df = data_loader.df.iloc[train_indices]
-            val_df = data_loader.df.iloc[test_indices]
-            
-            # Verify locations
-            verify_locations(train_df, "Training data")
-            verify_locations(val_df, "Validation data")
-        else:
-            logger.warning("Cannot verify training/validation locations: loader does not have a DataFrame attribute 'df'")
+            if hasattr(data_loader, 'df') and isinstance(data_loader.df, pd.DataFrame):
+                train_indices = data_loader.train_indices
+                test_indices = data_loader.test_indices
+                train_df = data_loader.df.iloc[train_indices]
+                val_df = data_loader.df.iloc[test_indices]
+                verify_locations(train_df, "Training data")
+                verify_locations(val_df, "Validation data")
+            else:
+                logger.warning("Cannot verify training/validation locations: loader does not have a DataFrame attribute 'df'")
 
-        # Log details of split data for soil2D variables
-        logger.info("Checking train data for soil2D variables...")
+            logger.info("Checking train data for soil2D variables...")
+            for key, value in split_data['train'].items():
+                if 'soil' in key.lower() and '2d' in key.lower():
+                    if isinstance(value, (np.ndarray, torch.Tensor)):
+                        non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
+                        logger.info(f"  Train {key}: shape={value.shape}, non-zero count={non_zero_count}")
+                    else:
+                        logger.info(f"  Train {key}: type={type(value)}")
+            logger.info("Checking test data for soil2D variables...")
+            for key, value in split_data['test'].items():
+                if 'soil' in key.lower() and '2d' in key.lower():
+                    if isinstance(value, (np.ndarray, torch.Tensor)):
+                        non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
+                        logger.info(f"  Test {key}: shape={value.shape}, non-zero count={non_zero_count}")
+                    else:
+                        logger.info(f"  Test {key}: type={type(value)}")
 
-        for key, value in split_data['train'].items():
-            if 'soil' in key.lower() and '2d' in key.lower():
-                if isinstance(value, (np.ndarray, torch.Tensor)):
-                    non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
-                    logger.info(f"  Train {key}: shape={value.shape}, non-zero count={non_zero_count}")
-                else:
-                    logger.info(f"  Train {key}: type={type(value)}")
-        logger.info("Checking test data for soil2D variables...")
-        for key, value in split_data['test'].items():
-            if 'soil' in key.lower() and '2d' in key.lower():
-                if isinstance(value, (np.ndarray, torch.Tensor)):
-                    non_zero_count = np.count_nonzero(value) if isinstance(value, np.ndarray) else torch.count_nonzero(value).item()
-                    logger.info(f"  Test {key}: shape={value.shape}, non-zero count={non_zero_count}")
-                else:
-                    logger.info(f"  Test {key}: type={type(value)}")
-        
-        # print(f"Training samples: {train_data['time_series'].shape[0]}")
-        # print(f"Validation/Evaluation samples: {test_data['time_series'].shape[0]}")
-        
-        # Debug print for pft_param
-        # if 'pft_param' in train_data:
-        #     print('[DEBUG] pft_param shape (train):', train_data['pft_param'].shape)
-        # else:
-        #     print('[DEBUG] pft_param not found in train split!')
-        # if 'pft_param' in test_data:
-        #     print('[DEBUG] pft_param shape (test):', test_data['pft_param'].shape)
-        # else:
-        #     print('[DEBUG] pft_param not found in test split!')
+            if use_preprocessed_cache and cache_file_paths is not None and cache_fingerprint is not None:
+                save_preprocessed_cache(
+                    cache_file_paths,
+                    fingerprint=cache_fingerprint,
+                    manifest=cache_manifest,
+                    split_data=split_data,
+                    scalers=normalized_scalers,
+                    data_info=data_info,
+                )
 
-        # Debug: Print train_data keys and check for y_scalar
-        # print('DEBUG: train_data keys:', train_data.keys())
-        # print('DEBUG: y_scalar in train_data:', 'y_scalar' in train_data)
+        if args.preprocessed_cache_only or env_flag_enabled('PREPROCESSED_CACHE_ONLY'):
+            if use_preprocessed_cache and cache_file_paths is not None:
+                logger.info(
+                    "Preprocessed cache ready at %s",
+                    cache_file_paths['tensors'],
+                )
+            else:
+                logger.warning(
+                    "preprocessed-cache-only requested but cache is not enabled; "
+                    "use --use-preprocessed-cache or USE_PREPROCESSED_CACHE=1"
+                )
+            return {
+                'status': 'ok',
+                'preprocessed_cache_only': True,
+                'cache_tensors': str(cache_file_paths['tensors']) if cache_file_paths else None,
+                'train_samples': int(split_data['train']['time_series'].shape[0]),
+                'test_samples': int(split_data['test']['time_series'].shape[0]),
+            }
 
         # Create CNP model
         logger.info("Creating CNP model...")
@@ -1231,7 +1330,7 @@ def main():
             model,
             split_data['train'],
             split_data['test'],
-            normalized_data['scalers'],
+            normalized_scalers,
             data_info
         )
         

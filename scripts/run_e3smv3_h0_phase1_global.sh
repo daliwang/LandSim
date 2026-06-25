@@ -33,6 +33,9 @@ echo "=== E3SMv3_h0 Phase 1: global training + base restart ==="
 echo "  DATA_PATHS=$DATA_PATHS"
 echo "  VARIABLE_LIST=$VARIABLE_LIST"
 echo "  CONFIG_GLOBAL=$CONFIG_GLOBAL"
+echo "  TRAINING_BATCH_SIZE=$TRAINING_BATCH_SIZE"
+echo "  USE_PREPROCESSED_CACHE=$USE_PREPROCESSED_CACHE"
+echo "  PREPROCESSED_CACHE_DIR=$PREPROCESSED_CACHE_DIR"
 echo "  PHASE1_INFERENCE_EXTRA_FLAGS=$PHASE1_INFERENCE_EXTRA_FLAGS"
 
 if [[ -n "${NATVEG_RUN_DIR:-}" ]]; then
@@ -49,6 +52,7 @@ else
     --variable-list "$VARIABLE_LIST" \
     --data-paths "$DATA_PATHS" \
     --file-pattern "$FILE_PATTERN" \
+    --batch-size "${TRAINING_BATCH_SIZE}" \
     --output-dir cnp_results \
     --output-dir-suffix "$PHASE1_SUFFIX"
   t1=$(date +%s)

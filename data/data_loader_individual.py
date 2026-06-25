@@ -8,9 +8,11 @@ using individual scalers for each variable to prevent range compression.
 import os
 import glob
 import logging
+import time
 import numpy as np
 import pandas as pd
 import torch
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Any, Optional
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler
 from sklearn.utils import shuffle
@@ -23,6 +25,26 @@ from config.training_config import DataConfig, PreprocessingConfig
 from data.individual_scaler_manager import IndividualScalerManager
 
 logger = logging.getLogger(__name__)
+
+
+def _read_data_file(file_path: Path) -> Tuple[Path, Optional[pd.DataFrame], Optional[str]]:
+    """Load one pickle or parquet file (thread-safe for parallel I/O)."""
+    try:
+        path_str = str(file_path)
+        if path_str.endswith('.pkl'):
+            df_chunk = pd.read_pickle(file_path)
+        elif path_str.endswith('.parquet'):
+            df_chunk = pd.read_parquet(file_path)
+        else:
+            try:
+                df_chunk = pd.read_pickle(file_path)
+            except Exception:
+                df_chunk = pd.read_parquet(file_path)
+        if not isinstance(df_chunk, pd.DataFrame):
+            return file_path, None, "File did not contain a DataFrame"
+        return file_path, df_chunk, None
+    except Exception as exc:
+        return file_path, None, str(exc)
 
 
 class DataLoaderIndividual:
@@ -124,6 +146,67 @@ class DataLoaderIndividual:
                 return col
         return None
 
+    def _resolve_load_workers(self, num_files: int) -> int:
+        """Choose thread count for parallel file reads."""
+        configured = getattr(self.data_config, 'load_workers', None)
+        if configured is not None:
+            return max(1, int(configured))
+        if num_files <= 1:
+            return 1
+        cpu_count = os.cpu_count() or 8
+        # Shared filesystems (e.g. proj-shared) often saturate below 16 concurrent readers.
+        return min(num_files, 8, max(4, cpu_count // 2))
+
+    def _load_files_sequential(self, files: List[Path]) -> List[pd.DataFrame]:
+        df_list: List[pd.DataFrame] = []
+        total_files = len(files)
+        for idx, file_path in enumerate(files, 1):
+            logger.info(f"Loading file {idx}/{total_files}: {file_path.name}")
+            _, df_chunk, err = _read_data_file(file_path)
+            if err:
+                logger.error(f"Failed to load {file_path}: {err}")
+                continue
+            df_list.append(df_chunk)
+            logger.info(
+                f"Loaded {len(df_chunk)} samples from {file_path.name} "
+                f"(total samples so far: {sum(len(df) for df in df_list)})"
+            )
+        return df_list
+
+    def _load_files_parallel(self, files: List[Path], workers: int) -> List[pd.DataFrame]:
+        total_files = len(files)
+        results: List[Optional[pd.DataFrame]] = [None] * total_files
+        index_by_path = {path: idx for idx, path in enumerate(files)}
+        t0 = time.perf_counter()
+        logger.info(f"Loading {total_files} files with {workers} parallel workers...")
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_read_data_file, path): path for path in files}
+            completed = 0
+            for future in as_completed(futures):
+                file_path = futures[future]
+                idx = index_by_path[file_path]
+                _, df_chunk, err = future.result()
+                completed += 1
+                if err:
+                    logger.error(f"Failed to load {file_path}: {err}")
+                else:
+                    results[idx] = df_chunk
+                if completed == 1 or completed % 50 == 0 or completed == total_files:
+                    loaded_samples = sum(len(df) for df in results if df is not None)
+                    logger.info(
+                        f"Loaded {completed}/{total_files} files "
+                        f"({loaded_samples} samples so far)"
+                    )
+
+        elapsed = time.perf_counter() - t0
+        df_list = [df for df in results if df is not None]
+        logger.info(
+            f"Parallel file load finished in {elapsed:.1f}s "
+            f"({len(df_list)}/{total_files} files ok)"
+        )
+        return df_list
+
     def load_data(self) -> pd.DataFrame:
         """Load data from configured paths and patterns."""
         df_list = []
@@ -159,30 +242,11 @@ class DataLoaderIndividual:
                 files = files[:self.data_config.max_files]
                 logger.info(f"Limited to {len(files)} files due to max_files={self.data_config.max_files}")
             
-            # Load each file
-            total_files = len(files)
-            for idx, file_path in enumerate(files, 1):
-                try:
-                    logger.info(f"Loading file {idx}/{total_files}: {file_path.name}")
-                    # Check file extension and use appropriate loading method
-                    if str(file_path).endswith('.pkl'):
-                        df_chunk = pd.read_pickle(file_path)
-                    elif str(file_path).endswith('.parquet'):
-                        df_chunk = pd.read_parquet(file_path)
-                    else:
-                        # Try pickle first, then parquet as fallback
-                        try:
-                            df_chunk = pd.read_pickle(file_path)
-                        except:
-                            df_chunk = pd.read_parquet(file_path)
-                    
-                    # Load all files - zeros are valid data in soil science
-                    df_list.append(df_chunk)
-                    logger.info(f"Loaded {len(df_chunk)} samples from {file_path.name} (total samples so far: {sum(len(df) for df in df_list)})")
-                        
-                except Exception as e:
-                    logger.error(f"Failed to load {file_path}: {e}")
-                    continue
+            workers = self._resolve_load_workers(len(files))
+            if workers <= 1:
+                df_list.extend(self._load_files_sequential(files))
+            else:
+                df_list.extend(self._load_files_parallel(files, workers))
         
         if not df_list:
             raise ValueError("No data files could be loaded")

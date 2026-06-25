@@ -399,6 +399,13 @@ def run_inference_all(
         config.data_config.data_paths = parsed_paths
     if file_pattern is not None:
         config.data_config.file_pattern = file_pattern
+    load_workers_env = os.environ.get('LOAD_WORKERS')
+    if load_workers_env is not None:
+        try:
+            config.data_config.load_workers = int(load_workers_env)
+            logging.info(f"Using parallel data load workers: {int(load_workers_env)}")
+        except Exception as e:
+            logging.warning(f"Failed to apply LOAD_WORKERS={load_workers_env}: {e}")
     # If not explicitly set, try training run's cnp_config.json data_config (same paths as training)
     if (data_paths is None or file_pattern is None) and use_training_config:
         data_cfg = _load_training_data_config_from_config(Path(model_path))

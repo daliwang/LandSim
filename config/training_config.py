@@ -109,6 +109,8 @@ class DataConfig:
 
     # File loading limits (for testing)
     max_files: Optional[int] = None  # Maximum number of files to load (None = all files)
+    # Parallel pickle/parquet reads: None = auto when multiple files; 1 = sequential; N>1 = thread pool size
+    load_workers: Optional[int] = None
     
     # New parameter for filtering NaN in time series
     filter_time_series_nan: bool = False
