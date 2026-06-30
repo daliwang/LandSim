@@ -1,0 +1,132 @@
+{
+  "_description": "Phase 2 tropical (full band ±23.5°): emphasize solutionp_vr, occlp_vr, labilep_vr. Non-P soil2d at 0.1; secondp/primp moderate. Train from Phase 1 checkpoint. Example: source config/e3smv3_h0_env.sh && export USE_PREPROCESSED_CACHE=1 && python train_cnp_model.py --training-config-json config/training_config_e3smv3_h0_phase2_tropical_p3focus.json --variable-list CNP_IO_e3smv3_h0.txt --use-preprocessed-cache --tropical-only --tropical-lat-range -23.5,23.5 --output-dir-suffix e3smv3_h0_phase2_tropical_p3focus",
+  "training_hyperparameters": {
+    "num_epochs": 150,
+    "batch_size": 128,
+    "learning_rate": 5e-5,
+    "optimizer_type": "adamw",
+    "weight_decay": 0.01,
+    "use_scheduler": true,
+    "scheduler_type": "cosine",
+    "scheduler_step_size": 10,
+    "scheduler_gamma": 0.1,
+    "xsmrpool_loss_weight": 8,
+    "litter_c_loss_weight": 0.5,
+    "litter_n_loss_weight": 0.5,
+    "litter_p_loss_weight": 2,
+    "scalar_loss_weight": 0.05,
+    "vector_loss_weight": 0.35,
+    "matrix_loss_weight": 3.5
+  },
+  "reproducibility_config": {
+    "random_seed": 42,
+    "strict_determinism": false,
+    "train_split": 0.8,
+    "normalization": "individual",
+    "dropout_p": 0.12
+  },
+  "data_filtering_config": {
+    "tropical_only": true,
+    "tropical_lat_range": [-23.5, 23.5],
+    "longitudes_to_drop": [0, 358.75],
+    "natveg_only": true,
+    "natveg_filter_before_split": false
+  },
+  "variable_weights": {
+    "pft1d_weights": {
+      "cpool": 2,
+      "npool": 2,
+      "ppool": 3,
+      "totvegc": 2,
+      "leafc": 2,
+      "leafn": 2,
+      "leafp": 3,
+      "leafc_storage": 1,
+      "leafn_storage": 1,
+      "leafp_storage": 2,
+      "deadstemc": 2,
+      "deadstemn": 2,
+      "deadstemp": 3,
+      "frootc": 1,
+      "frootn": 1,
+      "frootp": 2,
+      "frootc_storage": 1,
+      "frootn_storage": 1,
+      "frootp_storage": 1,
+      "tlai": 1
+    },
+    "soil2d_weights": {
+      "solutionp_vr": 90,
+      "occlp_vr": 75,
+      "labilep_vr": 70,
+      "secondp_vr": 30,
+      "primp_vr": 30,
+      "cwdc_vr": 0.1,
+      "cwdn_vr": 0.1,
+      "cwdp_vr": 0.1,
+      "litr2c_vr": 0.1,
+      "litr2p_vr": 0.1,
+      "litr2n_vr": 0.1,
+      "litr3c_vr": 0.1,
+      "litr3n_vr": 0.1,
+      "litr3p_vr": 0.1,
+      "soil1c_vr": 0.1,
+      "soil1n_vr": 0.1,
+      "soil1p_vr": 0.1,
+      "soil2c_vr": 0.1,
+      "soil2n_vr": 0.1,
+      "soil2p_vr": 0.1,
+      "soil3c_vr": 0.1,
+      "soil3n_vr": 0.1,
+      "soil3p_vr": 0.1,
+      "soil4c_vr": 0.1,
+      "soil4n_vr": 0.1,
+      "soil4p_vr": 0.1
+    },
+    "scalar_weights": {
+      "GPP": 0.05,
+      "NPP": 0.05,
+      "AR": 0.05,
+      "HR": 0.05
+    }
+  },
+  "tail_aware_config": {
+    "loss": "log1p_huber",
+    "epsilon": 1e-8,
+    "huber_delta": 0.7
+  },
+  "tail_aware_weights": {
+    "solutionp_vr": 90,
+    "occlp_vr": 75,
+    "labilep_vr": 70,
+    "secondp_vr": 30,
+    "primp_vr": 30,
+    "cpool": 2,
+    "npool": 2,
+    "ppool": 3,
+    "leafp": 3,
+    "labilep": 8
+  },
+  "pft_mask_config": {
+    "mask_absent_pfts": true,
+    "pft_presence_threshold": 0
+  },
+  "pft_zero_sparsity_config": {
+    "weight": 1,
+    "threshold": 1e-8
+  },
+  "pft_zero_sparsity_weights": {
+    "cpool": 2,
+    "deadstemc": 1,
+    "deadcrootc": 1,
+    "livestemc": 1,
+    "livecrootc": 1
+  },
+  "pft1d_activation_overrides": {
+    "cpool": "abs",
+    "deadstemc": "abs",
+    "deadcrootc": "abs",
+    "livestemc": "abs",
+    "livecrootc": "abs"
+  }
+}

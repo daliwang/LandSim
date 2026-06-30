@@ -598,3 +598,92 @@ python -u scripts/ai_predictions_to_restart.py \
   --output "$TESNORTH_RUN/updated_restart_normal_spinup_uELM_NORTHERA5_ERA5REF_I1850uELMCNPRDCTCBC.elm.r.0021-01-01-00000.nc" \
   --variable-list "$TESNORTH_VAR_LIST" \
   2>&1 | tee "$TESNORTH_RUN/ai_predictions_to_restart.kdtree.log"
+
+
+# --- 06/30/2026: E3SMv3_h0 Phase 2 tropical P3-focus retrain (solutionp/occlp/labilep) ---
+# Report: docs/REPORT_E3SM_TRENDY_TROPICAL_P_VARIABLES_COMPARISON.md
+# Config: config/training_config_e3smv3_h0_phase2_tropical_p3focus.json
+# Cache:  TrainingData/E3SMv3_h0/.preprocessed_cache/ (tropical fingerprint c138bda0...)
+# NOTE:   --tropical-lat-range must use = form (e.g. "-23.5,23.5"); bare "-23.5,23.5" fails argparse.
+
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+source config/e3smv3_h0_env.sh
+
+export USE_PREPROCESSED_CACHE=1
+export PREPROCESSED_CACHE_DIR="$E3SM_DATA_DIR/.preprocessed_cache"
+export BASE_RESTART=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global/updated_restart_base.nc
+export PHASE2_SUFFIX=e3smv3_h0_phase2_tropical_p3focus
+
+# (Optional) rebuild tropical cache if filters or IO list change:
+# bash scripts/build_e3smv3_preprocessed_cache.sh tropical
+
+nohup python train_cnp_model.py \
+  --training-config-json config/training_config_e3smv3_h0_phase2_tropical_p3focus.json \
+  --variable-list CNP_IO_e3smv3_h0.txt \
+  --data-paths "$DATA_PATHS" \
+  --file-pattern "$FILE_PATTERN" \
+  --use-preprocessed-cache \
+  --preprocessed-cache-dir "$PREPROCESSED_CACHE_DIR" \
+  --tropical-only \
+  "--tropical-lat-range=-23.5,23.5" \
+  --batch-size "${TRAINING_BATCH_SIZE:-1024}" \
+  --output-dir cnp_results \
+  --output-dir-suffix "$PHASE2_SUFFIX" \
+  > logs/e3smv3_phase2_p3focus_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# Monitor:
+# tail -f logs/e3smv3_phase2_p3focus_*.log
+
+# After training — tropical inference + restart (set run dir from latest timestamp):
+# export PHASE2_RUN_DIR=$(ls -td cnp_results/run_*_e3smv3_h0_phase2_tropical_p3focus | head -1)
+#
+# python scripts/run_inference_all.py \
+#   --model "$PHASE2_RUN_DIR/cnp_model.pt" \
+#   --output-dir "$PHASE2_RUN_DIR/cnp_inference_tropical_only" \
+#   --variable-list CNP_IO_e3smv3_h0.txt \
+#   --no-derive-np-from-c \
+#   --inference-batch-size 4096
+#
+# python scripts/ai_predictions_to_netcdf.py \
+#   --ai-predictions "$PHASE2_RUN_DIR/cnp_inference_tropical_only/cnp_predictions" \
+#   --variable-list CNP_IO_e3smv3_h0.txt \
+#   --output "$PHASE2_RUN_DIR/comparison_results/ai_predictions_tropical_only.nc"
+#
+# python scripts/ai_predictions_to_restart.py \
+#   --ai-predictions "$PHASE2_RUN_DIR/comparison_results/ai_predictions_tropical_only.nc" \
+#   --restart-file "$BASE_RESTART" \
+#   --output "$PHASE2_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc" \
+#   --variable-list CNP_IO_e3smv3_h0.txt \
+#   --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
+#   "--tropical-lat-range=-23.5,23.5"
+
+
+# --- 06/30/2026: E3SMv3_h0 Phase 2 tropical P3-moderate (baseline + ~1.4x on 3P) ---
+# Rationale: p3focus hurt all 5P; keep baseline litter/soil/PFT weights (docs/PHASE2_P3FOCUS_WEIGHTING_ANALYSIS.md §6.2)
+# Config: config/training_config_e3smv3_h0_phase2_tropical_p3moderate.json
+# Weights vs baseline: solutionp 50→72, occlp 42→58, labilep 28→42, secondp 24→28, primp 28→32; all else unchanged
+
+cd /mnt/proj-shared/AI4BGC_7xw/AI4BGC
+source config/e3smv3_h0_env.sh
+
+export USE_PREPROCESSED_CACHE=1
+export PREPROCESSED_CACHE_DIR="$E3SM_DATA_DIR/.preprocessed_cache"
+export PHASE2_SUFFIX=e3smv3_h0_phase2_tropical_p3moderate
+
+nohup python train_cnp_model.py \
+  --training-config-json config/training_config_e3smv3_h0_phase2_tropical_p3moderate.json \
+  --variable-list CNP_IO_e3smv3_h0.txt \
+  --data-paths "$DATA_PATHS" \
+  --file-pattern "$FILE_PATTERN" \
+  --use-preprocessed-cache \
+  --preprocessed-cache-dir "$PREPROCESSED_CACHE_DIR" \
+  --tropical-only \
+  "--tropical-lat-range=-23.5,23.5" \
+  --batch-size "${TRAINING_BATCH_SIZE:-1024}" \
+  --output-dir cnp_results \
+  --output-dir-suffix "$PHASE2_SUFFIX" \
+  > logs/e3smv3_phase2_p3moderate_$(date +%Y%m%d_%H%M%S).log 2>&1 &
+
+# Monitor:
+# tail -f logs/e3smv3_phase2_p3moderate_*.log
+# export PHASE2_RUN_DIR=$(ls -td cnp_results/run_*_e3smv3_h0_phase2_tropical_p3moderate | head -1)

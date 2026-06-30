@@ -18,7 +18,24 @@ export FILE_PATTERN="${FILE_PATTERN:-training_data_batch_*.pkl}"
 # Phase 1 reference: cnp_results/run_20260315_113900_phase1_global
 export CONFIG_GLOBAL="${CONFIG_GLOBAL:-config/training_config_experiment_3_global_natveg_improved.json}"
 # Phase 2 reference: cnp_results/run_20260315_175250_phase2_tropical
-export CONFIG_TROPICAL="${CONFIG_TROPICAL:-config/training_config_phase2_tropical_soilp_only.json}"
+export CONFIG_TROPICAL="${CONFIG_TROPICAL:-config/training_config_e3smv3_h0_phase2_tropical.json}"
+
+# Tropical latitude band (same for training, inference overlay, bias correction, restart)
+export TROPICAL_LAT_MIN="${TROPICAL_LAT_MIN:--23.5}"
+export TROPICAL_LAT_MAX="${TROPICAL_LAT_MAX:-23.5}"
+export TROPICAL_LAT_RANGE="${TROPICAL_LAT_RANGE:-${TROPICAL_LAT_MIN},${TROPICAL_LAT_MAX}}"
+
+# Phase 3 / eval region boxes (lon 0–360). Amazon lat capped at 10°N (not full tropical band).
+export AMAZON_LAT_MIN="${AMAZON_LAT_MIN:--23.5}"
+export AMAZON_LAT_MAX="${AMAZON_LAT_MAX:-10}"
+export AMAZON_REGION_CONFIG="${AMAZON_REGION_CONFIG:-config/training_config_e3smv3_h0_amazon_5p_box.json}"
+export AFRICA_REGION_CONFIG="${AFRICA_REGION_CONFIG:-config/training_config_e3smv3_h0_africa_5p_box.json}"
+export AMAZON_BOX="${AMAZON_BOX:-${AMAZON_LAT_MIN},${AMAZON_LAT_MAX},270,330}"
+export AFRICA_BOX="${AFRICA_BOX:-${TROPICAL_LAT_MIN},${TROPICAL_LAT_MAX},0,30}"
+
+# Optional Phase 2 variants (full tropical band)
+export CONFIG_TROPICAL_P3FOCUS="${CONFIG_TROPICAL_P3FOCUS:-config/training_config_e3smv3_h0_phase2_tropical_p3focus.json}"
+export CONFIG_TROPICAL_P3MODERATE="${CONFIG_TROPICAL_P3MODERATE:-config/training_config_e3smv3_h0_phase2_tropical_p3moderate.json}"
 
 # --- ELM restart template (Phase 1 base restart) ---
 export RESTART_TEMPLATE="${RESTART_TEMPLATE:-/mnt/proj-shared/AI4BGC_7xw/AI4BGC/ELM_data/E3SMV3_025/20240214.lndr025_trigrid_top_bgc.IcoswISC30E3r5.chrysalis.adsp.elm.r.0021-01-01-00000.nc}"
@@ -37,8 +54,9 @@ export PHASE3_SUFFIX="${PHASE3_SUFFIX:-e3smv3_h0_phase3_tworegions}"
 
 # --- Training options (H200-friendly; global default in train_cnp_model.py remains 128) ---
 export TRAINING_BATCH_SIZE="${TRAINING_BATCH_SIZE:-1024}"
-# Parallel pickle reads for ~396 E3SM batch files (DataLoaderIndividual)
-export LOAD_WORKERS="${LOAD_WORKERS:-8}"
+# Parallel pickle reads for ~396 E3SM batch files (DataLoaderIndividual).
+# Benchmark on proj-shared (80 files, Jun 2026): 8=190s, 4=166s, 2=161s — use 4 (2 is ~3% faster).
+export LOAD_WORKERS="${LOAD_WORKERS:-4}"
 
 # Preprocessed tensor cache (opt-in): skips ~20 min preprocess+normalize on reruns
 export USE_PREPROCESSED_CACHE="${USE_PREPROCESSED_CACHE:-0}"

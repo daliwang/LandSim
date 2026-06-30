@@ -17,8 +17,19 @@ Use git branch **`e3smv3case`** (includes E3SM-specific training fixes, commit `
 | Phase | Run directory | Notes |
 |-------|---------------|-------|
 | Phase 1 global | `cnp_results/run_20260623_172201_e3smv3_h0_phase1_global` | 120 epochs, ~292 min train; inference with `--derive-np-from-c --inference-batch-size 4096` |
-| Phase 2 tropical | `cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical` | 150 epochs, ~141 min train; tropical inference ~105k cells |
+| Phase 2 tropical (baseline) | `cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical` | **Recommended for Phase 3** — 150 epochs, tropical inference ~105k cells |
+| Phase 2 tropical (P3-focus) | `cnp_results/run_20260630_130344_e3smv3_h0_phase2_tropical_p3focus` | Failed experiment; [PHASE2_P3FOCUS_WEIGHTING_ANALYSIS.md](PHASE2_P3FOCUS_WEIGHTING_ANALYSIS.md) |
+| Phase 2 tropical (P3-moderate) | `cnp_results/run_20260630_145817_e3smv3_h0_phase2_tropical_p3moderate` | Moderate 3P boost; still below baseline — see weighting analysis |
 | Phase 3 two-region | `cnp_results/run_20260624_153307_e3smv3_h0_phase3_tworegions` | ~54 min total; full-grid inference 395784 cells (batch 4096) → Amazon/Africa v3 → merge |
+
+**Strategy reports (Jun 2026)**
+
+| Report | Topic |
+|--------|--------|
+| [REPORT_E3SM_SENSITIVE_P_ELMS_SCALE_R2_PHASE3.md](REPORT_E3SM_SENSITIVE_P_ELMS_SCALE_R2_PHASE3.md) | ELM-sensitive P pools: R² vs magnitude, Phase 3 limits, mitigation |
+| [REPORT_E3SM_TRENDY_TROPICAL_P_VARIABLES_COMPARISON.md](REPORT_E3SM_TRENDY_TROPICAL_P_VARIABLES_COMPARISON.md) | E3SM vs Trendy tropical P distributions |
+| [PHASE2_P3FOCUS_WEIGHTING_ANALYSIS.md](PHASE2_P3FOCUS_WEIGHTING_ANALYSIS.md) | P3-focus / P3-moderate weight experiments |
+| [REPORT_E3SM_MODEL_CAPACITY_VS_GRID_SIZE.md](REPORT_E3SM_MODEL_CAPACITY_VS_GRID_SIZE.md) | Grid size vs transformer capacity |
 
 **Pipeline scripts and config**
 
@@ -31,10 +42,11 @@ Use git branch **`e3smv3case`** (includes E3SM-specific training fixes, commit `
 | `scripts/run_e3smv3_h0_phase3_tworegions.sh` | Phase 3 full-grid inference → v3 bias correction → merge → restart |
 | `scripts/run_e3smv3_h0_validation.sh` | Post-run validation and site comparisons |
 
-Training configs match the Trendy runs:
+Training configs match the Trendy runs, with E3SM-specific tropical latitude band **−23.5° to 23.5°** (same for Amazon and Africa; set in `config/e3smv3_h0_env.sh` as `TROPICAL_LAT_RANGE`):
 
 - Phase 1: `config/training_config_experiment_3_global_natveg_improved.json` (120 epochs)
-- Phase 2: `config/training_config_phase2_tropical_soilp_only.json` (150 epochs, tropical-only filter)
+- Phase 2: `config/training_config_e3smv3_h0_phase2_tropical.json` (150 epochs, tropical-only filter at ±23.5°)
+- Phase 3 bias correction: `config/training_config_e3smv3_h0_amazon_5p_box.json` (lat ±23.5°, lon 270–330°), `config/training_config_e3smv3_h0_africa_5p_box.json` (lat ±23.5°, lon 0–30°)
 
 ### E3SMv3_h0 vs Trendy variable list (`CNP_IO_e3smv3_h0.txt`)
 
@@ -192,7 +204,7 @@ export BASE_RESTART="$NATVEG_RUN_DIR/updated_restart_base.nc"
 
 ## 2. Phase 2 — tropical P-focused model + raw 5P restart
 
-**Goal:** Train tropical-only model; overwrite five soil P variables in \([-30°, 30°]\) on top of Phase 1 base restart.
+**Goal:** Train tropical-only model; overwrite five soil P variables in \([-23.5°, 23.5°]\) on top of Phase 1 base restart.
 
 **Inference:** `--no-derive-np-from-c --inference-batch-size 4096` (required — unbatched run OOM'd on ~105k tropical cells).
 
@@ -255,7 +267,7 @@ python scripts/ai_predictions_to_restart.py \
   --output "$PHASE2_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc" \
   --variable-list CNP_IO_e3smv3_h0.txt \
   --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
-  "--tropical-lat-range=-30,30"
+  "--tropical-lat-range=-23.5,23.5"
 ```
 
 **Outputs:** `comparison_results/ai_predictions_tropical_only.nc`, `updated_restart_phase2_tropical_5P_raw.nc`.
@@ -266,72 +278,36 @@ python scripts/ai_predictions_to_restart.py \
 
 ## 3. Phase 3 — two-region bias correction (regional_fit_v3)
 
-**Goal:** Match `run_20260512_083650_phase3_tworegions_(africa_improvement)`: Amazon v3 + Africa v3 + merge → global restart with bias-corrected 5P in tropics.
+**Goal:** Amazon v3 + Africa v3 + merge → global restart with bias-corrected 5P in tropics.
 
-**Inference:** full-grid with `--no-derive-np-from-c --inference-batch-size 4096` (same ~396k grid as Phase 1).
+**Inference seed (do not re-run full-grid Phase-2 inference):** symlink Phase 1 `cnp_inference_entire_dataset` (correct E3SM −180…180 coords), then overlay Phase 2 tropical `soil_2d_predictions` for the five P variables by `(lon, lat)` via `scripts/overlay_5p_by_coords.py`. Bias/merge scripts convert Amazon lon 270–330° when masking (−180…180 grids).
 
 ```bash
 source config/e3smv3_h0_env.sh
-export BASE_RESTART=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global/updated_restart_base.nc
+export PHASE1_RUN_DIR=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global
 export PHASE2_RUN_DIR=cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical
+export BASE_RESTART=$PHASE1_RUN_DIR/updated_restart_base.nc
 
 nohup bash scripts/run_e3smv3_h0_phase3_tworegions.sh \
   > logs/e3smv3_h0_phase3_$(date +%Y%m%d_%H%M%S).log 2>&1 &
 ```
 
-The Phase 3 script skips full-grid inference if `$RUN3_DIR/cnp_inference_entire_dataset/cnp_predictions` already exists.
+The script symlinks Phase 1 inference, overlays Phase 2 5P once (stamp: `cnp_predictions/.phase2_5p_overlay_done`), then runs bias correction + merge + restart.
 
-Manual steps (same as `docs/RERUN_PHASE2_PHASE3_NO_CNP_FIX.md` §3):
+Manual steps:
 
 ```bash
 export RUN3_DIR=cnp_results/run_${TS}_e3smv3_h0_phase3_tworegions
-mkdir -p "$RUN3_DIR"
+mkdir -p "$RUN3_DIR/analysis" "$RUN3_DIR/comparison_results"
 
-# 3.1 Full-grid inference (longest step; batched for ~396k E3SM gridcells)
-python scripts/run_inference_all.py \
-  --model "$PHASE2_RUN_DIR/cnp_predictions/model.pth" \
-  --output-dir "$RUN3_DIR/cnp_inference_entire_dataset" \
-  --variable-list CNP_IO_e3smv3_h0.txt \
-  --inference-full-grid \
-  --no-derive-np-from-c \
-  --inference-batch-size 4096
+ln -sfn "$(readlink -f "$PHASE1_RUN_DIR/cnp_inference_entire_dataset")" \
+  "$RUN3_DIR/cnp_inference_entire_dataset"
 
-# 3.2 Amazon v3 bias correction
-python scripts/apply_5p_bias_scale_correction.py \
-  --run-dir "$RUN3_DIR" \
-  --region-config-json config/training_config_amazon_5p_box.json \
-  --output-subdir soil_2d_predictions_5P_bias_corrected_amazon_v3 \
-  --regional-fit-v3
+python scripts/overlay_5p_by_coords.py \
+  --base-run-dir "$RUN3_DIR" \
+  --source-predictions "$PHASE2_RUN_DIR/cnp_inference_tropical_only/cnp_predictions"
 
-# 3.3 Africa v3 bias correction
-python scripts/apply_5p_bias_scale_correction.py \
-  --run-dir "$RUN3_DIR" \
-  --region-config-json config/training_config_africa_5p_box.json \
-  --output-subdir soil_2d_predictions_5P_bias_corrected_africa_v3 \
-  --regional-fit-v3
-
-# 3.4 Merge
-python scripts/merge_5p_bias_corrected_amazon_africa.py \
-  --run-dir "$RUN3_DIR" \
-  --amazon-subdir soil_2d_predictions_5P_bias_corrected_amazon_v3 \
-  --africa-subdir soil_2d_predictions_5P_bias_corrected_africa_v3 \
-  --output-subdir soil_2d_predictions_5P_bias_corrected_amazon_africa_v3 \
-  --output-filename-suffix _bias_corrected_amazon_africa_v3
-
-# 3.5 NetCDF + final restart
-python scripts/ai_predictions_to_netcdf.py \
-  --ai-predictions "$RUN3_DIR/cnp_inference_entire_dataset/cnp_predictions/" \
-  --soil-2d-bias-corrected-subdir soil_2d_predictions_5P_bias_corrected_amazon_africa_v3 \
-  --variable-list CNP_IO_e3smv3_h0.txt \
-  --output "$RUN3_DIR/comparison_results/ai_predictions_5P_bias_corrected_amazon_africa_v3.nc"
-
-python scripts/ai_predictions_to_restart.py \
-  --ai-predictions "$RUN3_DIR/comparison_results/ai_predictions_5P_bias_corrected_amazon_africa_v3.nc" \
-  --restart-file "$BASE_RESTART" \
-  --output "$RUN3_DIR/updated_restart_phase3_tworegions_5P_bias_corrected_amazon_africa_v3_tropical.nc" \
-  --variable-list CNP_IO_e3smv3_h0.txt \
-  --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
-  "--tropical-lat-range=-30,30"
+# Amazon / Africa v3 bias correction, merge, NetCDF, restart (same as script)
 ```
 
 **Final restart (Jun 2026 run):**  

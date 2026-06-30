@@ -156,11 +156,14 @@ The issue is **not** primarily “MinMax compresses E3SM differently.” Both us
 
 ## 5. Implications for Phase 2 tropical retrain
 
-1. **P-focus Phase 2** (`training_config_e3smv3_h0_phase2_tropical_p3focus.json`) — higher weights on `solutionp_vr`, `occlp_vr`, `labilep_vr` — targets the verified problem (distribution/weight mismatch), not missing scalars.
-2. **Use tropical preprocessed cache** (`c138bda0...`) for faster iteration on the same 75.8k filtered samples.
-3. **Tail-aware / log1p loss** for `solutionp_vr` remains appropriate given heavy-tail sensitivity in Trendy and outlier-driven scalers in E3SM.
-4. **Region upsampling** (Amazon 270–330°E, Africa 0–30°E) may help if site-level GT errors concentrate there.
-5. **Do not expect scalar restoration** to close the gap unless E3SM batches are regenerated with GPP/NPP/AR/HR; impact would likely be secondary.
+1. **P3-focus Phase 2** (`training_config_e3smv3_h0_phase2_tropical_p3focus.json`) — higher weights on `solutionp_vr`, `occlp_vr`, `labilep_vr` — targets the verified problem (distribution/weight mismatch), not missing scalars. **Run in progress (2026-06-30):** `run_20260630_130344_e3smv3_h0_phase2_tropical_p3focus`.
+2. **Weighting trade-offs:** P3-focus is more aggressive than Trendy (non-P soil2d at 0.1 vs moderate baseline weights). Theoretical risks and evaluation plan: [PHASE2_P3FOCUS_WEIGHTING_ANALYSIS.md](PHASE2_P3FOCUS_WEIGHTING_ANALYSIS.md).
+3. **Use tropical preprocessed cache** (`c138bda0...`) for faster iteration on the same 75.8k filtered samples.
+4. **Tail-aware / log1p loss** for `solutionp_vr` remains appropriate given heavy-tail sensitivity in Trendy and outlier-driven scalers in E3SM.
+5. **Region upsampling** (Amazon 270–330°E, Africa 0–30°E) may help if site-level GT errors concentrate there.
+6. **Do not expect scalar restoration** to close the gap unless E3SM batches are regenerated with GPP/NPP/AR/HR; impact would likely be secondary.
+7. **If P3-focus underperforms or hurts coupled pools:** fall back to baseline `training_config_e3smv3_h0_phase2_tropical.json` as-is for Phase 3.
+8. **Scale vs R² / ELM sensitivity:** see [REPORT_E3SM_SENSITIVE_P_ELMS_SCALE_R2_PHASE3.md](REPORT_E3SM_SENSITIVE_P_ELMS_SCALE_R2_PHASE3.md) — magnitude errors on `solutionp_vr` are not resolved by reweighting or standard Phase 3 v3 alone.
 
 ---
 
