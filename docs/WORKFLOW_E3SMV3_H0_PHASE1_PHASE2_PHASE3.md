@@ -4,6 +4,8 @@ This runbook repeats the three-phase workflow used for the Trendy reference runs
 
 Use git branch **`e3smv3case`** (includes E3SM-specific training fixes, commit `92473ed` or later).
 
+**Publication comparison:** [REPORT_TRENDY_VS_E3SMV3_THREE_PHASE_WORKFLOW_COMPARISON.md](./REPORT_TRENDY_VS_E3SMV3_THREE_PHASE_WORKFLOW_COMPARISON.md) — methods, metrics, and Phase 3 method divergence (Trendy hybrid vs E3SM spatial k).
+
 **Trendy reference runs**
 
 | Phase | Reference directory |
