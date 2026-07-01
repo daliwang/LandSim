@@ -317,6 +317,29 @@ Log: `logs/e3smv3_h0_phase3_20260624_153307.log`
 
 ---
 
+## 3b. Phase 3 — spatial learned-k for solutionp_vr (recommended for E3SM)
+
+**Goal:** Apply **spatial multiplicative correction** to `solutionp_vr` only in Amazon + Africa boxes; keep Phase 2 values for other 4P. Produces a tropical 5P restart without affine v3 bias correction.
+
+See [REPORT_E3SM_PHASE3_SPATIAL_LEARNED_K_SOLUTIONP.md](REPORT_E3SM_PHASE3_SPATIAL_LEARNED_K_SOLUTIONP.md) for diagnostics, calibration experiments, metrics, and site plots.
+
+```bash
+source config/e3smv3_h0_env.sh
+export PHASE1_RUN_DIR=cnp_results/run_20260623_172201_e3smv3_h0_phase1_global
+export PHASE2_RUN_DIR=cnp_results/run_20260624_092639_e3smv3_h0_phase2_tropical
+export BASE_RESTART=$PHASE1_RUN_DIR/updated_restart_base.nc
+
+bash scripts/run_e3smv3_h0_phase3_spatial_solutionp.sh
+```
+
+**Final restart (Jul 2026 run):**  
+`cnp_results/run_20260630_phase3_spatial_solutionp_e3smv3_h0/updated_restart_phase3_spatial_solutionp_tropical_5P.nc` (~54 GB)
+
+Fit / eval params live under Phase 2 run:  
+`run_20260624_092639_e3smv3_h0_phase2_tropical/analysis/solutionp_spatial_phase3_learned_params.json`
+
+---
+
 ## 4. Validation
 
 After all three phases complete:

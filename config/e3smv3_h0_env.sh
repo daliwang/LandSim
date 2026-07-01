@@ -44,6 +44,7 @@ export RESTART_TEMPLATE="${RESTART_TEMPLATE:-/mnt/proj-shared/AI4BGC_7xw/AI4BGC/
 export PHASE1_SUFFIX="${PHASE1_SUFFIX:-e3smv3_h0_phase1_global}"
 export PHASE2_SUFFIX="${PHASE2_SUFFIX:-e3smv3_h0_phase2_tropical}"
 export PHASE3_SUFFIX="${PHASE3_SUFFIX:-e3smv3_h0_phase3_tworegions}"
+export PHASE3_SPATIAL_SUFFIX="${PHASE3_SPATIAL_SUFFIX:-e3smv3_h0_phase3_spatial_solutionp}"
 
 # --- Optional: set these after each phase completes ---
 # export NATVEG_RUN_DIR=cnp_results/run_YYYYMMDD_HHMMSS_e3smv3_h0_phase1_global
