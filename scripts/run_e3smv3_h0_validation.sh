@@ -27,12 +27,37 @@ echo "  Phase1: $NATVEG_RUN_DIR"
 echo "  Phase2: $PHASE2_RUN_DIR"
 echo "  Phase3: $RUN3_DIR"
 
+find_validation_stats() {
+  local run_dir="$1"
+  for candidate in \
+    "$run_dir/validation_stats.csv" \
+    "$run_dir/analysis/validation_stats.csv" \
+    "$run_dir/cnp_inference_entire_dataset/validation_stats.csv"; do
+    if [[ -f "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # --- Training quality reports (Phase 1) ---
-if [[ -f "$NATVEG_RUN_DIR/cnp_predictions/test_metrics.csv" ]]; then
-  echo "Generating Phase 1 prediction quality report..."
+VALIDATION_STATS="$(find_validation_stats "$NATVEG_RUN_DIR" || true)"
+if [[ -z "${VALIDATION_STATS:-}" && -d "$NATVEG_RUN_DIR/cnp_inference_entire_dataset/cnp_predictions" ]]; then
+  echo "validation_stats.csv not found; generating with cnp_result_validationplot.py --stats-only ..."
+  python scripts/cnp_result_validationplot.py \
+    "$NATVEG_RUN_DIR/cnp_inference_entire_dataset" \
+    --stats-only --no-scatter --no-plot-loss || true
+  VALIDATION_STATS="$(find_validation_stats "$NATVEG_RUN_DIR" || true)"
+fi
+
+if [[ -n "${VALIDATION_STATS:-}" ]]; then
+  echo "Generating Phase 1 prediction quality report from $VALIDATION_STATS ..."
   python scripts/generate_prediction_quality_report.py \
-    --run-dir "$NATVEG_RUN_DIR" \
-    --input "$NATVEG_RUN_DIR/validation_stats.csv" || true
+    --input "$VALIDATION_STATS" \
+    --output-dir "$NATVEG_RUN_DIR/analysis" || true
+else
+  echo "Skipping prediction quality report (validation_stats.csv not found under $NATVEG_RUN_DIR)."
 fi
 
 # --- NPOOL/PPOOL per-PFT validation ---
@@ -68,7 +93,7 @@ EOF
 echo "5P pred-eval (Amazon + Africa)..."
 python scripts/compare_5p_gt_two_regions_inference.py pred-eval \
   --runs-json "$RUNS_JSON" \
-  --output-csv "$RUN3_DIR/analysis/5p_pred_eval_e3smv3_h0_summary.csv"
+  --output-summary "$RUN3_DIR/analysis/5p_pred_eval_e3smv3_h0_summary.csv"
 
 # --- Site restart comparison (Africa + Amazon) ---
 export PHASE1_RUN_DIR="$NATVEG_RUN_DIR"

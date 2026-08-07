@@ -58,6 +58,7 @@ echo "  CONFIG_TROPICAL=$CONFIG_TROPICAL"
 echo "  TRAINING_BATCH_SIZE=$TRAINING_BATCH_SIZE"
 echo "  USE_PREPROCESSED_CACHE=$USE_PREPROCESSED_CACHE"
 echo "  PREPROCESSED_CACHE_DIR=$PREPROCESSED_CACHE_DIR"
+echo "  TROPICAL_LAT_RANGE=$TROPICAL_LAT_RANGE"
 echo "  INFERENCE_EXTRA_FLAGS=$INFERENCE_EXTRA_FLAGS"
 
 if [[ -n "${PHASE2_RUN_DIR:-}" ]]; then
@@ -141,7 +142,7 @@ python scripts/ai_predictions_to_restart.py \
   --output "$PHASE2_RUN_DIR/updated_restart_phase2_tropical_5P_raw.nc" \
   --variable-list "$VARIABLE_LIST" \
   --variables-to-update labilep_vr,occlp_vr,solutionp_vr,secondp_vr,primp_vr \
-  "--tropical-lat-range=-30,30"
+  "--tropical-lat-range=${TROPICAL_LAT_RANGE}"
 
 echo "phase2_tropical E3SMv3_h0 on $(date)" > "$PHASE2_RUN_DIR/README_phase2_tropical.txt"
 

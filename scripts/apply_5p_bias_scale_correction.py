@@ -1,11 +1,18 @@
 import argparse
 import json
 import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from region_box_utils import reference_site_mask, region_mask_arrays
 
 
 P_VARIABLES_DEFAULT: List[str] = [
@@ -67,7 +74,11 @@ class RegionBox:
     name: str
 
     def contains(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
-        return (lat >= self.lat_min) & (lat <= self.lat_max) & (lon >= self.lon_min) & (lon <= self.lon_max)
+        return region_mask_arrays(
+            lat,
+            lon,
+            (self.lat_min, self.lat_max, self.lon_min, self.lon_max),
+        )
 
 
 def _region_geo_kind(region: RegionBox) -> str:
@@ -204,8 +215,8 @@ def fit_bias_scale(
             and ref_site_lon.size == w.size
         ):
             for rlon, rlat in ref_sites:
-                at_site = np.isclose(ref_site_lon, rlon, atol=ref_site_atol) & np.isclose(
-                    ref_site_lat, rlat, atol=ref_site_atol
+                at_site = reference_site_mask(
+                    ref_site_lon, ref_site_lat, rlon, rlat, atol=ref_site_atol
                 )
                 w[at_site] *= 1.0 + ref_site_extra_weight
         XtWX = X.T @ (w[:, np.newaxis] * X)
@@ -258,9 +269,7 @@ def _iterative_ref_site_projection(
     for _ in range(max_sweeps):
         improved = False
         for rlon, rlat in region_ref_sites:
-            at_site = np.isclose(ref_lon, rlon, atol=REFERENCE_SITE_ATOL) & np.isclose(
-                ref_lat, rlat, atol=REFERENCE_SITE_ATOL
-            )
+            at_site = reference_site_mask(ref_lon, ref_lat, rlon, rlat, atol=REFERENCE_SITE_ATOL)
             if not np.any(at_site):
                 continue
             idx = int(np.where(at_site)[0][0])
@@ -573,8 +582,8 @@ def compute_and_apply_corrections(
                     )
                 elif apply_ref_projection:
                     for rlon, rlat in region_ref_sites:
-                        at_site = np.isclose(ref_lon, rlon, atol=REFERENCE_SITE_ATOL) & np.isclose(
-                            ref_lat, rlat, atol=REFERENCE_SITE_ATOL
+                        at_site = reference_site_mask(
+                            ref_lon, ref_lat, rlon, rlat, atol=REFERENCE_SITE_ATOL
                         )
                         if not np.any(at_site):
                             continue

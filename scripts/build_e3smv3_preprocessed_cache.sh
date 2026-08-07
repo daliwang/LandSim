@@ -23,13 +23,13 @@ export REBUILD_PREPROCESSED_CACHE="${REBUILD_PREPROCESSED_CACHE:-1}"
 
 _build_one() {
   local phase="$1"
-  local config extra_suffix extra_args=()
+  local config extra_suffix
 
   if [[ "$phase" == "tropical" ]]; then
     config="$CONFIG_TROPICAL"
     extra_suffix="cache_build_phase2_tropical"
-    extra_args=(--tropical-lat-range -30,30)
     echo "=== Building preprocessed cache: Phase 2 tropical ==="
+    echo "  TROPICAL_LAT_RANGE=$TROPICAL_LAT_RANGE"
   else
     config="$CONFIG_GLOBAL"
     extra_suffix="cache_build_phase1_global"
@@ -40,18 +40,33 @@ _build_one() {
   echo "  PREPROCESSED_CACHE_DIR=$PREPROCESSED_CACHE_DIR"
   echo "  LOAD_WORKERS=$LOAD_WORKERS"
 
-  python train_cnp_model.py \
-    --training-config-json "$config" \
-    --variable-list "$VARIABLE_LIST" \
-    --data-paths "$DATA_PATHS" \
-    --file-pattern "$FILE_PATTERN" \
-    --use-preprocessed-cache \
-    --preprocessed-cache-dir "$PREPROCESSED_CACHE_DIR" \
-    --rebuild-preprocessed-cache \
-    --preprocessed-cache-only \
-    --output-dir cnp_results \
-    --output-dir-suffix "$extra_suffix" \
-    "${extra_args[@]}"
+  if [[ "$phase" == "tropical" ]]; then
+    python train_cnp_model.py \
+      --training-config-json "$config" \
+      --variable-list "$VARIABLE_LIST" \
+      --data-paths "$DATA_PATHS" \
+      --file-pattern "$FILE_PATTERN" \
+      --use-preprocessed-cache \
+      --preprocessed-cache-dir "$PREPROCESSED_CACHE_DIR" \
+      --rebuild-preprocessed-cache \
+      --preprocessed-cache-only \
+      --output-dir cnp_results \
+      --output-dir-suffix "$extra_suffix" \
+      --tropical-only \
+      "--tropical-lat-range=${TROPICAL_LAT_RANGE}"
+  else
+    python train_cnp_model.py \
+      --training-config-json "$config" \
+      --variable-list "$VARIABLE_LIST" \
+      --data-paths "$DATA_PATHS" \
+      --file-pattern "$FILE_PATTERN" \
+      --use-preprocessed-cache \
+      --preprocessed-cache-dir "$PREPROCESSED_CACHE_DIR" \
+      --rebuild-preprocessed-cache \
+      --preprocessed-cache-only \
+      --output-dir cnp_results \
+      --output-dir-suffix "$extra_suffix"
+  fi
 }
 
 case "$PHASE" in

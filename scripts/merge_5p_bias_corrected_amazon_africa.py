@@ -28,11 +28,17 @@ Usage (example):
 """
 
 import argparse
+import sys
 from pathlib import Path
 from typing import List
 
 import numpy as np
 import pandas as pd
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from region_box_utils import region_mask_df
 
 FIVE_P: List[str] = [
     "labilep_vr",
@@ -49,12 +55,7 @@ AFRICA_BOX = (-15.0, 15.0, 0.0, 30.0)
 
 def _region_mask(df: pd.DataFrame, box) -> np.ndarray:
     """Return mask for rows inside a given (lat_min, lat_max, lon_min, lon_max) box."""
-    lat_min, lat_max, lon_min, lon_max = box
-    if "Longitude" not in df.columns or "Latitude" not in df.columns:
-        raise ValueError("CSV must contain 'Longitude' and 'Latitude' columns.")
-    lon = df["Longitude"].to_numpy()
-    lat = df["Latitude"].to_numpy()
-    return (lat >= lat_min) & (lat <= lat_max) & (lon >= lon_min) & (lon <= lon_max)
+    return region_mask_df(df, box)
 
 
 def _per_layer_columns(df: pd.DataFrame, var: str) -> List[str]:
@@ -62,6 +63,13 @@ def _per_layer_columns(df: pd.DataFrame, var: str) -> List[str]:
     prefix = f"Y_{var}_col1_layer"
     cols = [c for c in df.columns if c.startswith(prefix)]
     return sorted(cols, key=lambda c: int(c.split("layer")[-1]))
+
+
+def _parse_box(s: str) -> tuple:
+    parts = [float(p.strip()) for p in s.split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"Box must be lat_min,lat_max,lon_min,lon_max (got {s!r})")
+    return tuple(parts)
 
 
 def main() -> None:
@@ -105,7 +113,24 @@ def main() -> None:
             "(default: _bias_corrected_amazon_africa; e.g. _bias_corrected_amazon_africa_v2 for A/B)."
         ),
     )
+    parser.add_argument(
+        "--amazon-box",
+        type=str,
+        default=None,
+        metavar="LAT_MIN,LAT_MAX,LON_MIN,LON_MAX",
+        help=f"Amazon merge box (default: {AMAZON_BOX}).",
+    )
+    parser.add_argument(
+        "--africa-box",
+        type=str,
+        default=None,
+        metavar="LAT_MIN,LAT_MAX,LON_MIN,LON_MAX",
+        help=f"Africa merge box (default: {AFRICA_BOX}).",
+    )
     args = parser.parse_args()
+
+    amazon_box = _parse_box(args.amazon_box) if args.amazon_box else AMAZON_BOX
+    africa_box = _parse_box(args.africa_box) if args.africa_box else AFRICA_BOX
 
     run_dir = Path(args.run_dir).resolve()
     pred_root = run_dir / "cnp_inference_entire_dataset" / "cnp_predictions"
@@ -128,6 +153,9 @@ def main() -> None:
     print(f"Amazon-corrected dir: {amazon_dir}")
     print(f"Africa-corrected dir: {africa_dir}")
     print(f"Output dir: {out_dir}")
+
+    print(f"Amazon box: {amazon_box}")
+    print(f"Africa box: {africa_box}")
 
     for var in FIVE_P:
         raw_path = raw_dir / f"predictions_Y_{var}.csv"
@@ -158,8 +186,8 @@ def main() -> None:
             ):
                 raise SystemExit(f"Longitude/Latitude mismatch between raw and {name} for {var}")
 
-        mask_amz = _region_mask(raw_df, AMAZON_BOX)
-        mask_afr = _region_mask(raw_df, AFRICA_BOX)
+        mask_amz = _region_mask(raw_df, amazon_box)
+        mask_afr = _region_mask(raw_df, africa_box)
 
         print(f"  Amazon rows: {int(mask_amz.sum())}")
         print(f"  Africa rows: {int(mask_afr.sum())}")
